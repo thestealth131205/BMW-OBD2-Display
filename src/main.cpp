@@ -126,20 +126,45 @@ lv_color_t mix_colors(lv_color_t c1, lv_color_t c2, float ratio) {
     return lv_color_make(r, g, b);
 }
 
-// Farbverlauf Normal -> Gelb (10% vor Warnschwelle) -> Rot (Warn- bis Alarmschwelle),
-// oberhalb der Alarmschwelle blinkt der Wert rot/schwarz
-lv_color_t computeGaugeColor(float value, float warn_val, float alert_val, bool blink_state) {
-    float pre_warn = warn_val - warn_val * 0.10f;
-    if (value < pre_warn) {
-        return currentSettings.color_primary;
-    } else if (value < warn_val) {
-        float ratio = (value - pre_warn) / (warn_val - pre_warn);
-        return mix_colors(currentSettings.color_primary, lv_palette_main(LV_PALETTE_YELLOW), ratio);
-    } else if (value < alert_val) {
-        float ratio = (value - warn_val) / (alert_val - warn_val);
-        return mix_colors(lv_palette_main(LV_PALETTE_YELLOW), lv_palette_main(LV_PALETTE_RED), ratio);
+// Farbverlauf Primärfarbe -> Gelb/Orange (ab 10% vor der Warnschwelle) -> Rot
+// (Warn- bis Alarmschwelle), oberhalb der Alarmschwelle blinkt der Wert rot/schwarz.
+// invert=true: niedrige Werte sind kritisch (z.B. Batteriespannung) - der Verlauf
+// läuft dann spiegelverkehrt (Rot am unteren Ende, Primärfarbe am oberen Ende).
+lv_color_t computeGaugeColor(float value, float warn_val, float alert_val, bool invert, bool blink_state) {
+    lv_color_t warn_color = lv_palette_main(LV_PALETTE_ORANGE);
+    lv_color_t alert_color = lv_palette_main(LV_PALETTE_RED);
+
+    if (!invert) {
+        float pre_warn = warn_val - warn_val * 0.10f;
+        if (value < pre_warn) {
+            return currentSettings.color_primary;
+        } else if (value < warn_val) {
+            float ratio = (value - pre_warn) / (warn_val - pre_warn);
+            return mix_colors(currentSettings.color_primary, warn_color, ratio);
+        } else if (value < alert_val) {
+            float ratio = (value - warn_val) / (alert_val - warn_val);
+            return mix_colors(warn_color, alert_color, ratio);
+        }
+        return blink_state ? alert_color : lv_color_black();
+    } else {
+        float pre_warn = warn_val + warn_val * 0.10f;
+        if (value > pre_warn) {
+            return currentSettings.color_primary;
+        } else if (value > warn_val) {
+            float ratio = (pre_warn - value) / (pre_warn - warn_val);
+            return mix_colors(currentSettings.color_primary, warn_color, ratio);
+        } else if (value > alert_val) {
+            float ratio = (warn_val - value) / (warn_val - alert_val);
+            return mix_colors(warn_color, alert_color, ratio);
+        }
+        return blink_state ? alert_color : lv_color_black();
     }
-    return blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
+}
+
+// Farbe einer Skala-Position (nicht des Live-Werts) für Zonen-Bögen/Skala-Striche -
+// oberhalb der Alarmschwelle immer durchgehend Rot (kein Blinken für statische Zonen).
+lv_color_t computeZoneColor(float pos, float warn_val, float alert_val, bool invert) {
+    return computeGaugeColor(pos, warn_val, alert_val, invert, true);
 }
 
 // --- LVGL FLUSH DISPLAY ---
@@ -277,7 +302,7 @@ void updateGaugeUI() {
 
     // 1. WASSERTEMPERATUR
     lv_meter_set_indicator_value(water_meter, water_needle, (int32_t)current_water_temp);
-    lv_color_t water_color = computeGaugeColor(current_water_temp, currentSettings.warn_temp, currentSettings.max_temp, blink_state);
+    lv_color_t water_color = computeGaugeColor(current_water_temp, currentSettings.warn_temp, currentSettings.max_temp, false, blink_state);
 
     lv_label_set_text_fmt(water_label, "%d°C", (int)current_water_temp);
     lv_obj_set_style_text_color(water_label, water_color, 0);
@@ -285,9 +310,7 @@ void updateGaugeUI() {
 
     // 2. BATTERIESPANNUNG
     lv_meter_set_indicator_value(bat_meter, bat_needle, (int32_t)(current_bat_voltage * 10));
-    lv_color_t bat_color = (current_bat_voltage <= currentSettings.warn_bat) ?
-                           (blink_state ? lv_palette_main(LV_PALETTE_RED) : currentSettings.color_primary) :
-                           currentSettings.color_primary;
+    lv_color_t bat_color = computeGaugeColor(current_bat_voltage, currentSettings.warn_bat, currentSettings.min_bat, true, blink_state);
 
     lv_label_set_text_fmt(bat_label, "%.1fV", current_bat_voltage);
     lv_obj_set_style_text_color(bat_label, bat_color, 0);
@@ -295,7 +318,7 @@ void updateGaugeUI() {
 
     // 3. GASPEDALSTELLUNG
     lv_meter_set_indicator_value(throttle_meter, throttle_needle, (int32_t)current_throttle_position);
-    lv_color_t throttle_color = computeGaugeColor(current_throttle_position, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct, blink_state);
+    lv_color_t throttle_color = computeGaugeColor(current_throttle_position, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct, false, blink_state);
 
     lv_label_set_text_fmt(throttle_label, "%d%%", (int)current_throttle_position);
     lv_obj_set_style_text_color(throttle_label, throttle_color, 0);
@@ -462,9 +485,71 @@ void createSettingsUI() {
     }, LV_EVENT_CLICKED, NULL);
 }
 
-// Baut ein rundes Tacho-Style-Meter mit Skalenstrichen, 3 Farbzonen
-// (Normal/Warnung/Alarm) sowie Nadel und großer digitaler Anzeige im Zentrum.
-// invert_zones=true: niedrige Werte sind kritisch (z.B. Batteriespannung).
+// Anzahl der Segmente für den weichen Farbverlauf der Zonen-Bögen (je mehr
+// Segmente, desto fließender der Übergang Primärfarbe -> Warnfarbe -> Alarmfarbe).
+static const int ZONE_ARC_SEGMENTS = 16;
+
+// Baut auf einem Meter/Scale sowohl die Zonen-Bögen ("Tacho Farben") als
+// weich ineinander übergehende Segmente, als auch die passend eingefärbten
+// Skala-Striche/Beschriftung ("Skala Striche") mittels LVGL-Farbverlauf
+// (lv_meter_add_scale_lines). Beide folgen der Primärfarbe und blenden ab
+// ca. 10% vor der Warnschwelle zur Warnfarbe (Gelb/Orange) und zwischen
+// Warn- und Limitschwelle weiter zur Alarmfarbe (Rot).
+// invert=true: niedrige Werte sind kritisch (z.B. Batteriespannung), der
+// Verlauf läuft dann spiegelverkehrt.
+void addZoneColoring(lv_obj_t *meter, lv_meter_scale_t *scale, float min_val, float max_val,
+                     float warn_val, float alert_val, bool invert) {
+    lv_color_t primary_color = currentSettings.color_primary;
+    lv_color_t warn_color = lv_palette_main(LV_PALETTE_ORANGE);
+    lv_color_t alert_color = lv_palette_main(LV_PALETTE_RED);
+
+    // Weicher Farbverlauf des Zonen-Bogens in vielen kleinen Segmenten
+    float step = (max_val - min_val) / ZONE_ARC_SEGMENTS;
+    for (int i = 0; i < ZONE_ARC_SEGMENTS; i++) {
+        float seg_start = min_val + step * i;
+        float seg_end = seg_start + step;
+        float seg_mid = (seg_start + seg_end) / 2.0f;
+        lv_color_t seg_color = computeZoneColor(seg_mid, warn_val, alert_val, invert);
+        lv_meter_indicator_t *seg = lv_meter_add_arc(meter, scale, 10, seg_color, 0);
+        lv_meter_set_indicator_start_value(meter, seg, (int32_t)seg_start);
+        lv_meter_set_indicator_end_value(meter, seg, (int32_t)seg_end);
+    }
+
+    // Skala-Striche/Beschriftung: nativer LVGL-Farbverlauf entlang der
+    // Skala-Linien
+    lv_meter_indicator_t *lines;
+    if (!invert) {
+        float pre_warn = warn_val - warn_val * 0.10f;
+        lines = lv_meter_add_scale_lines(meter, scale, primary_color, warn_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)pre_warn);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)warn_val);
+
+        lines = lv_meter_add_scale_lines(meter, scale, warn_color, alert_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)warn_val);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)alert_val);
+
+        lines = lv_meter_add_scale_lines(meter, scale, alert_color, alert_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)alert_val);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)max_val);
+    } else {
+        float pre_warn = warn_val + warn_val * 0.10f;
+        lines = lv_meter_add_scale_lines(meter, scale, alert_color, alert_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)min_val);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)alert_val);
+
+        lines = lv_meter_add_scale_lines(meter, scale, alert_color, warn_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)alert_val);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)warn_val);
+
+        lines = lv_meter_add_scale_lines(meter, scale, warn_color, primary_color, false, 0);
+        lv_meter_set_indicator_start_value(meter, lines, (int32_t)warn_val);
+        lv_meter_set_indicator_end_value(meter, lines, (int32_t)pre_warn);
+    }
+}
+
+// Baut ein rundes Tacho-Style-Meter mit Skalenstrichen, weich eingefärbten
+// Farbzonen (Normal/Warnung/Alarm) sowie Nadel und großer digitaler Anzeige
+// im Zentrum. invert_zones=true: niedrige Werte sind kritisch (z.B. Batteriespannung).
 void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float max_val,
                         float warn_val, float alert_val, bool invert_zones,
                         lv_obj_t **out_meter, lv_meter_indicator_t **out_needle, lv_obj_t **out_value_label,
@@ -478,38 +563,10 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
 
     lv_meter_scale_t *scale = lv_meter_add_scale(meter);
     lv_meter_set_scale_range(meter, scale, (int32_t)min_val, (int32_t)max_val, 270, 135);
-    lv_meter_set_scale_ticks(meter, scale, 41, 2, 8, lv_palette_darken(LV_PALETTE_GREY, 2));
-    lv_meter_set_scale_major_ticks(meter, scale, 8, 3, 14, lv_color_white(), 12);
+    lv_meter_set_scale_ticks(meter, scale, 41, 2, 8, currentSettings.color_primary);
+    lv_meter_set_scale_major_ticks(meter, scale, 8, 3, 14, currentSettings.color_primary, 12);
 
-    float zone_low_end, zone_mid_end, zone_high_end;
-    lv_color_t zone1_color, zone2_color, zone3_color;
-    if (invert_zones) {
-        zone_low_end  = alert_val;
-        zone_mid_end  = warn_val;
-        zone_high_end = max_val;
-        zone1_color = lv_palette_main(LV_PALETTE_RED);
-        zone2_color = lv_palette_main(LV_PALETTE_YELLOW);
-        zone3_color = currentSettings.color_primary;
-    } else {
-        zone_low_end  = warn_val - warn_val * 0.10f;
-        zone_mid_end  = warn_val;
-        zone_high_end = alert_val;
-        zone1_color = currentSettings.color_primary;
-        zone2_color = lv_palette_main(LV_PALETTE_YELLOW);
-        zone3_color = lv_palette_main(LV_PALETTE_RED);
-    }
-
-    lv_meter_indicator_t *zone1 = lv_meter_add_arc(meter, scale, 10, zone1_color, 0);
-    lv_meter_set_indicator_start_value(meter, zone1, (int32_t)min_val);
-    lv_meter_set_indicator_end_value(meter, zone1, (int32_t)zone_low_end);
-
-    lv_meter_indicator_t *zone2 = lv_meter_add_arc(meter, scale, 10, zone2_color, 0);
-    lv_meter_set_indicator_start_value(meter, zone2, (int32_t)zone_low_end);
-    lv_meter_set_indicator_end_value(meter, zone2, (int32_t)zone_mid_end);
-
-    lv_meter_indicator_t *zone3 = lv_meter_add_arc(meter, scale, 10, zone3_color, 0);
-    lv_meter_set_indicator_start_value(meter, zone3, (int32_t)zone_mid_end);
-    lv_meter_set_indicator_end_value(meter, zone3, (int32_t)zone_high_end);
+    addZoneColoring(meter, scale, min_val, max_val, warn_val, alert_val, invert_zones);
 
     lv_meter_indicator_t *needle = lv_meter_add_needle_line(meter, scale, 5, currentSettings.color_secondary, -10);
 
@@ -546,22 +603,10 @@ void createRpmTile(lv_obj_t *tile) {
 
     lv_meter_scale_t *scale = lv_meter_add_scale(rpm_meter);
     lv_meter_set_scale_range(rpm_meter, scale, 0, 8000, 270, 135);
-    lv_meter_set_scale_ticks(rpm_meter, scale, 41, 2, 8, lv_palette_darken(LV_PALETTE_GREY, 2));
-    lv_meter_set_scale_major_ticks(rpm_meter, scale, 8, 3, 14, lv_color_white(), 12);
+    lv_meter_set_scale_ticks(rpm_meter, scale, 41, 2, 8, currentSettings.color_primary);
+    lv_meter_set_scale_major_ticks(rpm_meter, scale, 8, 3, 14, currentSettings.color_primary, 12);
 
-    int32_t green_threshold = (int32_t)(currentSettings.rpm_limit - 200.0f);
-
-    lv_meter_indicator_t *zone1 = lv_meter_add_arc(rpm_meter, scale, 10, currentSettings.color_primary, 0);
-    lv_meter_set_indicator_start_value(rpm_meter, zone1, 0);
-    lv_meter_set_indicator_end_value(rpm_meter, zone1, (int32_t)currentSettings.rpm_warn);
-
-    lv_meter_indicator_t *zone2 = lv_meter_add_arc(rpm_meter, scale, 10, lv_palette_main(LV_PALETTE_YELLOW), 0);
-    lv_meter_set_indicator_start_value(rpm_meter, zone2, (int32_t)currentSettings.rpm_warn);
-    lv_meter_set_indicator_end_value(rpm_meter, zone2, green_threshold);
-
-    lv_meter_indicator_t *zone3 = lv_meter_add_arc(rpm_meter, scale, 10, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_meter_set_indicator_start_value(rpm_meter, zone3, green_threshold);
-    lv_meter_set_indicator_end_value(rpm_meter, zone3, 8000);
+    addZoneColoring(rpm_meter, scale, 0, 8000, currentSettings.rpm_warn, currentSettings.rpm_limit, false);
 
     rpm_needle = lv_meter_add_needle_line(rpm_meter, scale, 5, currentSettings.color_secondary, -10);
 
