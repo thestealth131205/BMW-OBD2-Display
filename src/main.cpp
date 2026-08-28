@@ -27,7 +27,7 @@
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     10 /* CS */, 11 /* SCK */, 4 /* D0 */, 5 /* D1 */, 6 /* D2 */, 7 /* D3 */
 );
-Arduino_GFX *gfx = new Arduino_SH8601(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+Arduino_SH8601 *gfx = new Arduino_SH8601(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 // --- LVGL BUFFER (Partieller Line-Buffer im SRAM) ---
 static lv_disp_draw_buf_t draw_buf;
