@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SD.h>
+#include <Preferences.h>
 #include <TJpg_Decoder.h>
 #include <lvgl.h>
 #include <driver/twai.h>
@@ -32,6 +33,8 @@ struct Settings {
     float min_bat   = 10.5f;
     float throttle_warn_pct = 70.0f;
     float throttle_max_pct  = 90.0f;
+    float rpm_warn  = 5000.0f;   // Schwelle 1: Beginn der gelben Schaltpunkt-LEDs
+    float rpm_limit = 7000.0f;   // Schwelle 2: rote LED (Redline)
     lv_color_t color_primary   = LV_COLOR_MAKE(0, 162, 255);   // Cyan/Blau
     lv_color_t color_secondary = LV_COLOR_MAKE(255, 0, 0);     // Rot (Nadel)
     char brand[16]             = "bmw";
@@ -47,6 +50,7 @@ lv_obj_t *tileview;
 lv_obj_t *tile_water;
 lv_obj_t *tile_bat;
 lv_obj_t *tile_throttle;
+lv_obj_t *tile_rpm;
 
 // Gauges
 lv_obj_t *water_meter;
@@ -64,6 +68,10 @@ lv_meter_indicator_t *throttle_needle;
 lv_obj_t *throttle_label;
 lv_obj_t *throttle_secondary_label; // zeigt Kühlmitteltemperatur
 
+lv_obj_t *rpm_meter;
+lv_meter_indicator_t *rpm_needle;
+lv_obj_t *rpm_leds[6]; // Schaltpunktanzeige statt digitaler Anzeige: 4x Gelb, 1x Gruen, 1x Rot
+
 // Diagnose UI Elemente
 lv_obj_t *dtc_status_label;
 lv_obj_t *cbs_status_label;
@@ -72,6 +80,7 @@ lv_obj_t *cbs_status_label;
 float current_water_temp = 90.0f;
 float current_bat_voltage = 12.4f;
 float current_throttle_position = 0.0f;
+float current_rpm = 800.0f; // Leerlaufdrehzahl als Platzhalter-Startwert
 char last_dtc_text[64] = "Keine Fehler im Speicher";
 char last_cbs_text[64] = "CBS Status: OK";
 
@@ -82,6 +91,24 @@ bool is_touching_center = false;
 // Touch Handling (Doppeltipp -> Fehlercode-Übersicht)
 unsigned long last_tap_time = 0;
 bool was_pressed = false;
+
+// --- STROMLOS GESPEICHERTE START-ANZEIGE (NVS/Preferences) ---
+// Index der Kachel, die nach dem Booten angezeigt wird: 0=Wasser, 1=Batterie, 2=Gaspedal, 3=Drehzahl
+Preferences prefs;
+uint8_t startup_gauge = 0;
+
+void loadStartupGauge() {
+    prefs.begin("bmw_disp", true);
+    startup_gauge = prefs.getUChar("startup_gauge", 0);
+    prefs.end();
+}
+
+void saveStartupGauge(uint8_t idx) {
+    startup_gauge = idx;
+    prefs.begin("bmw_disp", false);
+    prefs.putUChar("startup_gauge", idx);
+    prefs.end();
+}
 
 // --- TJPGDEC DRAW CALLBACK ---
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
@@ -217,7 +244,26 @@ void processCAN() {
         if (message.identifier == 0x1F0) {
             current_throttle_position = message.data[0] * (100.0f / 255.0f);
         }
+        // Drehzahl (RPM) - CAN-ID/Byte-Position sind ein Platzhalter und
+        // müssen am Fahrzeug per CAN-Sniffer/Diagnosetool verifiziert werden
+        // (analog zu 0x1D0 und 0x1F0)
+        if (message.identifier == 0x0AA) {
+            current_rpm = (message.data[2] | (message.data[3] << 8)) * 0.25f;
+        }
     }
+}
+
+// Schwellenwerte (RPM) für die 6 LEDs der Schaltpunktanzeige: 4x Gelb
+// (gleichmäßig zwischen Warnschwelle und Gruen-Schwelle verteilt), 1x Gruen
+// (200 U/min vor dem Limit) und 1x Rot (Limit/Redline).
+void computeRpmLedThresholds(float thresholds[6]) {
+    float green_threshold = currentSettings.rpm_limit - 200.0f;
+    float step = (green_threshold - currentSettings.rpm_warn) / 4.0f;
+    for (int i = 0; i < 4; i++) {
+        thresholds[i] = currentSettings.rpm_warn + step * i;
+    }
+    thresholds[4] = green_threshold;
+    thresholds[5] = currentSettings.rpm_limit;
 }
 
 // --- GAUGE UPDATE & COLOR FADE / BLINK ENGINE ---
@@ -254,6 +300,26 @@ void updateGaugeUI() {
     lv_label_set_text_fmt(throttle_label, "%d%%", (int)current_throttle_position);
     lv_obj_set_style_text_color(throttle_label, throttle_color, 0);
     lv_label_set_text_fmt(throttle_secondary_label, "%d°C", (int)current_water_temp);
+
+    // 4. DREHZAHL (Schaltpunktanzeige mit 6 LEDs statt digitaler Anzeige)
+    lv_meter_set_indicator_value(rpm_meter, rpm_needle, (int32_t)current_rpm);
+
+    float rpm_thresholds[6];
+    computeRpmLedThresholds(rpm_thresholds);
+    bool shift_active = current_rpm >= rpm_thresholds[4]; // ab Gruen-LED blinkt die gesamte Anzeige
+    lv_color_t led_off = lv_palette_darken(LV_PALETTE_GREY, 3);
+
+    for (int i = 0; i < 6; i++) {
+        bool led_on = current_rpm >= rpm_thresholds[i];
+        lv_color_t on_color = (i < 4) ? lv_palette_main(LV_PALETTE_YELLOW)
+                             : (i == 4) ? lv_palette_main(LV_PALETTE_GREEN)
+                                        : lv_palette_main(LV_PALETTE_RED);
+        lv_color_t led_color = led_off;
+        if (led_on) {
+            led_color = (shift_active && !blink_state) ? led_off : on_color;
+        }
+        lv_obj_set_style_bg_color(rpm_leds[i], led_color, 0);
+    }
 }
 
 // Färbt einen Screen/Container im dunklen Tacho-Look (schwarzer Hintergrund, weißer Text)
@@ -348,7 +414,8 @@ void createSettingsUI() {
     setDarkBg(settings_tileview);
     lv_obj_t *tile_set_water    = lv_tileview_add_tile(settings_tileview, 0, 0, LV_DIR_RIGHT);
     lv_obj_t *tile_set_bat      = lv_tileview_add_tile(settings_tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    lv_obj_t *tile_set_throttle = lv_tileview_add_tile(settings_tileview, 2, 0, LV_DIR_LEFT);
+    lv_obj_t *tile_set_throttle = lv_tileview_add_tile(settings_tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    lv_obj_t *tile_set_rpm      = lv_tileview_add_tile(settings_tileview, 3, 0, LV_DIR_LEFT);
 
     createSettingsTile(tile_set_water, "WASSER",
                         &currentSettings.warn_temp, 1.0f, 40, 130,
@@ -364,6 +431,24 @@ void createSettingsUI() {
                         &currentSettings.throttle_warn_pct, 1.0f, 0, 100,
                         &currentSettings.throttle_max_pct, 1.0f, 0, 100,
                         "%.0f%%");
+
+    createSettingsTile(tile_set_rpm, "DREHZAHL",
+                        &currentSettings.rpm_warn, 100.0f, 3000, 7900,
+                        &currentSettings.rpm_limit, 100.0f, 4000, 8500,
+                        "%.0f");
+
+    // Dropdown zur Auswahl der Start-Anzeige liegt als Overlay über dem
+    // Tileview (bleibt auf allen Kacheln sichtbar/klickbar) und speichert
+    // die Auswahl sofort stromlos in den Preferences (NVS).
+    lv_obj_t *dd_startup = lv_dropdown_create(settings_screen);
+    lv_dropdown_set_options(dd_startup, "Start: Wasser\nStart: Batterie\nStart: Gaspedal\nStart: Drehzahl");
+    lv_dropdown_set_selected(dd_startup, startup_gauge);
+    lv_obj_set_width(dd_startup, 220);
+    lv_obj_align(dd_startup, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_add_event_cb(dd_startup, [](lv_event_t *e) {
+        lv_obj_t *dd = lv_event_get_target(e);
+        saveStartupGauge((uint8_t)lv_dropdown_get_selected(dd));
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Speichern-Button liegt als Overlay über dem Tileview und bleibt auf
     // allen Kacheln sichtbar/klickbar.
@@ -386,14 +471,10 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
                         lv_obj_t **out_secondary_label) {
     setDarkBg(tile);
 
-    lv_obj_t *title_label = lv_label_create(tile);
-    lv_label_set_text(title_label, title);
-    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 30);
-
     lv_obj_t *meter = lv_meter_create(tile);
     setDarkBg(meter);
     lv_obj_center(meter);
-    lv_obj_set_size(meter, 420, 420);
+    lv_obj_set_size(meter, 450, 450);
 
     lv_meter_scale_t *scale = lv_meter_add_scale(meter);
     lv_meter_set_scale_range(meter, scale, (int32_t)min_val, (int32_t)max_val, 270, 135);
@@ -435,11 +516,15 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
     lv_obj_t *value_label = lv_label_create(tile);
     lv_obj_set_style_text_font(value_label, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(value_label, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_obj_align(value_label, LV_ALIGN_CENTER, 0, 90);
+    lv_obj_align(value_label, LV_ALIGN_CENTER, 0, 85);
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, title);
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, 130);
 
     lv_obj_t *secondary_label = lv_label_create(tile);
     lv_obj_set_style_text_color(secondary_label, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_align(secondary_label, LV_ALIGN_CENTER, 0, 140);
+    lv_obj_align(secondary_label, LV_ALIGN_CENTER, 0, 160);
 
     *out_meter = meter;
     *out_needle = needle;
@@ -447,7 +532,57 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
     *out_secondary_label = secondary_label;
 }
 
-// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL) ---
+// Baut die Drehzahl-Kachel: rundes Tacho-Meter (0-8000 U/min) mit Nadel und
+// Farbzonen, darunter statt einer digitalen Anzeige 6 LED-Punkte als
+// Schaltpunktanzeige (ausgegraut, dann 4x Gelb, 1x Gruen, 1x Rot -
+// siehe computeRpmLedThresholds()).
+void createRpmTile(lv_obj_t *tile) {
+    setDarkBg(tile);
+
+    rpm_meter = lv_meter_create(tile);
+    setDarkBg(rpm_meter);
+    lv_obj_center(rpm_meter);
+    lv_obj_set_size(rpm_meter, 450, 450);
+
+    lv_meter_scale_t *scale = lv_meter_add_scale(rpm_meter);
+    lv_meter_set_scale_range(rpm_meter, scale, 0, 8000, 270, 135);
+    lv_meter_set_scale_ticks(rpm_meter, scale, 41, 2, 8, lv_palette_darken(LV_PALETTE_GREY, 2));
+    lv_meter_set_scale_major_ticks(rpm_meter, scale, 8, 3, 14, lv_color_white(), 12);
+
+    int32_t green_threshold = (int32_t)(currentSettings.rpm_limit - 200.0f);
+
+    lv_meter_indicator_t *zone1 = lv_meter_add_arc(rpm_meter, scale, 10, currentSettings.color_primary, 0);
+    lv_meter_set_indicator_start_value(rpm_meter, zone1, 0);
+    lv_meter_set_indicator_end_value(rpm_meter, zone1, (int32_t)currentSettings.rpm_warn);
+
+    lv_meter_indicator_t *zone2 = lv_meter_add_arc(rpm_meter, scale, 10, lv_palette_main(LV_PALETTE_YELLOW), 0);
+    lv_meter_set_indicator_start_value(rpm_meter, zone2, (int32_t)currentSettings.rpm_warn);
+    lv_meter_set_indicator_end_value(rpm_meter, zone2, green_threshold);
+
+    lv_meter_indicator_t *zone3 = lv_meter_add_arc(rpm_meter, scale, 10, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_meter_set_indicator_start_value(rpm_meter, zone3, green_threshold);
+    lv_meter_set_indicator_end_value(rpm_meter, zone3, 8000);
+
+    rpm_needle = lv_meter_add_needle_line(rpm_meter, scale, 5, currentSettings.color_secondary, -10);
+
+    // 6 LED-Punkte anstelle der digitalen Anzeige
+    const int led_x[6] = {-125, -75, -25, 25, 75, 125};
+    for (int i = 0; i < 6; i++) {
+        rpm_leds[i] = lv_obj_create(tile);
+        lv_obj_set_size(rpm_leds[i], 40, 40);
+        lv_obj_set_style_radius(rpm_leds[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(rpm_leds[i], 0, 0);
+        lv_obj_set_style_bg_color(rpm_leds[i], lv_palette_darken(LV_PALETTE_GREY, 3), 0);
+        lv_obj_set_style_bg_opa(rpm_leds[i], LV_OPA_COVER, 0);
+        lv_obj_align(rpm_leds[i], LV_ALIGN_CENTER, led_x[i], 85);
+    }
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, "DREHZAHL");
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, 130);
+}
+
+// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL / DREHZAHL) ---
 void createGaugesUI() {
     main_screen = lv_obj_create(NULL);
     setDarkBg(main_screen);
@@ -456,7 +591,8 @@ void createGaugesUI() {
     setDarkBg(tileview);
     tile_water    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
     tile_bat      = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_throttle = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT);
+    tile_throttle = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_rpm      = lv_tileview_add_tile(tileview, 3, 0, LV_DIR_LEFT);
 
     // TILE 1: WASSERTEMP (40-130 °C, Warnung ab warn_temp, Alarm ab max_temp)
     createStyledMeter(tile_water, "WASSER", 40, 130, currentSettings.warn_temp, currentSettings.max_temp,
@@ -469,6 +605,12 @@ void createGaugesUI() {
     // TILE 3: GASPEDALSTELLUNG (0-100 %)
     createStyledMeter(tile_throttle, "GASPEDAL", 0, 100, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct,
                        false, &throttle_meter, &throttle_needle, &throttle_label, &throttle_secondary_label);
+
+    // TILE 4: DREHZAHL (0-8000 U/min, Schaltpunktanzeige statt digitaler Anzeige)
+    createRpmTile(tile_rpm);
+
+    // Zuletzt in den Einstellungen gewählte Start-Kachel anzeigen (stromlos gespeichert)
+    lv_obj_set_tile_id(tileview, startup_gauge, 0, LV_ANIM_OFF);
 
     lv_scr_load(main_screen);
 }
@@ -595,6 +737,7 @@ void setup() {
     lv_disp_drv_register(&disp_drv);
 
     // 3. UI & CAN aufbauen
+    loadStartupGauge();
     createSettingsUI();
     createGaugesUI();
     createDtcUI();

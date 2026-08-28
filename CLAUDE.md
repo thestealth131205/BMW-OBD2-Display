@@ -3,10 +3,11 @@
 ## Projektübersicht
 
 ESP32-C6-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
-Zeigt Kühlmitteltemperatur, Batteriespannung und Gaspedalstellung als analoge
-Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm) auf einem
-runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose
-(DTCs lesen/löschen) und BMW CBS-Service-Reset.
+Zeigt Kühlmitteltemperatur, Batteriespannung, Gaspedalstellung als analoge
+Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm) sowie
+Drehzahl als Schaltpunktanzeige (6 LEDs) auf einem runden 466×466
+AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose (DTCs lesen/löschen)
+und BMW CBS-Service-Reset.
 
 ## Hardware
 
@@ -80,16 +81,25 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 
 ## UI / Anzeige-Logik
 
-- **Tileview mit 3 Kacheln** (horizontales Wischen), erzeugt über den gemeinsamen
-  Helper `createStyledMeter()` (Skalenstriche, 3 Farbzonen-Bögen, Nadel, große
-  digitale Anzeige im Zentrum, kleines Sekundär-Label darunter – Tacho-Style,
-  dunkler Hintergrund via `setDarkBg()`):
+- **Tileview mit 4 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
+  erzeugt über den gemeinsamen Helper `createStyledMeter()` (Skalenstriche,
+  3 Farbzonen-Bögen, Nadel, große digitale Anzeige im Zentrum, kleines
+  Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`):
   1. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C),
      Sekundärwert darunter: aktuelle Batteriespannung
   2. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V),
      Sekundärwert darunter: aktuelle Kühlmitteltemperatur
   3. **Gaspedal-Kachel** – Rundinstrument Gaspedalstellung (0–100 %),
      Sekundärwert darunter: aktuelle Kühlmitteltemperatur
+  4. **Drehzahl-Kachel** (`createRpmTile()`) – Rundinstrument 0–8000 U/min mit
+     Nadel/Farbzonen, aber **anstelle der digitalen Anzeige eine
+     Schaltpunktanzeige aus 6 LED-Punkten** (`rpm_leds[6]`): ausgegraut
+     unterhalb der Warnschwelle (Standard 5000 U/min), dann 4 gelbe LEDs
+     gleichmäßig verteilt bis zur Grün-Schwelle (Limit − 200 U/min, Standard
+     6800), 1 grüne LED ab dieser Schwelle und 1 rote LED ab der
+     Limit-/Redline-Schwelle (Standard 7000 U/min) – Logik in
+     `computeRpmLedThresholds()`. Sobald die grüne LED leuchtet, blinken alle
+     aktiven LEDs im 250-ms-Takt gemeinsam (Schaltpunkt-Warnblinken)
 - **Fehlercode-Übersicht** – eigener Screen (per Doppeltipp erreichbar), DTCs
   auslesen/löschen, CBS-Öl-Service-Reset, „Zurück"-Button
 - **Farbverlauf der Nadel/Anzeige:** Primärfarbe → Gelb (10 % vor Warnschwelle) →
@@ -97,11 +107,19 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   (250 ms) – Logik zentral in `computeGaugeColor()`. Bei der Batterie ist die Richtung
   umgekehrt (niedrige Spannung = kritisch, `invert_zones=true` in `createStyledMeter()`)
 - **3 Sekunden Touch in der Displaymitte** öffnet den Einstellungs-Screen
-- **Einstellungs-Screen** – eigenes Tileview mit 3 Kacheln (Wasser/Batterie/Gaspedal),
-  je Kachel per +/- Buttons verstellbar: **Warnschwelle** (Schwelle 1) und
-  **Limit/Alarmschwelle** (Schwelle 2), über `createSettingsTile()` /
-  `createThresholdRow()` gebaut. „Speichern & Beenden"-Button liegt als Overlay
-  über dem Tileview und schreibt direkt in `currentSettings`
+- **Einstellungs-Screen** – eigenes Tileview mit 4 Kacheln
+  (Wasser/Batterie/Gaspedal/Drehzahl), je Kachel per +/- Buttons verstellbar:
+  **Warnschwelle** (Schwelle 1) und **Limit/Alarmschwelle** (Schwelle 2), über
+  `createSettingsTile()` / `createThresholdRow()` gebaut. Bei der Drehzahl
+  entsprechen diese Schwellen `rpm_warn` (Start der gelben LEDs) und
+  `rpm_limit` (rote LED/Redline); die grüne LED liegt automatisch 200 U/min
+  vor `rpm_limit`. Zusätzlich ein **Dropdown oben** (Overlay über dem
+  Tileview) zur Auswahl der **Start-Anzeige**
+  (Wasser/Batterie/Gaspedal/Drehzahl), die sofort via `saveStartupGauge()` in
+  NVS/`Preferences` (Namespace `bmw_disp`, Key `startup_gauge`) stromlos
+  gespeichert und beim Boot über `loadStartupGauge()` gelesen wird.
+  „Speichern & Beenden"-Button liegt als Overlay über dem Tileview und
+  schreibt direkt in `currentSettings`
 - **Doppeltipp** auf dem Hauptbildschirm öffnet die Fehlercode-Übersicht
 - **Boot-Animation** aus JPEG-Frames von der SD-Karte läuft vor der LVGL-Initialisierung
 
@@ -116,6 +134,8 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 - Gaspedalstellung wird aus einem PT-CAN-Broadcast (ID `0x1F0`, Byte 0 linear auf 0–100 %
   skaliert) gelesen – **Platzhalter-ID**, muss am Fahrzeug per CAN-Sniffer/Diagnosetool
   verifiziert werden
+- Drehzahl wird aus einem PT-CAN-Broadcast (ID `0x0AA`, Byte 2–3 little-endian × 0.25 = U/min)
+  gelesen – **Platzhalter-ID**, muss am Fahrzeug per CAN-Sniffer/Diagnosetool verifiziert werden
 
 ## Bekannte Einschränkungen / offene Punkte
 
@@ -123,11 +143,15 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   per CAN-Sniffer/Diagnosetool verifiziert werden
 - CAN-ID `0x1F0` für die Gaspedalstellung ist ebenfalls ein Startwert/Platzhalter
   und muss am Fahrzeug verifiziert werden
+- CAN-ID `0x0AA` für die Drehzahl ist ebenfalls ein Startwert/Platzhalter und muss
+  am Fahrzeug verifiziert werden
 - Batteriespannung (`current_bat_voltage`) wird aktuell noch nicht per CAN aktualisiert
   (nur Platzhalter-Initialwert) – Auswertung in `processCAN()` ergänzen
 - DTC-Antworten werden nur gesendet, aber die Antwort-Frames (`0x7E8`) werden noch
   nicht ausgewertet/decodiert (nur "Request gesendet" wird angezeigt)
-- Einstellungs-Screen speichert aktuell keine Werte dauerhaft (kein NVS/Preferences)
+- Einstellungs-Screen speichert Schwellenwerte (Warnung/Limit) und Farben weiterhin
+  nicht dauerhaft (kein NVS/Preferences) – nur die Start-Anzeige-Auswahl wird
+  aktuell per `Preferences` persistiert
 - CO5300/QSPI-Pinbelegung und Touch-Treiber sind board-spezifisch für das
   Waveshare-1.43"-AMOLED-Modul – bei anderer Platine anpassen
 

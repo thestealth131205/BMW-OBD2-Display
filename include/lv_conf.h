@@ -26,6 +26,7 @@
 #define LV_USE_TILEVIEW   1
 #define LV_USE_LABEL      1
 #define LV_USE_BTN        1
+#define LV_USE_DROPDOWN   1
 
 /* Standard-Font für Labels/Buttons */
 #define LV_FONT_MONTSERRAT_14 1
