@@ -32,6 +32,23 @@ jobs:
       - name: Build firmware
         run: pio run
 
+      - name: Install esptool
+        run: pip install --upgrade esptool
+
+      - name: Merge into single flashable image
+        run: |
+          BUILD_DIR=.pio/build/esp32-c6-devkitc-1
+          BOOT_APP0="$(find ~/.platformio/packages/framework-arduinoespressif32 -name boot_app0.bin | head -n1)"
+          ARGS=(--chip esp32c6 merge_bin -o "$BUILD_DIR/firmware-merged.bin"
+                --flash_mode keep --flash_freq keep --flash_size keep
+                0x0 "$BUILD_DIR/bootloader.bin"
+                0x8000 "$BUILD_DIR/partitions.bin"
+                0x10000 "$BUILD_DIR/firmware.bin")
+          if [ -n "$BOOT_APP0" ]; then
+            ARGS+=(0xe000 "$BOOT_APP0")
+          fi
+          esptool "${ARGS[@]}"
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
@@ -39,6 +56,7 @@ jobs:
           path: |
             .pio/build/esp32-c6-devkitc-1/firmware.bin
             .pio/build/esp32-c6-devkitc-1/firmware.elf
+            .pio/build/esp32-c6-devkitc-1/firmware-merged.bin
 
       - name: Create/Update Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -50,3 +68,4 @@ jobs:
           files: |
             .pio/build/esp32-c6-devkitc-1/firmware.bin
             .pio/build/esp32-c6-devkitc-1/firmware.elf
+            .pio/build/esp32-c6-devkitc-1/firmware-merged.bin

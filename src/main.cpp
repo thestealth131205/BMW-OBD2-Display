@@ -1029,14 +1029,19 @@ void checkDoubleTap() {
 // --- SETUP & MAIN LOOP ---
 void setup() {
     Serial.begin(115200);
+    delay(2500); // USB-CDC enumerieren lassen, damit die ersten Logs ankommen
+    Serial.println("\n[BOOT] setup() start");
 
     // I2C fuer Touch UND IO-Expander frueh starten. Der TCA9554 muss VOR der
     // Display-Init IO6 (Power-Hold) auf HIGH ziehen, sonst schaltet sich das
     // Board nach dem Einschalt-Impuls wieder aus (Bootloop).
     Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
+    Serial.println("[BOOT] Wire.begin ok");
     initIoExpander();
+    Serial.println("[BOOT] initIoExpander ok");
 
     gfx->begin(40000000); // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
+    Serial.println("[BOOT] gfx->begin ok");
     // Der Waveshare-1.43"-SH8601 benoetigt zusaetzlich das SPI-Mode-Control-
     // Kommando 0xC4=0x80, das die native Arduino_GFX-Init-Sequenz nicht sendet.
     // Ohne dieses Kommando interpretiert das Panel die QSPI-Daten nicht und
@@ -1046,15 +1051,21 @@ void setup() {
     bus->endWrite();
     gfx->setBrightness(255);
     gfx->fillScreen(RGB565_BLACK);
+    Serial.println("[BOOT] display init ok");
 
     SPI.begin();
 
     // 1. Boot-Animation abspielen (nur wenn SD-Karte gesteckt ist)
+    Serial.println("[BOOT] SD.begin ...");
     if (SD.begin(SD_CS_PIN)) {
+        Serial.println("[BOOT] SD ok, playing animation");
         playBootAnimation(currentSettings.brand);
+    } else {
+        Serial.println("[BOOT] SD not present, skipping");
     }
 
     // 2. LVGL initialisieren
+    Serial.println("[BOOT] lv_init ...");
     lv_init();
     lv_disp_draw_buf_init(&draw_buf, buf1, NULL, DISPLAY_WIDTH * 30);
 
@@ -1073,12 +1084,15 @@ void setup() {
     lv_indev_drv_register(&indev_drv);
 
     // 3. UI & CAN aufbauen
+    Serial.println("[BOOT] building UI ...");
     loadStartupGauge();
     createSettingsUI();
     createGaugesUI();
     lv_scr_load(main_screen);
     createDtcUI();
+    Serial.println("[BOOT] UI ok, initCAN ...");
     initCAN();
+    Serial.println("[BOOT] setup() done");
 }
 
 void loop() {
