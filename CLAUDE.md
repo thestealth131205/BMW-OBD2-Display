@@ -18,8 +18,15 @@ auf alle 5 Anzeigen aus.
 | Mikrocontroller | ESP32-C6 (Waveshare 1.43" AMOLED Touch) | – |
 | Display | SH8601 AMOLED, 466×466, rund | QSPI (CS=GPIO10, SCK=GPIO11, D0=GPIO4, D1=GPIO5, D2=GPIO6, D3=GPIO7, RST=GPIO3) |
 | Touch | kapazitiv, I2C-Registerprotokoll (Adresse 0x38), LVGL Input-Device | I2C (SCL=GPIO8, SDA=GPIO18) |
+| IO-Expander | TCA9554 (Adresse 0x20), IO6=Power-Hold-Latch, IO7=Enable | I2C (gleicher Bus wie Touch) |
 | CAN-Bus | eingebauter ESP32-C6 TWAI-Controller + externer CAN-Transceiver | TX=GPIO19, RX=GPIO20 |
-| microSD | Boot-Animation (JPEG-Frames) | SPI (CS=GPIO13) |
+| microSD | Boot-Animation (JPEG-Frames), teilt QSPI-Bus mit Display | SPI (CS=GPIO15, SCK=11/MOSI=D0=4/MISO=D1=5) |
+
+**Wichtig (Bootloop-Ursache):** Der TCA9554-IO-Expander muss im `setup()` VOR
+der Display-Init IO6 (Power-Hold) und IO7 auf HIGH ziehen (`initIoExpander()`),
+sonst schaltet sich das Board nach dem Einschalt-Impuls selbst wieder aus
+(Bootloop, grüne LED flackert rhythmisch). Verifiziert gegen das offizielle
+Waveshare-Factory-SDK (`Tca9554_Init()`).
 
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver

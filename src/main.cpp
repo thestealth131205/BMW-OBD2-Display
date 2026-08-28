@@ -12,13 +12,24 @@
 // --- HARDWARE & DISPLAY CONFIGURATION (Waveshare 1.43" AMOLED ESP32-C6) ---
 // Pinbelegung laut offiziellem Waveshare-SDK
 // (waveshareteam/ESP32-C6-Touch-AMOLED-1.43, user_config.h) verifiziert.
-#define SD_CS_PIN       13
+// SD-Karte teilt sich den QSPI-Bus mit dem Display (SCK=11, MOSI=D0=4,
+// MISO=D1=5), nur die CS-Leitung ist eigen (GPIO15) – laut offiziellem
+// Waveshare-SDK (sdcard_bsp.h: cs = 15, host = display SPI2_HOST).
+#define SD_CS_PIN       15
 #define TWAI_TX_PIN     GPIO_NUM_19
 #define TWAI_RX_PIN     GPIO_NUM_20
 
 #define TOUCH_SCL_PIN   8
 #define TOUCH_SDA_PIN   18
 #define TOUCH_I2C_ADDR  0x38
+
+// TCA9554 I2C-IO-Expander (Adresse 0x20). Auf der Waveshare-1.43"-Platine
+// haengen an IO6 der Power-Hold-Latch (haelt das Board nach dem Einschalten
+// unter Strom) und an IO7 eine weitere Enable-Leitung. Werden beide nach dem
+// Boot nicht auf HIGH gezogen, schaltet sich das Board nach dem Einschalt-
+// Impuls selbst wieder aus -> Bootloop. Das offizielle SDK setzt sie in
+// Tca9554_Init(). Register: 0x01 = Output-Port, 0x03 = Konfiguration/Richtung.
+#define IO_EXPANDER_ADDR 0x20
 
 #define DISPLAY_WIDTH   466
 #define DISPLAY_HEIGHT  466
@@ -125,6 +136,22 @@ void saveStartupGauge(uint8_t idx) {
     prefs.begin("bmw_disp", false);
     prefs.putUChar("startup_gauge", idx);
     prefs.end();
+}
+
+// --- TCA9554 IO-EXPANDER: POWER-HOLD (IO6) + IO7 AUF HIGH ---
+// Muss VOR der Display-Init laufen, damit das Board unter Strom bleibt.
+void initIoExpander() {
+    // Output-Latch zuerst setzen (IO6+IO7 = HIGH), dann Richtung auf Ausgang,
+    // um einen kurzen LOW-Glitch beim Umschalten zu vermeiden.
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(0x01);       // Output Port Register
+    Wire.write(0xC0);       // Bit6 + Bit7 = HIGH
+    Wire.endTransmission();
+
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(0x03);       // Configuration Register (1 = Eingang, 0 = Ausgang)
+    Wire.write(0x3F);       // IO6 + IO7 als Ausgang, Rest Eingang
+    Wire.endTransmission();
 }
 
 // --- I2C TOUCH TREIBER (FT-kompatibler Touch-Controller, Adresse 0x38) ---
@@ -1003,7 +1030,20 @@ void checkDoubleTap() {
 void setup() {
     Serial.begin(115200);
 
-    gfx->begin();
+    // I2C fuer Touch UND IO-Expander frueh starten. Der TCA9554 muss VOR der
+    // Display-Init IO6 (Power-Hold) auf HIGH ziehen, sonst schaltet sich das
+    // Board nach dem Einschalt-Impuls wieder aus (Bootloop).
+    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
+    initIoExpander();
+
+    gfx->begin(40000000); // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
+    // Der Waveshare-1.43"-SH8601 benoetigt zusaetzlich das SPI-Mode-Control-
+    // Kommando 0xC4=0x80, das die native Arduino_GFX-Init-Sequenz nicht sendet.
+    // Ohne dieses Kommando interpretiert das Panel die QSPI-Daten nicht und
+    // bleibt schwarz (Init-Sequenz aus Waveshare display_bsp.cpp verifiziert).
+    bus->beginWrite();
+    bus->writeC8D8(0xC4, 0x80);
+    bus->endWrite();
     gfx->setBrightness(255);
     gfx->fillScreen(RGB565_BLACK);
 
@@ -1026,7 +1066,6 @@ void setup() {
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
-    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
