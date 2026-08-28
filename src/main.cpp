@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SD.h>
-#include <TJpgDec.h>
+#include <TJpg_Decoder.h>
 #include <lvgl.h>
 #include <driver/twai.h>
 #include <Arduino_GFX_Library.h>
