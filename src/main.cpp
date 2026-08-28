@@ -1,25 +1,34 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <SD.h>
 #include <Preferences.h>
 #include <TJpg_Decoder.h>
 #include <lvgl.h>
 #include <driver/twai.h>
 #include <Arduino_GFX_Library.h>
+#include <Arduino_SH8601.h>
+#include <math.h>
 
 // --- HARDWARE & DISPLAY CONFIGURATION (Waveshare 1.43" AMOLED ESP32-C6) ---
+// Pinbelegung laut offiziellem Waveshare-SDK
+// (waveshareteam/ESP32-C6-Touch-AMOLED-1.43, user_config.h) verifiziert.
 #define SD_CS_PIN       13
 #define TWAI_TX_PIN     GPIO_NUM_19
 #define TWAI_RX_PIN     GPIO_NUM_20
 
+#define TOUCH_SCL_PIN   8
+#define TOUCH_SDA_PIN   18
+#define TOUCH_I2C_ADDR  0x38
+
 #define DISPLAY_WIDTH   466
 #define DISPLAY_HEIGHT  466
 
-// Display-Bus setup für CO5300 QSPI
+// Display-Bus setup für SH8601 QSPI
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
-    6 /* CS */, 10 /* SCK */, 0 /* D0 */, 1 /* D1 */, 2 /* D2 */, 3 /* D3 */
+    10 /* CS */, 11 /* SCK */, 4 /* D0 */, 5 /* D1 */, 6 /* D2 */, 7 /* D3 */
 );
-Arduino_GFX *gfx = new Arduino_CO5300(bus, 7 /* RST */, 0 /* Rotation */, true /* IPS */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+Arduino_GFX *gfx = new Arduino_SH8601(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 // --- LVGL BUFFER (Partieller Line-Buffer im SRAM) ---
 static lv_disp_draw_buf_t draw_buf;
@@ -51,6 +60,7 @@ lv_obj_t *tile_water;
 lv_obj_t *tile_bat;
 lv_obj_t *tile_throttle;
 lv_obj_t *tile_rpm;
+lv_obj_t *tile_gforce;
 
 // Gauges
 lv_obj_t *water_meter;
@@ -72,6 +82,10 @@ lv_obj_t *rpm_meter;
 lv_meter_indicator_t *rpm_needle;
 lv_obj_t *rpm_leds[6]; // Schaltpunktanzeige statt digitaler Anzeige: 4x Gelb, 1x Gruen, 1x Rot
 
+lv_obj_t *gforce_blob;         // Punkt, der Richtung/Betrag der G-Kraft anzeigt (Sekundärfarbe)
+lv_obj_t *gforce_value_label;  // Betrag in G (z.B. "0.56G")
+lv_obj_t *gforce_speed_label;  // Geschwindigkeit (z.B. "80 KM/H")
+
 // Diagnose UI Elemente
 lv_obj_t *dtc_status_label;
 lv_obj_t *cbs_status_label;
@@ -82,6 +96,9 @@ float current_water_temp = 105.0f;
 float current_bat_voltage = 12.6f;
 float current_throttle_position = 0.0f;
 float current_rpm = 800.0f; // Leerlaufdrehzahl als Platzhalter-Startwert
+float current_gforce_x = 0.0f;   // seitliche Beschleunigung (links/rechts), in g
+float current_gforce_y = 0.0f;   // Längsbeschleunigung (Bremsen/Beschleunigen), in g
+float current_speed_kmh = 0.0f;  // Fahrzeuggeschwindigkeit
 char last_dtc_text[64] = "Keine Fehler im Speicher";
 char last_cbs_text[64] = "CBS Status: OK";
 
@@ -94,7 +111,7 @@ unsigned long last_tap_time = 0;
 bool was_pressed = false;
 
 // --- STROMLOS GESPEICHERTE START-ANZEIGE (NVS/Preferences) ---
-// Index der Kachel, die nach dem Booten angezeigt wird: 0=Wasser, 1=Batterie, 2=Gaspedal, 3=Drehzahl
+// Index der Kachel, die nach dem Booten angezeigt wird: 0=Wasser, 1=Batterie, 2=Gaspedal, 3=Drehzahl, 4=G-Force
 Preferences prefs;
 uint8_t startup_gauge = 0;
 
@@ -109,6 +126,34 @@ void saveStartupGauge(uint8_t idx) {
     prefs.begin("bmw_disp", false);
     prefs.putUChar("startup_gauge", idx);
     prefs.end();
+}
+
+// --- I2C TOUCH TREIBER (FT-kompatibler Touch-Controller, Adresse 0x38) ---
+// Registerprotokoll laut offiziellem Waveshare-SDK
+// (display_bsp.cpp: Get_TouchCoords) verifiziert: Register 0x02 liefert
+// 5 Bytes [Anzahl Touchpunkte, X_high(4bit)|X_low, Y_high(4bit)|Y_low].
+bool readTouch(uint16_t &x, uint16_t &y) {
+    uint8_t data[5];
+    Wire.beginTransmission(TOUCH_I2C_ADDR);
+    Wire.write(0x02);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)TOUCH_I2C_ADDR, 5) != 5) return false;
+    for (int i = 0; i < 5; i++) data[i] = Wire.read();
+    if (data[0] != 1) return false;
+    x = ((uint16_t)(data[1] & 0x0F) << 8) | data[2];
+    y = ((uint16_t)(data[3] & 0x0F) << 8) | data[4];
+    return true;
+}
+
+void touchpadReadCb(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
+    uint16_t x, y;
+    if (readTouch(x, y)) {
+        data->state = LV_INDEV_STATE_PR;
+        data->point.x = x;
+        data->point.y = y;
+    } else {
+        data->state = LV_INDEV_STATE_REL;
+    }
 }
 
 // --- TJPGDEC DRAW CALLBACK ---
@@ -282,6 +327,14 @@ void processCAN() {
         if (message.identifier == 0x0AA) {
             current_rpm = (message.data[2] | (message.data[3] << 8)) * 0.25f;
         }
+        // Quer-/Längsbeschleunigung (G-Kraft) sowie Geschwindigkeit - CAN-ID/
+        // Byte-Position sind ein Platzhalter und müssen am Fahrzeug per
+        // CAN-Sniffer/Diagnosetool verifiziert werden (analog zu 0x1D0/0x1F0/0x0AA)
+        if (message.identifier == 0x0C4) {
+            current_gforce_x = (int8_t)message.data[0] * 0.01f;
+            current_gforce_y = (int8_t)message.data[1] * 0.01f;
+            current_speed_kmh = (message.data[2] | (message.data[3] << 8)) * 0.1f;
+        }
     }
 }
 
@@ -350,6 +403,21 @@ void updateGaugeUI() {
         }
         lv_obj_set_style_bg_color(rpm_leds[i], led_color, 0);
     }
+
+    // 5. G-KRAFT (Punkt im Polar-Raster + Betrag/Geschwindigkeit als Text)
+    float gforce_mag = sqrtf(current_gforce_x * current_gforce_x + current_gforce_y * current_gforce_y);
+    const float gforce_scale = 100.0f;  // Pixel pro g
+    const float gforce_max_offset = 150.0f; // Anzeige-Radius entspricht ca. 1.5g
+    float blob_x = current_gforce_x * gforce_scale;
+    float blob_y = -current_gforce_y * gforce_scale; // oben = Beschleunigung, unten = Bremsen
+    float mag_px = sqrtf(blob_x * blob_x + blob_y * blob_y);
+    if (mag_px > gforce_max_offset && mag_px > 0.0f) {
+        blob_x = blob_x * gforce_max_offset / mag_px;
+        blob_y = blob_y * gforce_max_offset / mag_px;
+    }
+    lv_obj_align(gforce_blob, LV_ALIGN_CENTER, (int)blob_x, (int)blob_y);
+    lv_label_set_text_fmt(gforce_value_label, "%.2fG", gforce_mag);
+    lv_label_set_text_fmt(gforce_speed_label, "%d KM/H", (int)current_speed_kmh);
 }
 
 // Färbt einen Screen/Container im dunklen Tacho-Look (schwarzer Hintergrund, weißer Text)
@@ -435,6 +503,100 @@ void createSettingsTile(lv_obj_t *tile, const char *title,
                         0, 35, 40);
 }
 
+// --- FARBAUSWAHL (PRIMÄR-/SEKUNDÄRFARBE) ---
+
+// Vorwärtsdeklaration, da rebuildGaugesUI() (unten) createGaugesUI() aufruft,
+// dessen Definition erst weiter unten in der Datei folgt.
+void createGaugesUI();
+
+// Baut den Haupt-Gauge-Screen (alle 5 Kacheln) neu auf, z.B. nach einem
+// Farbwechsel in den Einstellungen - der aktuell aktive Screen (i.d.R. der
+// Einstellungs-Screen) bleibt dabei unverändert sichtbar.
+void rebuildGaugesUI() {
+    lv_obj_t *old_main_screen = main_screen;
+    createGaugesUI();
+    lv_obj_del(old_main_screen);
+}
+
+struct ColorOption {
+    const char *name;
+    lv_color_t color;
+};
+
+// Farbpalette für die Primär-/Sekundärfarbe-Auswahl in den Einstellungen
+// (inkl. Neongelb für beide Auswahlspalten).
+static const ColorOption COLOR_PALETTE[] = {
+    {"Blau",     LV_COLOR_MAKE(0, 162, 255)},
+    {"Rot",      LV_COLOR_MAKE(255, 0, 0)},
+    {"Gruen",    LV_COLOR_MAKE(0, 230, 64)},
+    {"Gelb",     LV_COLOR_MAKE(255, 214, 0)},
+    {"Neongelb", LV_COLOR_MAKE(224, 255, 0)},
+    {"Orange",   LV_COLOR_MAKE(255, 140, 0)},
+    {"Pink",     LV_COLOR_MAKE(255, 0, 144)},
+    {"Lila",     LV_COLOR_MAKE(170, 0, 255)},
+    {"Cyan",     LV_COLOR_MAKE(0, 255, 220)},
+    {"Weiss",    LV_COLOR_MAKE(255, 255, 255)},
+};
+static const int COLOR_PALETTE_SIZE = sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0]);
+
+struct ColorBtnCtx {
+    int index;
+    bool is_primary;
+};
+
+void onColorBtnClicked(lv_event_t *e) {
+    ColorBtnCtx *ctx = (ColorBtnCtx *)lv_event_get_user_data(e);
+    lv_color_t chosen = COLOR_PALETTE[ctx->index].color;
+    if (ctx->is_primary) {
+        currentSettings.color_primary = chosen;
+    } else {
+        currentSettings.color_secondary = chosen;
+    }
+    rebuildGaugesUI();
+}
+
+// Baut eine vertikal scrollbare Spalte mit Farb-Buttons zur Auswahl einer
+// Primär- oder Sekundärfarbe. Eine Auswahl wirkt sich sofort auf alle 5
+// Anzeigen aus (siehe rebuildGaugesUI()).
+void createColorPickerColumn(lv_obj_t *tile, const char *title, int x_offset, bool is_primary) {
+    lv_obj_t *header = lv_label_create(tile);
+    lv_label_set_text(header, title);
+    lv_obj_align(header, LV_ALIGN_TOP_MID, x_offset, 60);
+
+    lv_obj_t *list = lv_obj_create(tile);
+    setDarkBg(list);
+    lv_obj_set_size(list, 130, 320);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, x_offset, 90);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_style_pad_row(list, 10, 0);
+
+    for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, 60, 45);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_bg_color(btn, COLOR_PALETTE[i].color, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+
+        ColorBtnCtx *ctx = new ColorBtnCtx{i, is_primary};
+        lv_obj_add_event_cb(btn, onColorBtnClicked, LV_EVENT_CLICKED, ctx);
+    }
+}
+
+// Baut die Einstellungs-Kachel "FARBEN": zwei vertikal scrollbare Spalten
+// mit Farb-Buttons für Primär- und Sekundärfarbe (inkl. Neongelb).
+void createColorsSettingsTile(lv_obj_t *tile) {
+    setDarkBg(tile);
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, "FARBEN");
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 20);
+
+    createColorPickerColumn(tile, "Primaer", -110, true);
+    createColorPickerColumn(tile, "Sekundaer", 110, false);
+}
+
 // --- EINSTELLUNGS-SCREEN ---
 void createSettingsUI() {
     settings_screen = lv_obj_create(NULL);
@@ -445,7 +607,8 @@ void createSettingsUI() {
     lv_obj_t *tile_set_water    = lv_tileview_add_tile(settings_tileview, 0, 0, LV_DIR_RIGHT);
     lv_obj_t *tile_set_bat      = lv_tileview_add_tile(settings_tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
     lv_obj_t *tile_set_throttle = lv_tileview_add_tile(settings_tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    lv_obj_t *tile_set_rpm      = lv_tileview_add_tile(settings_tileview, 3, 0, LV_DIR_LEFT);
+    lv_obj_t *tile_set_rpm      = lv_tileview_add_tile(settings_tileview, 3, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    lv_obj_t *tile_set_colors   = lv_tileview_add_tile(settings_tileview, 4, 0, LV_DIR_LEFT);
 
     createSettingsTile(tile_set_water, "WASSER",
                         &currentSettings.warn_temp, 1.0f, 40, 130,
@@ -467,11 +630,13 @@ void createSettingsUI() {
                         &currentSettings.rpm_limit, 100.0f, 4000, 8500,
                         "%.0f");
 
+    createColorsSettingsTile(tile_set_colors);
+
     // Dropdown zur Auswahl der Start-Anzeige liegt als Overlay über dem
     // Tileview (bleibt auf allen Kacheln sichtbar/klickbar) und speichert
     // die Auswahl sofort stromlos in den Preferences (NVS).
     lv_obj_t *dd_startup = lv_dropdown_create(settings_screen);
-    lv_dropdown_set_options(dd_startup, "Start: Wasser\nStart: Batterie\nStart: Gaspedal\nStart: Drehzahl");
+    lv_dropdown_set_options(dd_startup, "Start: Wasser\nStart: Batterie\nStart: Gaspedal\nStart: Drehzahl\nStart: G-Force");
     lv_dropdown_set_selected(dd_startup, startup_gauge);
     lv_obj_set_width(dd_startup, 220);
     lv_obj_align(dd_startup, LV_ALIGN_TOP_MID, 0, 8);
@@ -634,7 +799,77 @@ void createRpmTile(lv_obj_t *tile) {
     lv_obj_align(title_label, LV_ALIGN_CENTER, 0, 130);
 }
 
-// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL / DREHZAHL) ---
+// Baut die G-Kraft-Kachel: ein kreisförmiges Polar-Raster (Ringe + Kreuz-
+// Linien in der Primärfarbe) sowie ein Punkt in der Sekundärfarbe, dessen
+// Position die aktuelle Quer-/Längsbeschleunigung anzeigt - Betrag (G) und
+// Geschwindigkeit werden mittig im Raster als Text angezeigt (siehe
+// updateGaugeUI()).
+void createGForceTile(lv_obj_t *tile) {
+    setDarkBg(tile);
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, "G-FORCE");
+    lv_obj_set_style_text_color(title_label, currentSettings.color_primary, 0);
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 30);
+
+    const int GF_SIZE = 360;
+    lv_obj_t *field = lv_obj_create(tile);
+    setDarkBg(field);
+    lv_obj_set_size(field, GF_SIZE, GF_SIZE);
+    lv_obj_align(field, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_set_style_radius(field, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(field, 2, 0);
+    lv_obj_set_style_border_color(field, currentSettings.color_primary, 0);
+    lv_obj_clear_flag(field, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Konzentrische Ringe
+    const int ring_sizes[2] = {GF_SIZE * 2 / 3, GF_SIZE / 3};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *ring = lv_obj_create(field);
+        lv_obj_set_size(ring, ring_sizes[i], ring_sizes[i]);
+        lv_obj_center(ring);
+        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(ring, 1, 0);
+        lv_obj_set_style_border_color(ring, currentSettings.color_primary, 0);
+        lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    // Kreuz-Linien durch die Mitte
+    static lv_point_t h_pts[2] = {{0, GF_SIZE / 2}, {GF_SIZE, GF_SIZE / 2}};
+    static lv_point_t v_pts[2] = {{GF_SIZE / 2, 0}, {GF_SIZE / 2, GF_SIZE}};
+
+    lv_obj_t *line_h = lv_line_create(field);
+    lv_line_set_points(line_h, h_pts, 2);
+    lv_obj_set_style_line_color(line_h, currentSettings.color_primary, 0);
+    lv_obj_set_style_line_width(line_h, 1, 0);
+
+    lv_obj_t *line_v = lv_line_create(field);
+    lv_line_set_points(line_v, v_pts, 2);
+    lv_obj_set_style_line_color(line_v, currentSettings.color_primary, 0);
+    lv_obj_set_style_line_width(line_v, 1, 0);
+
+    // G-Kraft-Punkt (Sekundärfarbe) - Position wird in updateGaugeUI() gesetzt
+    gforce_blob = lv_obj_create(field);
+    lv_obj_set_size(gforce_blob, 24, 24);
+    lv_obj_set_style_radius(gforce_blob, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(gforce_blob, 0, 0);
+    lv_obj_set_style_bg_color(gforce_blob, currentSettings.color_secondary, 0);
+    lv_obj_set_style_bg_opa(gforce_blob, LV_OPA_COVER, 0);
+    lv_obj_align(gforce_blob, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(gforce_blob, LV_OBJ_FLAG_SCROLLABLE);
+
+    gforce_value_label = lv_label_create(field);
+    lv_obj_set_style_text_font(gforce_value_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(gforce_value_label, currentSettings.color_secondary, 0);
+    lv_obj_align(gforce_value_label, LV_ALIGN_CENTER, 0, -15);
+
+    gforce_speed_label = lv_label_create(field);
+    lv_obj_set_style_text_color(gforce_speed_label, lv_color_white(), 0);
+    lv_obj_align(gforce_speed_label, LV_ALIGN_CENTER, 0, 25);
+}
+
+// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL / DREHZAHL / G-FORCE) ---
 void createGaugesUI() {
     main_screen = lv_obj_create(NULL);
     setDarkBg(main_screen);
@@ -644,7 +879,8 @@ void createGaugesUI() {
     tile_water    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
     tile_bat      = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
     tile_throttle = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_rpm      = lv_tileview_add_tile(tileview, 3, 0, LV_DIR_LEFT);
+    tile_rpm      = lv_tileview_add_tile(tileview, 3, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_gforce   = lv_tileview_add_tile(tileview, 4, 0, LV_DIR_LEFT);
 
     // TILE 1: WASSERTEMP (40-130 °C, Warnung ab warn_temp, Alarm ab max_temp)
     createStyledMeter(tile_water, "WASSER", 40, 130, currentSettings.warn_temp, currentSettings.max_temp,
@@ -661,10 +897,11 @@ void createGaugesUI() {
     // TILE 4: DREHZAHL (0-8000 U/min, Schaltpunktanzeige statt digitaler Anzeige)
     createRpmTile(tile_rpm);
 
+    // TILE 5: G-FORCE (Polar-Raster mit Punkt für Quer-/Längsbeschleunigung)
+    createGForceTile(tile_gforce);
+
     // Zuletzt in den Einstellungen gewählte Start-Kachel anzeigen (stromlos gespeichert)
     lv_obj_set_tile_id(tileview, startup_gauge, 0, LV_ANIM_OFF);
-
-    lv_scr_load(main_screen);
 }
 
 // --- FEHLERCODE-ÜBERSICHT (per Doppeltipp erreichbar) ---
@@ -789,10 +1026,18 @@ void setup() {
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
+    Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = touchpadReadCb;
+    lv_indev_drv_register(&indev_drv);
+
     // 3. UI & CAN aufbauen
     loadStartupGauge();
     createSettingsUI();
     createGaugesUI();
+    lv_scr_load(main_screen);
     createDtcUI();
     initCAN();
 }

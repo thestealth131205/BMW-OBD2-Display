@@ -4,18 +4,20 @@
 
 ESP32-C6-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
 Zeigt Kühlmitteltemperatur, Batteriespannung, Gaspedalstellung als analoge
-Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm) sowie
-Drehzahl als Schaltpunktanzeige (6 LEDs) auf einem runden 466×466
-AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose (DTCs lesen/löschen)
-und BMW CBS-Service-Reset.
+Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm), Drehzahl
+als Schaltpunktanzeige (6 LEDs) sowie G-Kraft als Polar-Raster-Grafik auf einem
+runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose (DTCs
+lesen/löschen) und BMW CBS-Service-Reset. Primär-/Sekundärfarbe sind in den
+Einstellungen frei wählbar (vertikal scrollbare Farbpalette) und wirken sich
+auf alle 5 Anzeigen aus.
 
 ## Hardware
 
 | Komponente | Modell | Schnittstelle |
 |---|---|---|
 | Mikrocontroller | ESP32-C6 (Waveshare 1.43" AMOLED Touch) | – |
-| Display | CO5300 AMOLED, 466×466, rund | QSPI (CS=6, SCK=10, D0-D3=0-3, RST=7) |
-| Touch | kapazitiv (LVGL Input-Device) | – |
+| Display | SH8601 AMOLED, 466×466, rund | QSPI (CS=GPIO10, SCK=GPIO11, D0=GPIO4, D1=GPIO5, D2=GPIO6, D3=GPIO7, RST=GPIO3) |
+| Touch | kapazitiv, I2C-Registerprotokoll (Adresse 0x38), LVGL Input-Device | I2C (SCL=GPIO8, SDA=GPIO18) |
 | CAN-Bus | eingebauter ESP32-C6 TWAI-Controller + externer CAN-Transceiver | TX=GPIO19, RX=GPIO20 |
 | microSD | Boot-Animation (JPEG-Frames) | SPI (CS=GPIO13) |
 
@@ -45,10 +47,15 @@ pio device monitor
 ```
 
 ### Abhängigkeiten (`platformio.ini`)
-- `moononournation/GFX Library for Arduino` – Display-Treiber (Arduino_CO5300 / QSPI)
+- `moononournation/GFX Library for Arduino` – QSPI-Basis (`Arduino_ESP32QSPI`,
+  `Arduino_CO5300`); der eigentliche SH8601-Treiber (`include/Arduino_SH8601.h`,
+  Subklasse von `Arduino_CO5300`) liegt lokal im Projekt, da Arduino_GFX
+  SH8601 nicht nativ unterstützt (Init-Sequenz laut offiziellem Waveshare-SDK
+  verifiziert: `waveshareteam/ESP32-C6-Touch-AMOLED-1.43`)
 - `lvgl/lvgl` (v8) – UI-Framework (Meter, Tileview, Labels, Buttons)
 - `bodmer/TJpg_Decoder` – JPEG-Dekodierung für die Boot-Animation
-- ESP32-Arduino-Core: `SD.h` (microSD) und `driver/twai.h` (CAN) sind bereits im Core enthalten
+- ESP32-Arduino-Core: `SD.h` (microSD), `Wire.h` (I2C-Touch) und `driver/twai.h`
+  (CAN) sind bereits im Core enthalten
 
 ### LVGL-Konfiguration
 `include/lv_conf.h` enthält eine minimale LVGL-v8-Konfiguration (Farbtiefe 16 bit,
@@ -67,7 +74,8 @@ BMW E90 OBD2 Display/
 ├── src/
 │   └── main.cpp          ← Hauptprogramm (alle Logik hier)
 ├── include/
-│   └── lv_conf.h          ← LVGL-Konfiguration
+│   ├── lv_conf.h          ← LVGL-Konfiguration
+│   └── Arduino_SH8601.h   ← SH8601-Displaytreiber (Subklasse von Arduino_CO5300)
 ├── platformio.ini        ← Build-Konfiguration
 ├── CLAUDE.md              ← Diese Datei
 └── memory.md              ← Projektnotizen / Fortschritt
@@ -81,7 +89,7 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 
 ## UI / Anzeige-Logik
 
-- **Tileview mit 4 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
+- **Tileview mit 5 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
   erzeugt über den gemeinsamen Helper `createStyledMeter()` (Skalenstriche,
   3 Farbzonen-Bögen, Nadel, große digitale Anzeige im Zentrum, kleines
   Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`):
@@ -100,6 +108,14 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
      Limit-/Redline-Schwelle (Standard 7000 U/min) – Logik in
      `computeRpmLedThresholds()`. Sobald die grüne LED leuchtet, blinken alle
      aktiven LEDs im 250-ms-Takt gemeinsam (Schaltpunkt-Warnblinken)
+  5. **G-Force-Kachel** (`createGForceTile()`) – kreisförmiges Polar-Raster
+     (2 konzentrische Ringe + Kreuz-Linien) in der Primärfarbe, Titel
+     „G-FORCE" oben; mittig im Raster ein Punkt in der Sekundärfarbe
+     (`gforce_blob`), dessen Position die aktuelle Quer-/Längsbeschleunigung
+     abbildet (max. Anzeigebereich ±1,5 g), sowie Betrag (`%.2fG`) und
+     Geschwindigkeit (`%d KM/H`) als Text im Zentrum – Werte kommen aus
+     `current_gforce_x`/`current_gforce_y`/`current_speed_kmh`, aktualisiert
+     in `updateGaugeUI()`
 - **Fehlercode-Übersicht** – eigener Screen (per Doppeltipp erreichbar), DTCs
   auslesen/löschen, CBS-Öl-Service-Reset, „Zurück"-Button
 - **Farbverlauf der Nadel/Anzeige:** Primärfarbe → Gelb (10 % vor Warnschwelle) →
@@ -107,19 +123,25 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   (250 ms) – Logik zentral in `computeGaugeColor()`. Bei der Batterie ist die Richtung
   umgekehrt (niedrige Spannung = kritisch, `invert_zones=true` in `createStyledMeter()`)
 - **3 Sekunden Touch in der Displaymitte** öffnet den Einstellungs-Screen
-- **Einstellungs-Screen** – eigenes Tileview mit 4 Kacheln
-  (Wasser/Batterie/Gaspedal/Drehzahl), je Kachel per +/- Buttons verstellbar:
-  **Warnschwelle** (Schwelle 1) und **Limit/Alarmschwelle** (Schwelle 2), über
-  `createSettingsTile()` / `createThresholdRow()` gebaut. Bei der Drehzahl
-  entsprechen diese Schwellen `rpm_warn` (Start der gelben LEDs) und
-  `rpm_limit` (rote LED/Redline); die grüne LED liegt automatisch 200 U/min
-  vor `rpm_limit`. Zusätzlich ein **Dropdown oben** (Overlay über dem
+- **Einstellungs-Screen** – eigenes Tileview mit 5 Kacheln
+  (Wasser/Batterie/Gaspedal/Drehzahl/Farben), je Kachel (außer Farben) per
+  +/- Buttons verstellbar: **Warnschwelle** (Schwelle 1) und
+  **Limit/Alarmschwelle** (Schwelle 2), über `createSettingsTile()` /
+  `createThresholdRow()` gebaut. Bei der Drehzahl entsprechen diese Schwellen
+  `rpm_warn` (Start der gelben LEDs) und `rpm_limit` (rote LED/Redline); die
+  grüne LED liegt automatisch 200 U/min vor `rpm_limit`. Die **Farben-Kachel**
+  (`createColorsSettingsTile()`) enthält zwei vertikal scrollbare Spalten mit
+  Farb-Buttons (`createColorPickerColumn()`, Palette `COLOR_PALETTE[]` inkl.
+  Neongelb) zur Auswahl der Primär- und Sekundärfarbe; eine Auswahl setzt
+  `currentSettings.color_primary`/`color_secondary` und baut sofort alle 5
+  Hauptanzeigen über `rebuildGaugesUI()` neu auf (der aktuell aktive Screen
+  bleibt dabei erhalten). Zusätzlich ein **Dropdown oben** (Overlay über dem
   Tileview) zur Auswahl der **Start-Anzeige**
-  (Wasser/Batterie/Gaspedal/Drehzahl), die sofort via `saveStartupGauge()` in
-  NVS/`Preferences` (Namespace `bmw_disp`, Key `startup_gauge`) stromlos
-  gespeichert und beim Boot über `loadStartupGauge()` gelesen wird.
-  „Speichern & Beenden"-Button liegt als Overlay über dem Tileview und
-  schreibt direkt in `currentSettings`
+  (Wasser/Batterie/Gaspedal/Drehzahl/G-Force), die sofort via
+  `saveStartupGauge()` in NVS/`Preferences` (Namespace `bmw_disp`, Key
+  `startup_gauge`) stromlos gespeichert und beim Boot über
+  `loadStartupGauge()` gelesen wird. „Speichern & Beenden"-Button liegt als
+  Overlay über dem Tileview und schreibt direkt in `currentSettings`
 - **Doppeltipp** auf dem Hauptbildschirm öffnet die Fehlercode-Übersicht
 - **Boot-Animation** aus JPEG-Frames von der SD-Karte läuft vor der LVGL-Initialisierung
 
@@ -136,6 +158,13 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   verifiziert werden
 - Drehzahl wird aus einem PT-CAN-Broadcast (ID `0x0AA`, Byte 2–3 little-endian × 0.25 = U/min)
   gelesen – **Platzhalter-ID**, muss am Fahrzeug per CAN-Sniffer/Diagnosetool verifiziert werden
+- Quer-/Längsbeschleunigung (G-Kraft) und Geschwindigkeit werden aus einem
+  PT-CAN-Broadcast (ID `0x0C4`, Byte 0/1 als int8 × 0.01 = g, Byte 2–3
+  little-endian × 0.1 = km/h) gelesen – **Platzhalter-ID**, muss am Fahrzeug
+  per CAN-Sniffer/Diagnosetool verifiziert werden (das Fahrzeug hat aktuell
+  keinen eigenen Beschleunigungssensor verbaut – die Werte müssten vom
+  DSC-/ABS-Steuergerät auf dem PT-CAN gesendet werden, was noch nicht
+  verifiziert ist)
 
 ## Bekannte Einschränkungen / offene Punkte
 
@@ -145,6 +174,9 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   und muss am Fahrzeug verifiziert werden
 - CAN-ID `0x0AA` für die Drehzahl ist ebenfalls ein Startwert/Platzhalter und muss
   am Fahrzeug verifiziert werden
+- CAN-ID `0x0C4` für G-Kraft/Geschwindigkeit ist ebenfalls ein Startwert/Platzhalter;
+  ob das Fahrzeug diese Werte überhaupt auf dem PT-CAN sendet, ist unklar und muss
+  am Fahrzeug verifiziert werden
 - Batteriespannung (`current_bat_voltage`) wird aktuell noch nicht per CAN aktualisiert
   (nur Platzhalter-Initialwert) – Auswertung in `processCAN()` ergänzen
 - DTC-Antworten werden nur gesendet, aber die Antwort-Frames (`0x7E8`) werden noch
@@ -152,8 +184,9 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 - Einstellungs-Screen speichert Schwellenwerte (Warnung/Limit) und Farben weiterhin
   nicht dauerhaft (kein NVS/Preferences) – nur die Start-Anzeige-Auswahl wird
   aktuell per `Preferences` persistiert
-- CO5300/QSPI-Pinbelegung und Touch-Treiber sind board-spezifisch für das
-  Waveshare-1.43"-AMOLED-Modul – bei anderer Platine anpassen
+- QSPI-Pinbelegung, SH8601-Init-Sequenz und I2C-Touch-Adresse sind
+  board-spezifisch für das Waveshare-1.43"-AMOLED-Modul – bei anderer Platine
+  anpassen
 
 ## Fahrzeug
 

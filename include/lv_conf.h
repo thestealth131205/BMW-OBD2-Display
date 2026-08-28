@@ -27,6 +27,10 @@
 #define LV_USE_LABEL      1
 #define LV_USE_BTN        1
 #define LV_USE_DROPDOWN   1
+#define LV_USE_LINE       1
+
+/* Layout für die vertikal scrollbaren Farb-Buttons in den Einstellungen */
+#define LV_USE_FLEX       1
 
 /* Standard-Font für Labels/Buttons */
 #define LV_FONT_MONTSERRAT_14 1
