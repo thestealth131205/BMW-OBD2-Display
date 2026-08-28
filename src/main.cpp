@@ -375,7 +375,7 @@ void setup() {
     Serial.begin(115200);
 
     gfx->begin();
-    gfx->fillScreen(BLACK);
+    gfx->fillScreen(RGB565_BLACK);
 
     SPI.begin();
     SD.begin(SD_CS_PIN);
