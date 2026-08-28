@@ -38,12 +38,12 @@ struct Settings {
 // --- UI OBJEKTE ---
 lv_obj_t *main_screen;
 lv_obj_t *settings_screen;
+lv_obj_t *dtc_screen; // Fehlercode-Übersicht (per Doppeltipp erreichbar)
 lv_obj_t *tileview;
 
 // Tiles
 lv_obj_t *tile_water;
 lv_obj_t *tile_bat;
-lv_obj_t *tile_diag; // Neu: Diagnose & Service
 
 // Gauges
 lv_obj_t *water_meter;
@@ -67,6 +67,10 @@ char last_cbs_text[64] = "CBS Status: OK";
 // Touch Handling (3s Long Press)
 unsigned long touch_start = 0;
 bool is_touching_center = false;
+
+// Touch Handling (Doppeltipp -> Fehlercode-Übersicht)
+unsigned long last_tap_time = 0;
+bool was_pressed = false;
 
 // --- TJPGDEC DRAW CALLBACK ---
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
@@ -240,14 +244,13 @@ void createSettingsUI() {
     }, LV_EVENT_CLICKED, NULL);
 }
 
-// --- HAUPT GAUGE UI & DIAGNOSE TILEVIEW ---
+// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE) ---
 void createGaugesUI() {
     main_screen = lv_obj_create(NULL);
 
     tileview = lv_tileview_create(main_screen);
     tile_water = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
-    tile_bat   = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_diag  = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT);
+    tile_bat   = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT);
 
     // TILE 1: WASSERTEMP
     water_meter = lv_meter_create(tile_water);
@@ -269,47 +272,53 @@ void createGaugesUI() {
     bat_label = lv_label_create(tile_bat);
     lv_obj_align(bat_label, LV_ALIGN_CENTER, 0, 90);
 
-    // TILE 3: DIAGNOSE & SERVICE INTERVALL RESET
-    lv_obj_t *diag_title = lv_label_create(tile_diag);
-    lv_label_set_text(diag_title, "DIAGNOSE & SERVICE");
-    lv_obj_align(diag_title, LV_ALIGN_TOP_MID, 0, 40);
+    lv_scr_load(main_screen);
+}
 
-    // Fehler lesen Button
-    lv_obj_t *btn_read_dtc = lv_btn_create(tile_diag);
-    lv_obj_set_size(btn_read_dtc, 180, 40);
-    lv_obj_align(btn_read_dtc, LV_ALIGN_TOP_MID, 0, 90);
-    lv_obj_t *lbl_rd = lv_label_create(btn_read_dtc);
-    lv_label_set_text(lbl_rd, "Fehler auslesen");
-    lv_obj_center(lbl_rd);
-    lv_obj_add_event_cb(btn_read_dtc, [](lv_event_t *e) { readDiagnosticTroubleCodes(); }, LV_EVENT_CLICKED, NULL);
+// --- FEHLERCODE-ÜBERSICHT (per Doppeltipp erreichbar) ---
+void createDtcUI() {
+    dtc_screen = lv_obj_create(NULL);
 
-    // Fehler löschen Button
-    lv_obj_t *btn_clr_dtc = lv_btn_create(tile_diag);
-    lv_obj_set_size(btn_clr_dtc, 180, 40);
-    lv_obj_align(btn_clr_dtc, LV_ALIGN_TOP_MID, 0, 140);
-    lv_obj_t *lbl_cl = lv_label_create(btn_clr_dtc);
-    lv_label_set_text(lbl_cl, "Fehler loeschen");
-    lv_obj_center(lbl_cl);
-    lv_obj_add_event_cb(btn_clr_dtc, [](lv_event_t *e) { clearDiagnosticTroubleCodes(); }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *diag_title = lv_label_create(dtc_screen);
+    lv_label_set_text(diag_title, "FEHLERCODE-UEBERSICHT");
+    lv_obj_align(diag_title, LV_ALIGN_TOP_MID, 0, 30);
 
-    dtc_status_label = lv_label_create(tile_diag);
+    dtc_status_label = lv_label_create(dtc_screen);
     lv_label_set_text(dtc_status_label, "Status: Bereit");
-    lv_obj_align(dtc_status_label, LV_ALIGN_TOP_MID, 0, 190);
+    lv_obj_align(dtc_status_label, LV_ALIGN_CENTER, 0, -60);
 
     // CBS Öl-Reset Button
-    lv_obj_t *btn_cbs_oil = lv_btn_create(tile_diag);
+    lv_obj_t *btn_cbs_oil = lv_btn_create(dtc_screen);
     lv_obj_set_size(btn_cbs_oil, 180, 40);
-    lv_obj_align(btn_cbs_oil, LV_ALIGN_TOP_MID, 0, 240);
+    lv_obj_align(btn_cbs_oil, LV_ALIGN_CENTER, 0, 0);
     lv_obj_t *lbl_oil = lv_label_create(btn_cbs_oil);
     lv_label_set_text(lbl_oil, "Oel-Service Reset");
     lv_obj_center(lbl_oil);
     lv_obj_add_event_cb(btn_cbs_oil, [](lv_event_t *e) { resetServiceInterval(0x01); }, LV_EVENT_CLICKED, NULL);
 
-    cbs_status_label = lv_label_create(tile_diag);
+    cbs_status_label = lv_label_create(dtc_screen);
     lv_label_set_text(cbs_status_label, "CBS: OK");
-    lv_obj_align(cbs_status_label, LV_ALIGN_TOP_MID, 0, 290);
+    lv_obj_align(cbs_status_label, LV_ALIGN_CENTER, 0, 50);
 
-    lv_scr_load(main_screen);
+    // Löschen-Button (unten links)
+    lv_obj_t *btn_clr_dtc = lv_btn_create(dtc_screen);
+    lv_obj_set_size(btn_clr_dtc, 140, 45);
+    lv_obj_align(btn_clr_dtc, LV_ALIGN_BOTTOM_MID, -80, -30);
+    lv_obj_t *lbl_cl = lv_label_create(btn_clr_dtc);
+    lv_label_set_text(lbl_cl, "Loeschen");
+    lv_obj_center(lbl_cl);
+    lv_obj_add_event_cb(btn_clr_dtc, [](lv_event_t *e) { clearDiagnosticTroubleCodes(); }, LV_EVENT_CLICKED, NULL);
+
+    // Zurück-Button (unten rechts)
+    lv_obj_t *btn_back = lv_btn_create(dtc_screen);
+    lv_obj_set_size(btn_back, 140, 45);
+    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 80, -30);
+    lv_obj_t *lbl_back = lv_label_create(btn_back);
+    lv_label_set_text(lbl_back, "Zurueck");
+    lv_obj_center(lbl_back);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        lv_scr_load_anim(main_screen, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+    }, LV_EVENT_CLICKED, NULL);
 }
 
 // --- 3 SEKUNDEN CENTER TOUCH PRÜFUNG ---
@@ -337,6 +346,28 @@ void checkCenterTouch() {
     } else {
         is_touching_center = false;
     }
+}
+
+// --- DOPPELTIPP PRÜFUNG (öffnet Fehlercode-Übersicht) ---
+void checkDoubleTap() {
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (!indev) return;
+
+    bool pressed = (indev->proc.state == LV_INDEV_STATE_PR);
+
+    if (pressed && !was_pressed) {
+        unsigned long now = millis();
+        if (lv_scr_act() == main_screen) {
+            if (now - last_tap_time < 400) {
+                last_tap_time = 0;
+                readDiagnosticTroubleCodes();
+                lv_scr_load_anim(dtc_screen, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+            } else {
+                last_tap_time = now;
+            }
+        }
+    }
+    was_pressed = pressed;
 }
 
 // --- SETUP & MAIN LOOP ---
@@ -367,6 +398,7 @@ void setup() {
     // 3. UI & CAN aufbauen
     createSettingsUI();
     createGaugesUI();
+    createDtcUI();
     initCAN();
 }
 
@@ -375,5 +407,6 @@ void loop() {
     processCAN();
     updateGaugeUI();
     checkCenterTouch();
+    checkDoubleTap();
     delay(5);
 }
