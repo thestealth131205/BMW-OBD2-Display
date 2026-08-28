@@ -30,6 +30,8 @@ struct Settings {
     float max_temp  = 120.0f;
     float warn_bat  = 11.5f;
     float min_bat   = 10.5f;
+    float throttle_warn_pct = 70.0f;
+    float throttle_max_pct  = 90.0f;
     lv_color_t color_primary   = LV_COLOR_MAKE(0, 162, 255);   // Cyan/Blau
     lv_color_t color_secondary = LV_COLOR_MAKE(255, 0, 0);     // Rot (Nadel)
     char brand[16]             = "bmw";
@@ -44,15 +46,23 @@ lv_obj_t *tileview;
 // Tiles
 lv_obj_t *tile_water;
 lv_obj_t *tile_bat;
+lv_obj_t *tile_throttle;
 
 // Gauges
 lv_obj_t *water_meter;
 lv_meter_indicator_t *water_needle;
 lv_obj_t *water_label;
+lv_obj_t *water_secondary_label;   // zeigt Batteriespannung
 
 lv_obj_t *bat_meter;
 lv_meter_indicator_t *bat_needle;
 lv_obj_t *bat_label;
+lv_obj_t *bat_secondary_label;     // zeigt Kühlmitteltemperatur
+
+lv_obj_t *throttle_meter;
+lv_meter_indicator_t *throttle_needle;
+lv_obj_t *throttle_label;
+lv_obj_t *throttle_secondary_label; // zeigt Kühlmitteltemperatur
 
 // Diagnose UI Elemente
 lv_obj_t *dtc_status_label;
@@ -61,6 +71,7 @@ lv_obj_t *cbs_status_label;
 // Dynamische Live-Werte
 float current_water_temp = 90.0f;
 float current_bat_voltage = 12.4f;
+float current_throttle_position = 0.0f;
 char last_dtc_text[64] = "Keine Fehler im Speicher";
 char last_cbs_text[64] = "CBS Status: OK";
 
@@ -86,6 +97,22 @@ lv_color_t mix_colors(lv_color_t c1, lv_color_t c2, float ratio) {
     uint8_t g = LV_COLOR_GET_G(c1) + (int)((LV_COLOR_GET_G(c2) - LV_COLOR_GET_G(c1)) * ratio);
     uint8_t b = LV_COLOR_GET_B(c1) + (int)((LV_COLOR_GET_B(c2) - LV_COLOR_GET_B(c1)) * ratio);
     return lv_color_make(r, g, b);
+}
+
+// Farbverlauf Normal -> Gelb (10% vor Warnschwelle) -> Rot (Warn- bis Alarmschwelle),
+// oberhalb der Alarmschwelle blinkt der Wert rot/schwarz
+lv_color_t computeGaugeColor(float value, float warn_val, float alert_val, bool blink_state) {
+    float pre_warn = warn_val - warn_val * 0.10f;
+    if (value < pre_warn) {
+        return currentSettings.color_primary;
+    } else if (value < warn_val) {
+        float ratio = (value - pre_warn) / (warn_val - pre_warn);
+        return mix_colors(currentSettings.color_primary, lv_palette_main(LV_PALETTE_YELLOW), ratio);
+    } else if (value < alert_val) {
+        float ratio = (value - warn_val) / (alert_val - warn_val);
+        return mix_colors(lv_palette_main(LV_PALETTE_YELLOW), lv_palette_main(LV_PALETTE_RED), ratio);
+    }
+    return blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
 }
 
 // --- LVGL FLUSH DISPLAY ---
@@ -184,6 +211,12 @@ void processCAN() {
         if (message.identifier == 0x1D0) {
             current_water_temp = message.data[0] - 40;
         }
+        // Gaspedalstellung (Fahrpedalwert) - CAN-ID/Byte-Position sind ein
+        // Platzhalter und müssen am Fahrzeug per CAN-Sniffer/Diagnosetool
+        // verifiziert werden (analog zu 0x1D0)
+        if (message.identifier == 0x1F0) {
+            current_throttle_position = message.data[0] * (100.0f / 255.0f);
+        }
     }
 }
 
@@ -197,45 +230,145 @@ void updateGaugeUI() {
     }
 
     // 1. WASSERTEMPERATUR
-    lv_meter_set_indicator_value(water_meter, water_needle, current_water_temp);
-    float pre_warn = currentSettings.warn_temp - (currentSettings.warn_temp * 0.10f); // 10% vor Warnbereich
-    lv_color_t water_color;
+    lv_meter_set_indicator_value(water_meter, water_needle, (int32_t)current_water_temp);
+    lv_color_t water_color = computeGaugeColor(current_water_temp, currentSettings.warn_temp, currentSettings.max_temp, blink_state);
 
-    if (current_water_temp < pre_warn) {
-        water_color = currentSettings.color_primary;
-    } else if (current_water_temp >= pre_warn && current_water_temp < currentSettings.warn_temp) {
-        float ratio = (current_water_temp - pre_warn) / (currentSettings.warn_temp - pre_warn);
-        water_color = mix_colors(currentSettings.color_primary, lv_palette_main(LV_PALETTE_YELLOW), ratio);
-    } else if (current_water_temp >= currentSettings.warn_temp && current_water_temp < currentSettings.max_temp) {
-        float ratio = (current_water_temp - currentSettings.warn_temp) / (currentSettings.max_temp - currentSettings.warn_temp);
-        water_color = mix_colors(lv_palette_main(LV_PALETTE_YELLOW), lv_palette_main(LV_PALETTE_RED), ratio);
-    } else {
-        water_color = blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
-    }
-
-    lv_label_set_text_fmt(water_label, "%d °C", (int)current_water_temp);
+    lv_label_set_text_fmt(water_label, "%d°C", (int)current_water_temp);
     lv_obj_set_style_text_color(water_label, water_color, 0);
+    lv_label_set_text_fmt(water_secondary_label, "%.1fV", current_bat_voltage);
 
     // 2. BATTERIESPANNUNG
-    lv_meter_set_indicator_value(bat_meter, bat_needle, current_bat_voltage * 10);
+    lv_meter_set_indicator_value(bat_meter, bat_needle, (int32_t)(current_bat_voltage * 10));
     lv_color_t bat_color = (current_bat_voltage <= currentSettings.warn_bat) ?
                            (blink_state ? lv_palette_main(LV_PALETTE_RED) : currentSettings.color_primary) :
                            currentSettings.color_primary;
 
-    lv_label_set_text_fmt(bat_label, "%.1f V", current_bat_voltage);
+    lv_label_set_text_fmt(bat_label, "%.1fV", current_bat_voltage);
     lv_obj_set_style_text_color(bat_label, bat_color, 0);
+    lv_label_set_text_fmt(bat_secondary_label, "%d°C", (int)current_water_temp);
+
+    // 3. GASPEDALSTELLUNG
+    lv_meter_set_indicator_value(throttle_meter, throttle_needle, (int32_t)current_throttle_position);
+    lv_color_t throttle_color = computeGaugeColor(current_throttle_position, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct, blink_state);
+
+    lv_label_set_text_fmt(throttle_label, "%d%%", (int)current_throttle_position);
+    lv_obj_set_style_text_color(throttle_label, throttle_color, 0);
+    lv_label_set_text_fmt(throttle_secondary_label, "%d°C", (int)current_water_temp);
+}
+
+// Färbt einen Screen/Container im dunklen Tacho-Look (schwarzer Hintergrund, weißer Text)
+void setDarkBg(lv_obj_t *obj) {
+    lv_obj_set_style_bg_color(obj, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(obj, lv_color_white(), 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
+}
+
+// --- EINSTELLUNGS-SCREEN: SCHWELLENWERT-REGLER (+/- BUTTONS) ---
+// Ein ThresholdStep hält den Zeiger auf den einzustellenden Settings-Wert,
+// die Schrittweite (positiv für "+", negativ für "-"), die erlaubte Spanne
+// sowie das Label, das nach jedem Klick aktualisiert wird.
+struct ThresholdStep {
+    float *value;
+    float delta;
+    float min_limit;
+    float max_limit;
+    lv_obj_t *value_label;
+    const char *fmt;
+};
+
+void onThresholdStepBtn(lv_event_t *e) {
+    ThresholdStep *ts = (ThresholdStep *)lv_event_get_user_data(e);
+    float nv = *(ts->value) + ts->delta;
+    if (nv < ts->min_limit) nv = ts->min_limit;
+    if (nv > ts->max_limit) nv = ts->max_limit;
+    *(ts->value) = nv;
+    lv_label_set_text_fmt(ts->value_label, ts->fmt, nv);
+}
+
+// Baut eine Zeile mit Beschriftung, aktuellem Wert sowie "-"/"+" Buttons zum
+// Verstellen eines Schwellenwerts. y_label/y_value/y_btn sind Offsets relativ
+// zur Tile-Mitte (LV_ALIGN_CENTER).
+void createThresholdRow(lv_obj_t *tile, const char *label_text, float *value, float step,
+                         float min_limit, float max_limit, const char *fmt,
+                         int y_label, int y_value, int y_btn) {
+    lv_obj_t *lbl = lv_label_create(tile);
+    lv_label_set_text(lbl, label_text);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, y_label);
+
+    lv_obj_t *value_label = lv_label_create(tile);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_48, 0);
+    lv_label_set_text_fmt(value_label, fmt, *value);
+    lv_obj_align(value_label, LV_ALIGN_CENTER, 0, y_value);
+
+    lv_obj_t *btn_minus = lv_btn_create(tile);
+    lv_obj_set_size(btn_minus, 50, 40);
+    lv_obj_align(btn_minus, LV_ALIGN_CENTER, -90, y_btn);
+    lv_obj_t *lbl_minus = lv_label_create(btn_minus);
+    lv_label_set_text(lbl_minus, "-");
+    lv_obj_center(lbl_minus);
+
+    lv_obj_t *btn_plus = lv_btn_create(tile);
+    lv_obj_set_size(btn_plus, 50, 40);
+    lv_obj_align(btn_plus, LV_ALIGN_CENTER, 90, y_btn);
+    lv_obj_t *lbl_plus = lv_label_create(btn_plus);
+    lv_label_set_text(lbl_plus, "+");
+    lv_obj_center(lbl_plus);
+
+    ThresholdStep *minus_ctrl = new ThresholdStep{value, -step, min_limit, max_limit, value_label, fmt};
+    ThresholdStep *plus_ctrl  = new ThresholdStep{value, step, min_limit, max_limit, value_label, fmt};
+    lv_obj_add_event_cb(btn_minus, onThresholdStepBtn, LV_EVENT_CLICKED, minus_ctrl);
+    lv_obj_add_event_cb(btn_plus, onThresholdStepBtn, LV_EVENT_CLICKED, plus_ctrl);
+}
+
+// Baut eine Einstellungs-Kachel mit Titel sowie Warnschwelle (Schwelle 1) und
+// Limit/Alarmschwelle (Schwelle 2), jeweils per +/- verstellbar.
+void createSettingsTile(lv_obj_t *tile, const char *title,
+                         float *warn_value, float warn_step, float warn_min, float warn_max,
+                         float *limit_value, float limit_step, float limit_min, float limit_max,
+                         const char *fmt) {
+    setDarkBg(tile);
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, title);
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, -180);
+
+    createThresholdRow(tile, "Warnschwelle", warn_value, warn_step, warn_min, warn_max, fmt,
+                        -110, -75, -70);
+    createThresholdRow(tile, "Limit (Alarm)", limit_value, limit_step, limit_min, limit_max, fmt,
+                        0, 35, 40);
 }
 
 // --- EINSTELLUNGS-SCREEN ---
 void createSettingsUI() {
     settings_screen = lv_obj_create(NULL);
+    setDarkBg(settings_screen);
 
-    lv_obj_t *title = lv_label_create(settings_screen);
-    lv_label_set_text(title, "EINSTELLUNGEN");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_t *settings_tileview = lv_tileview_create(settings_screen);
+    setDarkBg(settings_tileview);
+    lv_obj_t *tile_set_water    = lv_tileview_add_tile(settings_tileview, 0, 0, LV_DIR_RIGHT);
+    lv_obj_t *tile_set_bat      = lv_tileview_add_tile(settings_tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    lv_obj_t *tile_set_throttle = lv_tileview_add_tile(settings_tileview, 2, 0, LV_DIR_LEFT);
 
+    createSettingsTile(tile_set_water, "WASSER",
+                        &currentSettings.warn_temp, 1.0f, 40, 130,
+                        &currentSettings.max_temp, 1.0f, 40, 150,
+                        "%.0f°C");
+
+    createSettingsTile(tile_set_bat, "BATTERIE",
+                        &currentSettings.warn_bat, 0.1f, 9.0f, 16.0f,
+                        &currentSettings.min_bat, 0.1f, 8.0f, 16.0f,
+                        "%.1fV");
+
+    createSettingsTile(tile_set_throttle, "GASPEDAL",
+                        &currentSettings.throttle_warn_pct, 1.0f, 0, 100,
+                        &currentSettings.throttle_max_pct, 1.0f, 0, 100,
+                        "%.0f%%");
+
+    // Speichern-Button liegt als Overlay über dem Tileview und bleibt auf
+    // allen Kacheln sichtbar/klickbar.
     lv_obj_t *btn_save = lv_btn_create(settings_screen);
-    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_MID, 0, -20);
     lv_obj_t *lbl = lv_label_create(btn_save);
     lv_label_set_text(lbl, "Speichern & Beenden");
 
@@ -244,33 +377,98 @@ void createSettingsUI() {
     }, LV_EVENT_CLICKED, NULL);
 }
 
-// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE) ---
+// Baut ein rundes Tacho-Style-Meter mit Skalenstrichen, 3 Farbzonen
+// (Normal/Warnung/Alarm) sowie Nadel und großer digitaler Anzeige im Zentrum.
+// invert_zones=true: niedrige Werte sind kritisch (z.B. Batteriespannung).
+void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float max_val,
+                        float warn_val, float alert_val, bool invert_zones,
+                        lv_obj_t **out_meter, lv_meter_indicator_t **out_needle, lv_obj_t **out_value_label,
+                        lv_obj_t **out_secondary_label) {
+    setDarkBg(tile);
+
+    lv_obj_t *title_label = lv_label_create(tile);
+    lv_label_set_text(title_label, title);
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 30);
+
+    lv_obj_t *meter = lv_meter_create(tile);
+    setDarkBg(meter);
+    lv_obj_center(meter);
+    lv_obj_set_size(meter, 420, 420);
+
+    lv_meter_scale_t *scale = lv_meter_add_scale(meter);
+    lv_meter_set_scale_range(meter, scale, (int32_t)min_val, (int32_t)max_val, 270, 135);
+    lv_meter_set_scale_ticks(meter, scale, 41, 2, 8, lv_palette_darken(LV_PALETTE_GREY, 2));
+    lv_meter_set_scale_major_ticks(meter, scale, 8, 3, 14, lv_color_white(), 12);
+
+    float zone_low_end, zone_mid_end, zone_high_end;
+    lv_color_t zone1_color, zone2_color, zone3_color;
+    if (invert_zones) {
+        zone_low_end  = alert_val;
+        zone_mid_end  = warn_val;
+        zone_high_end = max_val;
+        zone1_color = lv_palette_main(LV_PALETTE_RED);
+        zone2_color = lv_palette_main(LV_PALETTE_YELLOW);
+        zone3_color = currentSettings.color_primary;
+    } else {
+        zone_low_end  = warn_val - warn_val * 0.10f;
+        zone_mid_end  = warn_val;
+        zone_high_end = alert_val;
+        zone1_color = currentSettings.color_primary;
+        zone2_color = lv_palette_main(LV_PALETTE_YELLOW);
+        zone3_color = lv_palette_main(LV_PALETTE_RED);
+    }
+
+    lv_meter_indicator_t *zone1 = lv_meter_add_arc(meter, scale, 10, zone1_color, 0);
+    lv_meter_set_indicator_start_value(meter, zone1, (int32_t)min_val);
+    lv_meter_set_indicator_end_value(meter, zone1, (int32_t)zone_low_end);
+
+    lv_meter_indicator_t *zone2 = lv_meter_add_arc(meter, scale, 10, zone2_color, 0);
+    lv_meter_set_indicator_start_value(meter, zone2, (int32_t)zone_low_end);
+    lv_meter_set_indicator_end_value(meter, zone2, (int32_t)zone_mid_end);
+
+    lv_meter_indicator_t *zone3 = lv_meter_add_arc(meter, scale, 10, zone3_color, 0);
+    lv_meter_set_indicator_start_value(meter, zone3, (int32_t)zone_mid_end);
+    lv_meter_set_indicator_end_value(meter, zone3, (int32_t)zone_high_end);
+
+    lv_meter_indicator_t *needle = lv_meter_add_needle_line(meter, scale, 5, currentSettings.color_secondary, -10);
+
+    lv_obj_t *value_label = lv_label_create(tile);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(value_label, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_align(value_label, LV_ALIGN_CENTER, 0, 90);
+
+    lv_obj_t *secondary_label = lv_label_create(tile);
+    lv_obj_set_style_text_color(secondary_label, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_align(secondary_label, LV_ALIGN_CENTER, 0, 140);
+
+    *out_meter = meter;
+    *out_needle = needle;
+    *out_value_label = value_label;
+    *out_secondary_label = secondary_label;
+}
+
+// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL) ---
 void createGaugesUI() {
     main_screen = lv_obj_create(NULL);
+    setDarkBg(main_screen);
 
     tileview = lv_tileview_create(main_screen);
-    tile_water = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
-    tile_bat   = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT);
+    setDarkBg(tileview);
+    tile_water    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
+    tile_bat      = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_throttle = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT);
 
-    // TILE 1: WASSERTEMP
-    water_meter = lv_meter_create(tile_water);
-    lv_obj_center(water_meter);
-    lv_obj_set_size(water_meter, 420, 420);
-    lv_meter_scale_t *scale_w = lv_meter_add_scale(water_meter);
-    lv_meter_set_scale_range(water_meter, scale_w, 40, 130, 240, 150);
-    water_needle = lv_meter_add_needle_line(water_meter, scale_w, 5, currentSettings.color_secondary, -10);
-    water_label = lv_label_create(tile_water);
-    lv_obj_align(water_label, LV_ALIGN_CENTER, 0, 90);
+    // TILE 1: WASSERTEMP (40-130 °C, Warnung ab warn_temp, Alarm ab max_temp)
+    createStyledMeter(tile_water, "WASSER", 40, 130, currentSettings.warn_temp, currentSettings.max_temp,
+                       false, &water_meter, &water_needle, &water_label, &water_secondary_label);
 
-    // TILE 2: BATTERIE
-    bat_meter = lv_meter_create(tile_bat);
-    lv_obj_center(bat_meter);
-    lv_obj_set_size(bat_meter, 420, 420);
-    lv_meter_scale_t *scale_b = lv_meter_add_scale(bat_meter);
-    lv_meter_set_scale_range(bat_meter, scale_b, 100, 160, 240, 150);
-    bat_needle = lv_meter_add_needle_line(bat_meter, scale_b, 5, currentSettings.color_secondary, -10);
-    bat_label = lv_label_create(tile_bat);
-    lv_obj_align(bat_label, LV_ALIGN_CENTER, 0, 90);
+    // TILE 2: BATTERIE (10.0-16.0 V, intern *10 skaliert für Ganzzahl-Genauigkeit)
+    createStyledMeter(tile_bat, "BATTERIE", 100, 160, currentSettings.warn_bat * 10, currentSettings.min_bat * 10,
+                       true, &bat_meter, &bat_needle, &bat_label, &bat_secondary_label);
+
+    // TILE 3: GASPEDALSTELLUNG (0-100 %)
+    createStyledMeter(tile_throttle, "GASPEDAL", 0, 100, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct,
+                       false, &throttle_meter, &throttle_needle, &throttle_label, &throttle_secondary_label);
 
     lv_scr_load(main_screen);
 }
@@ -278,6 +476,7 @@ void createGaugesUI() {
 // --- FEHLERCODE-ÜBERSICHT (per Doppeltipp erreichbar) ---
 void createDtcUI() {
     dtc_screen = lv_obj_create(NULL);
+    setDarkBg(dtc_screen);
 
     lv_obj_t *diag_title = lv_label_create(dtc_screen);
     lv_label_set_text(diag_title, "FEHLERCODE-UEBERSICHT");

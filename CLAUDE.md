@@ -3,8 +3,9 @@
 ## Projektübersicht
 
 ESP32-C6-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
-Zeigt Kühlmitteltemperatur und Batteriespannung als analoge Rundinstrumente (LVGL)
-auf einem runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose
+Zeigt Kühlmitteltemperatur, Batteriespannung und Gaspedalstellung als analoge
+Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm) auf einem
+runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose
 (DTCs lesen/löschen) und BMW CBS-Service-Reset.
 
 ## Hardware
@@ -79,13 +80,29 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 
 ## UI / Anzeige-Logik
 
-- **Tileview mit 3 Kacheln** (horizontales Wischen):
-  1. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C)
-  2. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V)
-  3. **Diagnose-Kachel** – DTCs auslesen/löschen, CBS-Öl-Service-Reset
+- **Tileview mit 3 Kacheln** (horizontales Wischen), erzeugt über den gemeinsamen
+  Helper `createStyledMeter()` (Skalenstriche, 3 Farbzonen-Bögen, Nadel, große
+  digitale Anzeige im Zentrum, kleines Sekundär-Label darunter – Tacho-Style,
+  dunkler Hintergrund via `setDarkBg()`):
+  1. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C),
+     Sekundärwert darunter: aktuelle Batteriespannung
+  2. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V),
+     Sekundärwert darunter: aktuelle Kühlmitteltemperatur
+  3. **Gaspedal-Kachel** – Rundinstrument Gaspedalstellung (0–100 %),
+     Sekundärwert darunter: aktuelle Kühlmitteltemperatur
+- **Fehlercode-Übersicht** – eigener Screen (per Doppeltipp erreichbar), DTCs
+  auslesen/löschen, CBS-Öl-Service-Reset, „Zurück"-Button
 - **Farbverlauf der Nadel/Anzeige:** Primärfarbe → Gelb (10 % vor Warnschwelle) →
-  Rot (`warn_temp` bis `max_temp`), oberhalb `max_temp` blinkt der Wert rot/schwarz (250 ms)
+  Rot (Warn- bis Alarmschwelle), oberhalb der Alarmschwelle blinkt der Wert rot/schwarz
+  (250 ms) – Logik zentral in `computeGaugeColor()`. Bei der Batterie ist die Richtung
+  umgekehrt (niedrige Spannung = kritisch, `invert_zones=true` in `createStyledMeter()`)
 - **3 Sekunden Touch in der Displaymitte** öffnet den Einstellungs-Screen
+- **Einstellungs-Screen** – eigenes Tileview mit 3 Kacheln (Wasser/Batterie/Gaspedal),
+  je Kachel per +/- Buttons verstellbar: **Warnschwelle** (Schwelle 1) und
+  **Limit/Alarmschwelle** (Schwelle 2), über `createSettingsTile()` /
+  `createThresholdRow()` gebaut. „Speichern & Beenden"-Button liegt als Overlay
+  über dem Tileview und schreibt direkt in `currentSettings`
+- **Doppeltipp** auf dem Hauptbildschirm öffnet die Fehlercode-Übersicht
 - **Boot-Animation** aus JPEG-Frames von der SD-Karte läuft vor der LVGL-Initialisierung
 
 ## OBD2 / UDS-Protokoll
@@ -96,11 +113,16 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 - CBS-Service-Reset: Routine Control (UDS Service `0x31`) an Kombiinstrument `0x611`
 - Kühlmitteltemperatur wird aktuell aus einem PT-CAN-Broadcast (ID `0x1D0`, Byte 0 − 40 = °C)
   gelesen, **nicht** per Mode-01-Polling – ID muss ggf. mit Diagnosetool verifiziert werden
+- Gaspedalstellung wird aus einem PT-CAN-Broadcast (ID `0x1F0`, Byte 0 linear auf 0–100 %
+  skaliert) gelesen – **Platzhalter-ID**, muss am Fahrzeug per CAN-Sniffer/Diagnosetool
+  verifiziert werden
 
 ## Bekannte Einschränkungen / offene Punkte
 
 - CAN-ID `0x1D0` für Kühlmitteltemperatur ist ein Startwert und muss am Fahrzeug
   per CAN-Sniffer/Diagnosetool verifiziert werden
+- CAN-ID `0x1F0` für die Gaspedalstellung ist ebenfalls ein Startwert/Platzhalter
+  und muss am Fahrzeug verifiziert werden
 - Batteriespannung (`current_bat_voltage`) wird aktuell noch nicht per CAN aktualisiert
   (nur Platzhalter-Initialwert) – Auswertung in `processCAN()` ergänzen
 - DTC-Antworten werden nur gesendet, aber die Antwort-Frames (`0x7E8`) werden noch
