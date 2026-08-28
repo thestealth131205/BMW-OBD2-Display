@@ -7,7 +7,6 @@
 #include <lvgl.h>
 #include <driver/twai.h>
 #include <Arduino_GFX_Library.h>
-#include <Arduino_SH8601.h>
 #include <math.h>
 
 // --- HARDWARE & DISPLAY CONFIGURATION (Waveshare 1.43" AMOLED ESP32-C6) ---

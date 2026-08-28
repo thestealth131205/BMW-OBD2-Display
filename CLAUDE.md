@@ -47,11 +47,10 @@ pio device monitor
 ```
 
 ### Abhängigkeiten (`platformio.ini`)
-- `moononournation/GFX Library for Arduino` – QSPI-Basis (`Arduino_ESP32QSPI`,
-  `Arduino_CO5300`); der eigentliche SH8601-Treiber (`include/Arduino_SH8601.h`,
-  Subklasse von `Arduino_CO5300`) liegt lokal im Projekt, da Arduino_GFX
-  SH8601 nicht nativ unterstützt (Init-Sequenz laut offiziellem Waveshare-SDK
-  verifiziert: `waveshareteam/ESP32-C6-Touch-AMOLED-1.43`)
+- `moononournation/GFX Library for Arduino` – enthält (ab v1.5.0) den nativen
+  `Arduino_SH8601`-Treiber inkl. QSPI-Basis (`Arduino_ESP32QSPI`); Init-Sequenz
+  gegen das offizielle Waveshare-SDK (`waveshareteam/ESP32-C6-Touch-AMOLED-1.43`)
+  verifiziert
 - `lvgl/lvgl` (v8) – UI-Framework (Meter, Tileview, Labels, Buttons)
 - `bodmer/TJpg_Decoder` – JPEG-Dekodierung für die Boot-Animation
 - ESP32-Arduino-Core: `SD.h` (microSD), `Wire.h` (I2C-Touch) und `driver/twai.h`
@@ -74,8 +73,7 @@ BMW E90 OBD2 Display/
 ├── src/
 │   └── main.cpp          ← Hauptprogramm (alle Logik hier)
 ├── include/
-│   ├── lv_conf.h          ← LVGL-Konfiguration
-│   └── Arduino_SH8601.h   ← SH8601-Displaytreiber (Subklasse von Arduino_CO5300)
+│   └── lv_conf.h          ← LVGL-Konfiguration
 ├── platformio.ini        ← Build-Konfiguration
 ├── CLAUDE.md              ← Diese Datei
 └── memory.md              ← Projektnotizen / Fortschritt
