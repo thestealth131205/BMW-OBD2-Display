@@ -185,6 +185,12 @@ void playBootAnimation(const char* brand) {
     const int totalFrames = 150;
     const int frameDelayMs = 66; // 15 FPS
 
+    char dirPath[48];
+    snprintf(dirPath, sizeof(dirPath), "/anim_%s", brand);
+    if (!SD.exists(dirPath)) {
+        return; // Kein Animationsordner vorhanden -> ueberspringen
+    }
+
     for (int i = 0; i < totalFrames; i++) {
         unsigned long start = millis();
         snprintf(path, sizeof(path), "/anim_%s/frame_%03d.jpg", brand, i);
@@ -765,10 +771,11 @@ void setup() {
     gfx->fillScreen(RGB565_BLACK);
 
     SPI.begin();
-    SD.begin(SD_CS_PIN);
 
-    // 1. Boot-Animation abspielen
-    playBootAnimation(currentSettings.brand);
+    // 1. Boot-Animation abspielen (nur wenn SD-Karte gesteckt ist)
+    if (SD.begin(SD_CS_PIN)) {
+        playBootAnimation(currentSettings.brand);
+    }
 
     // 2. LVGL initialisieren
     lv_init();
