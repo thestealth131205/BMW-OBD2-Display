@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,5 +37,16 @@ jobs:
         with:
           name: firmware-esp32-c6
           path: |
+            .pio/build/esp32-c6-devkitc-1/firmware.bin
+            .pio/build/esp32-c6-devkitc-1/firmware.elf
+
+      - name: Create/Update Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          make_latest: true
+          files: |
             .pio/build/esp32-c6-devkitc-1/firmware.bin
             .pio/build/esp32-c6-devkitc-1/firmware.elf
