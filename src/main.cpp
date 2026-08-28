@@ -1004,6 +1004,7 @@ void setup() {
     Serial.begin(115200);
 
     gfx->begin();
+    gfx->setBrightness(255);
     gfx->fillScreen(RGB565_BLACK);
 
     SPI.begin();
