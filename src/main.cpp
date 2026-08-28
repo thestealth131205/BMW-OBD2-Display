@@ -76,9 +76,10 @@ lv_obj_t *rpm_leds[6]; // Schaltpunktanzeige statt digitaler Anzeige: 4x Gelb, 1
 lv_obj_t *dtc_status_label;
 lv_obj_t *cbs_status_label;
 
-// Dynamische Live-Werte
-float current_water_temp = 90.0f;
-float current_bat_voltage = 12.4f;
+// Dynamische Live-Werte - Startwerte werden angezeigt, solange keine OBD2/CAN-Verbindung
+// besteht (kein Blockieren beim Booten ohne CAN-Daten, siehe initCAN()/processCAN())
+float current_water_temp = 105.0f;
+float current_bat_voltage = 12.6f;
 float current_throttle_position = 0.0f;
 float current_rpm = 800.0f; // Leerlaufdrehzahl als Platzhalter-Startwert
 char last_dtc_text[64] = "Keine Fehler im Speicher";
