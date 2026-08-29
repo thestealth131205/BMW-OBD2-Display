@@ -29,6 +29,15 @@ sonst schaltet sich das Board nach dem Einschalt-Impuls selbst wieder aus
 (Bootloop, grüne LED flackert rhythmisch). Verifiziert gegen das offizielle
 Waveshare-Factory-SDK (`Tca9554_Init()`).
 
+**Wichtig (grüner/verfälschter Hintergrund):** Der native `Arduino_SH8601`-
+Treiber der GFX-Bibliothek sendet das Waveshare-spezifische Kommando
+`0xC4=0x80` (SPI-Mode-Control) nicht. Es muss direkt nach `SLPOUT` und vor
+allen weiteren Konfigurationskommandos (`PIXFMT`/`WCTRLD1`/Brightness) sowie
+vor `DISPON` gesendet werden, sonst interpretiert das Panel die QSPI-Bilddaten
+falsch. Deshalb überschreibt die eigene Unterklasse `Arduino_SH8601W`
+(`src/main.cpp`) `tftInit()` mit der werksseitigen Kommandoreihenfolge aus
+`display_bsp.cpp`.
+
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver
 (z. B. TJA1050/SN65HVD230) zwischen den GPIOs und dem OBD2-Stecker benötigt.
@@ -100,16 +109,19 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   3 Farbzonen-Bögen, Nadel, große digitale Anzeige im Zentrum, kleines
   Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`):
   1. **Multi-Daten-Kachel** (`createMultiTile()`, erste/Standard-Startkachel) –
-     ohne Titel: RPM-Ring-Skala (0–8000 U/min) im Hintergrund mit
-     Skalenstrichen/-beschriftung in Weiß und den gleichen dynamischen
-     Farbzonen (Primärfarbe → Gelb/Orange → Rot nach `rpm_warn`/`rpm_limit`)
-     wie die anderen Anzeigen; Nadel als weißer, spitz zulaufender Zeiger mit
-     dunkel eingefärbtem „Schweif" (`createTrailStyleNeedle()`), zeigt die
-     aktuelle Drehzahl an. Mittig groß die Geschwindigkeit
-     (`current_speed_kmh`) in Primärfarbe, darunter „KM/H", darunter 4
-     Zusatzfelder in Weiß (Batterie, Gaspedal, Drehzahl, Wasser) – nur das
-     letzte Feld (Wasser) färbt sich ab 110 °C orange, alle anderen bleiben
-     immer weiß
+     ohne Titel: statisches Hintergrundbild (`assets/multi_bg.jpg`, als RGB565
+     im Flash eingebettet über `include/multi_bg_img.h`/`src/multi_bg_img.cpp`,
+     `lv_img_dsc_t multi_bg_img`) mit RPM-Ring (0–8000 U/min), Skala und
+     Farbverlauf – **fest im Bild vorgegeben, reagiert nicht auf die
+     Primär-/Sekundärfarb-Einstellung**, anders als die übrigen 5 Anzeigen.
+     Ein transparentes `lv_meter`-Objekt ohne eigene Skala/Ticks dient nur
+     noch der Winkelberechnung für die Nadel; Nadel als weißer, spitz
+     zulaufender Zeiger mit dunkel eingefärbtem „Schweif"
+     (`createTrailStyleNeedle()`), zeigt die aktuelle Drehzahl an. Mittig groß
+     die Geschwindigkeit (`current_speed_kmh`) in Primärfarbe, darunter
+     „KM/H", darunter 4 Zusatzfelder in Weiß (Batterie, Gaspedal, Drehzahl,
+     Wasser) – nur das letzte Feld (Wasser) färbt sich ab 110 °C orange, alle
+     anderen bleiben immer weiß
   2. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C),
      Sekundärwert darunter: aktuelle Batteriespannung
   3. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V),

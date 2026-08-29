@@ -8,6 +8,7 @@
 #include <driver/twai.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>
+#include "multi_bg_img.h"
 
 // --- HARDWARE & DISPLAY CONFIGURATION (Waveshare 1.43" AMOLED ESP32-C6) ---
 // Pinbelegung laut offiziellem Waveshare-SDK
@@ -38,7 +39,56 @@
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     10 /* CS */, 11 /* SCK */, 4 /* D0 */, 5 /* D1 */, 6 /* D2 */, 7 /* D3 */
 );
-Arduino_SH8601 *gfx = new Arduino_SH8601(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+// Eigene SH8601-Unterklasse: der native Arduino_SH8601-Treiber der GFX-
+// Bibliothek sendet das Waveshare-spezifische Kommando 0xC4=0x80 (SPI-Mode-
+// Control) gar nicht. Es MUSS direkt nach SLPOUT und vor allen weiteren
+// Konfigurationskommandos (PIXFMT/WCTRLD1/Brightness) sowie vor DISPON
+// gesendet werden, sonst interpretiert das Panel die QSPI-Bilddaten falsch
+// (grüner/verfaelschter Hintergrund statt Schwarz). Reihenfolge 1:1 aus dem
+// offiziellen Waveshare-BSP (display_bsp.cpp) uebernommen.
+class Arduino_SH8601W : public Arduino_SH8601 {
+public:
+    Arduino_SH8601W(Arduino_DataBus *bus, int8_t rst, uint8_t r, int16_t w, int16_t h)
+        : Arduino_SH8601(bus, rst, r, w, h) {}
+
+protected:
+    void tftInit() override {
+        if (_rst != GFX_NOT_DEFINED) {
+            pinMode(_rst, OUTPUT);
+            digitalWrite(_rst, HIGH);
+            delay(10);
+            digitalWrite(_rst, LOW);
+            delay(SH8601_RST_DELAY);
+            digitalWrite(_rst, HIGH);
+            delay(SH8601_RST_DELAY);
+        } else {
+            _bus->sendCommand(SH8601_C_SWRESET);
+            delay(SH8601_RST_DELAY);
+        }
+
+        _bus->beginWrite();
+        _bus->writeCommand(SH8601_C_SLPOUT);
+        _bus->endWrite();
+        delay(SH8601_SLPOUT_DELAY);
+
+        _bus->beginWrite();
+        _bus->writeC8D8(SH8601_W_SPIMODECTL, 0x80); // MUSS zuerst kommen
+        _bus->writeCommand(SH8601_C_NORON);
+        _bus->writeCommand(SH8601_C_INVOFF);
+        _bus->writeC8D8(SH8601_W_PIXFMT, 0x05); // 16 bit/pixel
+        _bus->writeC8D8(SH8601_W_WCTRLD1, 0x20); // Brightness Control On
+        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALHBM, 0xFF);
+        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0x00);
+        _bus->writeCommand(SH8601_C_DISPON);
+        _bus->endWrite();
+        delay(10);
+
+        invertDisplay(false);
+    }
+};
+
+Arduino_SH8601W *gfx = new Arduino_SH8601W(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 // --- LVGL BUFFER (Partieller Line-Buffer im SRAM) ---
 static lv_disp_draw_buf_t draw_buf;
@@ -1008,26 +1058,31 @@ void createTrailStyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
     lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE);
 }
 
-// Baut die Multi-Daten-Kachel (erste Kachel, kein Titel): RPM-Ring-Skala
-// (0-8000, Skala/Beschriftung in Weiß, Farbzonen dynamisch nach Primärfarbe
-// wie bei den anderen Anzeigen) im Hintergrund, mittig groß die
-// Geschwindigkeit in Primärfarbe, darunter 4 Zusatzfelder in Weiß
-// (Batterie/Gaspedal/Drehzahl/Wasser) - nur das letzte Feld (Wasser) faerbt
-// sich ab 110°C orange (siehe updateGaugeUI()).
+// Baut die Multi-Daten-Kachel (erste Kachel, kein Titel): statisches
+// Hintergrundbild (multi_bg_img, RPM-Ring 0-8000 fest eingefaerbt, reagiert
+// NICHT auf die Primär-/Sekundärfarbe), mittig groß die Geschwindigkeit in
+// Primärfarbe, darunter 4 Zusatzfelder in Weiß (Batterie/Gaspedal/Drehzahl/
+// Wasser) - nur das letzte Feld (Wasser) faerbt sich ab 110°C orange (siehe
+// updateGaugeUI()).
 void createMultiTile(lv_obj_t *tile) {
     setDarkBg(tile);
 
+    // Statisches Hintergrundbild (RPM-Ring, Skala, Farbverlauf, LED-Boxen) -
+    // ersetzt die zuvor per LVGL gezeichnete Ring-Skala/Farbzonen.
+    lv_obj_t *bg_img = lv_img_create(tile);
+    lv_img_set_src(bg_img, &multi_bg_img);
+    lv_obj_center(bg_img);
+
+    // Meter bleibt nur fuer die Nadel-Winkelberechnung bestehen (transparent,
+    // ohne eigene Skala/Ticks/Farbzonen, da bereits im Hintergrundbild).
     multi_meter = lv_meter_create(tile);
-    setDarkBg(multi_meter);
+    lv_obj_set_style_bg_opa(multi_meter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(multi_meter, 0, 0);
     lv_obj_center(multi_meter);
     lv_obj_set_size(multi_meter, 450, 450);
 
     lv_meter_scale_t *scale = lv_meter_add_scale(multi_meter);
     lv_meter_set_scale_range(multi_meter, scale, 0, 8000, 270, 135);
-    lv_meter_set_scale_ticks(multi_meter, scale, 41, 2, 8, lv_color_white());
-    lv_meter_set_scale_major_ticks(multi_meter, scale, 8, 3, 14, lv_color_white(), 12);
-
-    addZoneColoring(multi_meter, scale, 0, 8000, currentSettings.rpm_warn, currentSettings.rpm_limit, false);
 
     createTrailStyleNeedle(multi_meter, scale, &multi_needle_trail, &multi_needle_tip);
 
@@ -1204,13 +1259,9 @@ void setup() {
 
     gfx->begin(40000000); // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
     Serial.println("[BOOT] gfx->begin ok");
-    // Der Waveshare-1.43"-SH8601 benoetigt zusaetzlich das SPI-Mode-Control-
-    // Kommando 0xC4=0x80, das die native Arduino_GFX-Init-Sequenz nicht sendet.
-    // Ohne dieses Kommando interpretiert das Panel die QSPI-Daten nicht und
-    // bleibt schwarz (Init-Sequenz aus Waveshare display_bsp.cpp verifiziert).
-    bus->beginWrite();
-    bus->writeC8D8(0xC4, 0x80);
-    bus->endWrite();
+    // 0xC4=0x80 wird bereits in Arduino_SH8601W::tftInit() in der korrekten
+    // Reihenfolge gesendet (vor PIXFMT/WCTRLD1/DISPON). Letzter Schritt laut
+    // Waveshare-BSP: Normal-Brightness nach DISPON auf den Zielwert setzen.
     gfx->setBrightness(255);
     gfx->fillScreen(RGB565_BLACK);
     Serial.println("[BOOT] display init ok");
