@@ -17,7 +17,12 @@
 #define LV_TICK_CUSTOM_INCLUDE     "Arduino.h"
 #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
 
-#define LV_MEM_SIZE (64U * 1024U)
+/* 64 KB reichten für dieses UI nicht aus (5 Meter mit je ~19 Zonen-/Skala-
+ * Indikatoren, Settings- und DTC-Screen, 20 Farb-Buttons usw.) - der LVGL-
+ * Heap lief über, fehlgeschlagene Allocs führten zu leeren/falschen Labels
+ * ("F" statt Zahlen, fehlende Settings-Werte, falsche Hintergrundfarben).
+ * ESP32-C6 hat 512 KB SRAM, daher genug Reserve für einen größeren Pool. */
+#define LV_MEM_SIZE (256U * 1024U)
 
 #define LV_USE_LOG 0
 

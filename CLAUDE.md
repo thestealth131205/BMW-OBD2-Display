@@ -3,13 +3,14 @@
 ## Projektübersicht
 
 ESP32-C6-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
-Zeigt Kühlmitteltemperatur, Batteriespannung, Gaspedalstellung als analoge
-Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen (Normal/Warnung/Alarm), Drehzahl
-als Schaltpunktanzeige (6 LEDs) sowie G-Kraft als Polar-Raster-Grafik auf einem
-runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose (DTCs
-lesen/löschen) und BMW CBS-Service-Reset. Primär-/Sekundärfarbe sind in den
-Einstellungen frei wählbar (vertikal scrollbare Farbpalette) und wirken sich
-auf alle 5 Anzeigen aus.
+Zeigt eine Multi-Daten-Kachel (Geschwindigkeit zentral, RPM-Ring im Hintergrund
+plus Batterie/Gaspedal/Drehzahl/Wasser als Zusatzfelder) sowie Kühlmitteltemperatur,
+Batteriespannung, Gaspedalstellung als analoge Tacho-Style-Rundinstrumente (LVGL)
+mit Farbzonen (Normal/Warnung/Alarm), Drehzahl als Schaltpunktanzeige (6 LEDs)
+sowie G-Kraft als Polar-Raster-Grafik auf einem runden 466×466 AMOLED-Touchdisplay
+an, inkl. Boot-Animation, Diagnose (DTCs lesen/löschen) und BMW CBS-Service-Reset.
+Primär-/Sekundärfarbe sind in den Einstellungen frei wählbar (vertikal scrollbare
+Farbpalette) und wirken sich auf alle 6 Anzeigen aus.
 
 ## Hardware
 
@@ -94,17 +95,28 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 
 ## UI / Anzeige-Logik
 
-- **Tileview mit 5 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
+- **Tileview mit 6 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
   erzeugt über den gemeinsamen Helper `createStyledMeter()` (Skalenstriche,
   3 Farbzonen-Bögen, Nadel, große digitale Anzeige im Zentrum, kleines
   Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`):
-  1. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C),
+  1. **Multi-Daten-Kachel** (`createMultiTile()`, erste/Standard-Startkachel) –
+     ohne Titel: RPM-Ring-Skala (0–8000 U/min) im Hintergrund mit
+     Skalenstrichen/-beschriftung in Weiß und den gleichen dynamischen
+     Farbzonen (Primärfarbe → Gelb/Orange → Rot nach `rpm_warn`/`rpm_limit`)
+     wie die anderen Anzeigen; Nadel als weißer, spitz zulaufender Zeiger mit
+     dunkel eingefärbtem „Schweif" (`createTrailStyleNeedle()`), zeigt die
+     aktuelle Drehzahl an. Mittig groß die Geschwindigkeit
+     (`current_speed_kmh`) in Primärfarbe, darunter „KM/H", darunter 4
+     Zusatzfelder in Weiß (Batterie, Gaspedal, Drehzahl, Wasser) – nur das
+     letzte Feld (Wasser) färbt sich ab 110 °C orange, alle anderen bleiben
+     immer weiß
+  2. **Wasser-Kachel** – Rundinstrument Kühlmitteltemperatur (40–130 °C),
      Sekundärwert darunter: aktuelle Batteriespannung
-  2. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V),
+  3. **Batterie-Kachel** – Rundinstrument Batteriespannung (10.0–16.0 V),
      Sekundärwert darunter: aktuelle Kühlmitteltemperatur
-  3. **Gaspedal-Kachel** – Rundinstrument Gaspedalstellung (0–100 %),
+  4. **Gaspedal-Kachel** – Rundinstrument Gaspedalstellung (0–100 %),
      Sekundärwert darunter: aktuelle Kühlmitteltemperatur
-  4. **Drehzahl-Kachel** (`createRpmTile()`) – Rundinstrument 0–8000 U/min mit
+  5. **Drehzahl-Kachel** (`createRpmTile()`) – Rundinstrument 0–8000 U/min mit
      Nadel/Farbzonen, aber **anstelle der digitalen Anzeige eine
      Schaltpunktanzeige aus 6 LED-Punkten** (`rpm_leds[6]`): ausgegraut
      unterhalb der Warnschwelle (Standard 5000 U/min), dann 4 gelbe LEDs
@@ -113,7 +125,7 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
      Limit-/Redline-Schwelle (Standard 7000 U/min) – Logik in
      `computeRpmLedThresholds()`. Sobald die grüne LED leuchtet, blinken alle
      aktiven LEDs im 250-ms-Takt gemeinsam (Schaltpunkt-Warnblinken)
-  5. **G-Force-Kachel** (`createGForceTile()`) – kreisförmiges Polar-Raster
+  6. **G-Force-Kachel** (`createGForceTile()`) – kreisförmiges Polar-Raster
      (2 konzentrische Ringe + Kreuz-Linien) in der Primärfarbe, Titel
      „G-FORCE" oben; mittig im Raster ein Punkt in der Sekundärfarbe
      (`gforce_blob`), dessen Position die aktuelle Quer-/Längsbeschleunigung
@@ -138,11 +150,11 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   (`createColorsSettingsTile()`) enthält zwei vertikal scrollbare Spalten mit
   Farb-Buttons (`createColorPickerColumn()`, Palette `COLOR_PALETTE[]` inkl.
   Neongelb) zur Auswahl der Primär- und Sekundärfarbe; eine Auswahl setzt
-  `currentSettings.color_primary`/`color_secondary` und baut sofort alle 5
+  `currentSettings.color_primary`/`color_secondary` und baut sofort alle 6
   Hauptanzeigen über `rebuildGaugesUI()` neu auf (der aktuell aktive Screen
   bleibt dabei erhalten). Zusätzlich ein **Dropdown oben** (Overlay über dem
   Tileview) zur Auswahl der **Start-Anzeige**
-  (Wasser/Batterie/Gaspedal/Drehzahl/G-Force), die sofort via
+  (Multi/Wasser/Batterie/Gaspedal/Drehzahl/G-Force, Standard: Wasser), die sofort via
   `saveStartupGauge()` in NVS/`Preferences` (Namespace `bmw_disp`, Key
   `startup_gauge`) stromlos gespeichert und beim Boot über
   `loadStartupGauge()` gelesen wird. „Speichern & Beenden"-Button liegt als

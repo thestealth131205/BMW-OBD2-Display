@@ -66,6 +66,7 @@ lv_obj_t *dtc_screen; // Fehlercode-Übersicht (per Doppeltipp erreichbar)
 lv_obj_t *tileview;
 
 // Tiles
+lv_obj_t *tile_multi;
 lv_obj_t *tile_water;
 lv_obj_t *tile_bat;
 lv_obj_t *tile_throttle;
@@ -73,28 +74,47 @@ lv_obj_t *tile_rpm;
 lv_obj_t *tile_gforce;
 
 // Gauges
+// Jede Nadel besteht aus 2 Indikatoren (breite kurze Basis + duenne lange
+// Spitze), die zusammen einen tacho-typischen, spitz zulaufenden
+// "M3-Style"-Zeiger ergeben (siehe createStyledMeter()/createRpmTile()).
 lv_obj_t *water_meter;
 lv_meter_indicator_t *water_needle;
+lv_meter_indicator_t *water_needle_tip;
 lv_obj_t *water_label;
 lv_obj_t *water_secondary_label;   // zeigt Batteriespannung
 
 lv_obj_t *bat_meter;
 lv_meter_indicator_t *bat_needle;
+lv_meter_indicator_t *bat_needle_tip;
 lv_obj_t *bat_label;
 lv_obj_t *bat_secondary_label;     // zeigt Kühlmitteltemperatur
 
 lv_obj_t *throttle_meter;
 lv_meter_indicator_t *throttle_needle;
+lv_meter_indicator_t *throttle_needle_tip;
 lv_obj_t *throttle_label;
 lv_obj_t *throttle_secondary_label; // zeigt Kühlmitteltemperatur
 
 lv_obj_t *rpm_meter;
 lv_meter_indicator_t *rpm_needle;
+lv_meter_indicator_t *rpm_needle_tip;
 lv_obj_t *rpm_leds[6]; // Schaltpunktanzeige statt digitaler Anzeige: 4x Gelb, 1x Gruen, 1x Rot
 
 lv_obj_t *gforce_blob;         // Punkt, der Richtung/Betrag der G-Kraft anzeigt (Sekundärfarbe)
 lv_obj_t *gforce_value_label;  // Betrag in G (z.B. "0.56G")
 lv_obj_t *gforce_speed_label;  // Geschwindigkeit (z.B. "80 KM/H")
+
+// Multi-Daten-Anzeige (erste Kachel): RPM-Ring-Skala im Hintergrund (Nadel
+// als weißer Strich mit dunkel eingefärbtem "Schweif"), mittig groß die
+// Geschwindigkeit, darunter 4 Zusatzfelder (Batterie/Gaspedal/Drehzahl/Wasser).
+lv_obj_t *multi_meter;
+lv_meter_indicator_t *multi_needle_trail;
+lv_meter_indicator_t *multi_needle_tip;
+lv_obj_t *multi_speed_label;
+lv_obj_t *multi_bat_label;
+lv_obj_t *multi_throttle_label;
+lv_obj_t *multi_rpm_label;
+lv_obj_t *multi_water_label;   // einziges farbig reagierendes Feld: ab 110°C orange
 
 // Diagnose UI Elemente
 lv_obj_t *dtc_status_label;
@@ -109,6 +129,9 @@ float current_rpm = 800.0f; // Leerlaufdrehzahl als Platzhalter-Startwert
 float current_gforce_x = 0.0f;   // seitliche Beschleunigung (links/rechts), in g
 float current_gforce_y = 0.0f;   // Längsbeschleunigung (Bremsen/Beschleunigen), in g
 float current_speed_kmh = 0.0f;  // Fahrzeuggeschwindigkeit
+bool gforce_calibrated = false;  // erster CAN-Frame nach Boot wird als 0-Referenz übernommen
+float gforce_offset_x = 0.0f;
+float gforce_offset_y = 0.0f;
 char last_dtc_text[64] = "Keine Fehler im Speicher";
 char last_cbs_text[64] = "CBS Status: OK";
 
@@ -121,13 +144,16 @@ unsigned long last_tap_time = 0;
 bool was_pressed = false;
 
 // --- STROMLOS GESPEICHERTE START-ANZEIGE (NVS/Preferences) ---
-// Index der Kachel, die nach dem Booten angezeigt wird: 0=Wasser, 1=Batterie, 2=Gaspedal, 3=Drehzahl, 4=G-Force
+// Index der Kachel, die nach dem Booten angezeigt wird: 0=Multi, 1=Wasser,
+// 2=Batterie, 3=Gaspedal, 4=Drehzahl, 5=G-Force. Default bleibt Wasser (1),
+// damit ohne OBD2-Verbindung weiterhin der Wasser-Screen mit den Startwerten
+// (105°C/12,6V) angezeigt wird.
 Preferences prefs;
-uint8_t startup_gauge = 0;
+uint8_t startup_gauge = 1;
 
 void loadStartupGauge() {
     prefs.begin("bmw_disp", true);
-    startup_gauge = prefs.getUChar("startup_gauge", 0);
+    startup_gauge = prefs.getUChar("startup_gauge", 1);
     prefs.end();
 }
 
@@ -357,8 +383,18 @@ void processCAN() {
         // Byte-Position sind ein Platzhalter und müssen am Fahrzeug per
         // CAN-Sniffer/Diagnosetool verifiziert werden (analog zu 0x1D0/0x1F0/0x0AA)
         if (message.identifier == 0x0C4) {
-            current_gforce_x = (int8_t)message.data[0] * 0.01f;
-            current_gforce_y = (int8_t)message.data[1] * 0.01f;
+            float raw_x = (int8_t)message.data[0] * 0.01f;
+            float raw_y = (int8_t)message.data[1] * 0.01f;
+            // Erster Frame nach dem Boot legt die aktuelle Lage/Vibration als
+            // 0-Referenz fest, damit die Anzeige beim Start immer bei 0G startet
+            // (unabhängig von Einbaulage/statischem Sensor-Offset).
+            if (!gforce_calibrated) {
+                gforce_offset_x = raw_x;
+                gforce_offset_y = raw_y;
+                gforce_calibrated = true;
+            }
+            current_gforce_x = raw_x - gforce_offset_x;
+            current_gforce_y = raw_y - gforce_offset_y;
             current_speed_kmh = (message.data[2] | (message.data[3] << 8)) * 0.1f;
         }
     }
@@ -388,6 +424,7 @@ void updateGaugeUI() {
 
     // 1. WASSERTEMPERATUR
     lv_meter_set_indicator_value(water_meter, water_needle, (int32_t)current_water_temp);
+    lv_meter_set_indicator_value(water_meter, water_needle_tip, (int32_t)current_water_temp);
     lv_color_t water_color = computeGaugeColor(current_water_temp, currentSettings.warn_temp, currentSettings.max_temp, false, blink_state);
 
     lv_label_set_text_fmt(water_label, "%d°C", (int)current_water_temp);
@@ -396,6 +433,7 @@ void updateGaugeUI() {
 
     // 2. BATTERIESPANNUNG
     lv_meter_set_indicator_value(bat_meter, bat_needle, (int32_t)(current_bat_voltage * 10));
+    lv_meter_set_indicator_value(bat_meter, bat_needle_tip, (int32_t)(current_bat_voltage * 10));
     lv_color_t bat_color = computeGaugeColor(current_bat_voltage, currentSettings.warn_bat, currentSettings.min_bat, true, blink_state);
 
     lv_label_set_text_fmt(bat_label, "%.1fV", current_bat_voltage);
@@ -404,6 +442,7 @@ void updateGaugeUI() {
 
     // 3. GASPEDALSTELLUNG
     lv_meter_set_indicator_value(throttle_meter, throttle_needle, (int32_t)current_throttle_position);
+    lv_meter_set_indicator_value(throttle_meter, throttle_needle_tip, (int32_t)current_throttle_position);
     lv_color_t throttle_color = computeGaugeColor(current_throttle_position, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct, false, blink_state);
 
     lv_label_set_text_fmt(throttle_label, "%d%%", (int)current_throttle_position);
@@ -412,6 +451,7 @@ void updateGaugeUI() {
 
     // 4. DREHZAHL (Schaltpunktanzeige mit 6 LEDs statt digitaler Anzeige)
     lv_meter_set_indicator_value(rpm_meter, rpm_needle, (int32_t)current_rpm);
+    lv_meter_set_indicator_value(rpm_meter, rpm_needle_tip, (int32_t)current_rpm);
 
     float rpm_thresholds[6];
     computeRpmLedThresholds(rpm_thresholds);
@@ -444,6 +484,18 @@ void updateGaugeUI() {
     lv_obj_align(gforce_blob, LV_ALIGN_CENTER, (int)blob_x, (int)blob_y);
     lv_label_set_text_fmt(gforce_value_label, "%.2fG", gforce_mag);
     lv_label_set_text_fmt(gforce_speed_label, "%d KM/H", (int)current_speed_kmh);
+
+    // 6. MULTI-DATEN-ANZEIGE (Geschwindigkeit zentral, RPM-Nadel im Hintergrund,
+    // 4 Zusatzfelder in Weiß - nur das letzte Feld (Wasser) faerbt sich ab 110°C orange)
+    lv_meter_set_indicator_value(multi_meter, multi_needle_trail, (int32_t)current_rpm);
+    lv_meter_set_indicator_value(multi_meter, multi_needle_tip, (int32_t)current_rpm);
+    lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
+    lv_label_set_text_fmt(multi_bat_label, "%.1fV", current_bat_voltage);
+    lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_position);
+    lv_label_set_text_fmt(multi_rpm_label, "%d", (int)current_rpm);
+    lv_label_set_text_fmt(multi_water_label, "%d°C", (int)current_water_temp);
+    lv_obj_set_style_text_color(multi_water_label,
+        current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
 }
 
 // Färbt einen Screen/Container im dunklen Tacho-Look (schwarzer Hintergrund, weißer Text)
@@ -662,7 +714,7 @@ void createSettingsUI() {
     // Tileview (bleibt auf allen Kacheln sichtbar/klickbar) und speichert
     // die Auswahl sofort stromlos in den Preferences (NVS).
     lv_obj_t *dd_startup = lv_dropdown_create(settings_screen);
-    lv_dropdown_set_options(dd_startup, "Start: Wasser\nStart: Batterie\nStart: Gaspedal\nStart: Drehzahl\nStart: G-Force");
+    lv_dropdown_set_options(dd_startup, "Start: Multi\nStart: Wasser\nStart: Batterie\nStart: Gaspedal\nStart: Drehzahl\nStart: G-Force");
     lv_dropdown_set_selected(dd_startup, startup_gauge);
     lv_obj_set_width(dd_startup, 220);
     lv_obj_align(dd_startup, LV_ALIGN_TOP_MID, 0, 8);
@@ -745,12 +797,50 @@ void addZoneColoring(lv_obj_t *meter, lv_meter_scale_t *scale, float min_val, fl
     }
 }
 
+// Baut einen an einen BMW-M3-Drehzahlmesser angelehnten Zeiger statt eines
+// einfachen duennen Strichs: eine breite, kurze Basis (dunklere Sekundaerfarbe)
+// naeher am Zentrum, darueber eine duenne, bis an die Skala reichende Spitze
+// (helle Sekundaerfarbe) - zusammen ergibt das eine spitz zulaufende
+// Nadelform. Ein rundes Metall-Hub-Cap mit farbigem Mittelpunkt verdeckt den
+// Drehpunkt. Beide Indikatoren muessen zusammen mit lv_meter_set_indicator_value()
+// aktualisiert werden (siehe updateGaugeUI()).
+void createM3StyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
+                          lv_meter_indicator_t **out_base, lv_meter_indicator_t **out_tip) {
+    lv_color_t base_color = mix_colors(currentSettings.color_secondary, lv_color_black(), 0.45f);
+    lv_color_t tip_color = mix_colors(currentSettings.color_secondary, lv_color_white(), 0.25f);
+
+    *out_base = lv_meter_add_needle_line(meter, scale, 9, base_color, -70);
+    *out_tip = lv_meter_add_needle_line(meter, scale, 3, tip_color, -8);
+
+    lv_obj_t *hub_outer = lv_obj_create(meter);
+    lv_obj_set_size(hub_outer, 34, 34);
+    lv_obj_set_style_radius(hub_outer, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(hub_outer, lv_palette_darken(LV_PALETTE_GREY, 4), 0);
+    lv_obj_set_style_bg_opa(hub_outer, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(hub_outer, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_border_width(hub_outer, 2, 0);
+    lv_obj_center(hub_outer);
+    lv_obj_clear_flag(hub_outer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hub_outer, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *hub_center = lv_obj_create(meter);
+    lv_obj_set_size(hub_center, 14, 14);
+    lv_obj_set_style_radius(hub_center, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(hub_center, currentSettings.color_primary, 0);
+    lv_obj_set_style_bg_opa(hub_center, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hub_center, 0, 0);
+    lv_obj_center(hub_center);
+    lv_obj_clear_flag(hub_center, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hub_center, LV_OBJ_FLAG_CLICKABLE);
+}
+
 // Baut ein rundes Tacho-Style-Meter mit Skalenstrichen, weich eingefärbten
 // Farbzonen (Normal/Warnung/Alarm) sowie Nadel und großer digitaler Anzeige
 // im Zentrum. invert_zones=true: niedrige Werte sind kritisch (z.B. Batteriespannung).
 void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float max_val,
                         float warn_val, float alert_val, bool invert_zones,
-                        lv_obj_t **out_meter, lv_meter_indicator_t **out_needle, lv_obj_t **out_value_label,
+                        lv_obj_t **out_meter, lv_meter_indicator_t **out_needle,
+                        lv_meter_indicator_t **out_needle_tip, lv_obj_t **out_value_label,
                         lv_obj_t **out_secondary_label) {
     setDarkBg(tile);
 
@@ -766,7 +856,9 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
 
     addZoneColoring(meter, scale, min_val, max_val, warn_val, alert_val, invert_zones);
 
-    lv_meter_indicator_t *needle = lv_meter_add_needle_line(meter, scale, 5, currentSettings.color_secondary, -10);
+    lv_meter_indicator_t *needle;
+    lv_meter_indicator_t *needle_tip;
+    createM3StyleNeedle(meter, scale, &needle, &needle_tip);
 
     lv_obj_t *value_label = lv_label_create(tile);
     lv_obj_set_style_text_font(value_label, &lv_font_montserrat_48, 0);
@@ -783,6 +875,7 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
 
     *out_meter = meter;
     *out_needle = needle;
+    *out_needle_tip = needle_tip;
     *out_value_label = value_label;
     *out_secondary_label = secondary_label;
 }
@@ -806,7 +899,7 @@ void createRpmTile(lv_obj_t *tile) {
 
     addZoneColoring(rpm_meter, scale, 0, 8000, currentSettings.rpm_warn, currentSettings.rpm_limit, false);
 
-    rpm_needle = lv_meter_add_needle_line(rpm_meter, scale, 5, currentSettings.color_secondary, -10);
+    createM3StyleNeedle(rpm_meter, scale, &rpm_needle, &rpm_needle_tip);
 
     // 6 LED-Punkte anstelle der digitalen Anzeige
     const int led_x[6] = {-125, -75, -25, 25, 75, 125};
@@ -895,30 +988,99 @@ void createGForceTile(lv_obj_t *tile) {
     lv_obj_align(gforce_speed_label, LV_ALIGN_CENTER, 0, 25);
 }
 
-// --- HAUPT GAUGE UI (TILEVIEW: WASSER / BATTERIE / GASPEDAL / DREHZAHL / G-FORCE) ---
+// Baut einen weißen, spitz zulaufenden Nadel-Zeiger mit dunkel eingefärbtem
+// "Schweif" (kurze breite Basis nahe der Mitte, dünne helle Spitze bis zur
+// Skala) - für die Multi-Daten-Anzeige, unabhängig von der Sekundärfarbe.
+void createTrailStyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
+                             lv_meter_indicator_t **out_trail, lv_meter_indicator_t **out_tip) {
+    lv_color_t trail_color = mix_colors(lv_color_white(), lv_color_black(), 0.65f);
+    *out_trail = lv_meter_add_needle_line(meter, scale, 6, trail_color, -60);
+    *out_tip = lv_meter_add_needle_line(meter, scale, 2, lv_color_white(), -6);
+
+    lv_obj_t *hub = lv_obj_create(meter);
+    lv_obj_set_size(hub, 14, 14);
+    lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(hub, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(hub, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hub, 0, 0);
+    lv_obj_center(hub);
+    lv_obj_clear_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE);
+}
+
+// Baut die Multi-Daten-Kachel (erste Kachel, kein Titel): RPM-Ring-Skala
+// (0-8000, Skala/Beschriftung in Weiß, Farbzonen dynamisch nach Primärfarbe
+// wie bei den anderen Anzeigen) im Hintergrund, mittig groß die
+// Geschwindigkeit in Primärfarbe, darunter 4 Zusatzfelder in Weiß
+// (Batterie/Gaspedal/Drehzahl/Wasser) - nur das letzte Feld (Wasser) faerbt
+// sich ab 110°C orange (siehe updateGaugeUI()).
+void createMultiTile(lv_obj_t *tile) {
+    setDarkBg(tile);
+
+    multi_meter = lv_meter_create(tile);
+    setDarkBg(multi_meter);
+    lv_obj_center(multi_meter);
+    lv_obj_set_size(multi_meter, 450, 450);
+
+    lv_meter_scale_t *scale = lv_meter_add_scale(multi_meter);
+    lv_meter_set_scale_range(multi_meter, scale, 0, 8000, 270, 135);
+    lv_meter_set_scale_ticks(multi_meter, scale, 41, 2, 8, lv_color_white());
+    lv_meter_set_scale_major_ticks(multi_meter, scale, 8, 3, 14, lv_color_white(), 12);
+
+    addZoneColoring(multi_meter, scale, 0, 8000, currentSettings.rpm_warn, currentSettings.rpm_limit, false);
+
+    createTrailStyleNeedle(multi_meter, scale, &multi_needle_trail, &multi_needle_tip);
+
+    multi_speed_label = lv_label_create(tile);
+    lv_obj_set_style_text_font(multi_speed_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(multi_speed_label, currentSettings.color_primary, 0);
+    lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, -60);
+
+    lv_obj_t *unit_label = lv_label_create(tile);
+    lv_label_set_text(unit_label, "KM/H");
+    lv_obj_set_style_text_color(unit_label, lv_color_white(), 0);
+    lv_obj_align(unit_label, LV_ALIGN_CENTER, 0, -15);
+
+    const int field_x[4] = {-165, -55, 55, 165};
+    multi_bat_label      = lv_label_create(tile);
+    multi_throttle_label = lv_label_create(tile);
+    multi_rpm_label      = lv_label_create(tile);
+    multi_water_label    = lv_label_create(tile);
+    lv_obj_t *fields[4] = {multi_bat_label, multi_throttle_label, multi_rpm_label, multi_water_label};
+    for (int i = 0; i < 4; i++) {
+        lv_obj_set_style_text_color(fields[i], lv_color_white(), 0);
+        lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
+    }
+}
+
+// --- HAUPT GAUGE UI (TILEVIEW: MULTI / WASSER / BATTERIE / GASPEDAL / DREHZAHL / G-FORCE) ---
 void createGaugesUI() {
     main_screen = lv_obj_create(NULL);
     setDarkBg(main_screen);
 
     tileview = lv_tileview_create(main_screen);
     setDarkBg(tileview);
-    tile_water    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
-    tile_bat      = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_throttle = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_rpm      = lv_tileview_add_tile(tileview, 3, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-    tile_gforce   = lv_tileview_add_tile(tileview, 4, 0, LV_DIR_LEFT);
+    tile_multi    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
+    tile_water    = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_bat      = lv_tileview_add_tile(tileview, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_throttle = lv_tileview_add_tile(tileview, 3, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_rpm      = lv_tileview_add_tile(tileview, 4, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+    tile_gforce   = lv_tileview_add_tile(tileview, 5, 0, LV_DIR_LEFT);
+
+    // TILE 0: MULTI-DATEN-ANZEIGE (Geschwindigkeit zentral, RPM-Ring im Hintergrund)
+    createMultiTile(tile_multi);
 
     // TILE 1: WASSERTEMP (40-130 °C, Warnung ab warn_temp, Alarm ab max_temp)
     createStyledMeter(tile_water, "WASSER", 40, 130, currentSettings.warn_temp, currentSettings.max_temp,
-                       false, &water_meter, &water_needle, &water_label, &water_secondary_label);
+                       false, &water_meter, &water_needle, &water_needle_tip, &water_label, &water_secondary_label);
 
     // TILE 2: BATTERIE (10.0-16.0 V, intern *10 skaliert für Ganzzahl-Genauigkeit)
     createStyledMeter(tile_bat, "BATTERIE", 100, 160, currentSettings.warn_bat * 10, currentSettings.min_bat * 10,
-                       true, &bat_meter, &bat_needle, &bat_label, &bat_secondary_label);
+                       true, &bat_meter, &bat_needle, &bat_needle_tip, &bat_label, &bat_secondary_label);
 
     // TILE 3: GASPEDALSTELLUNG (0-100 %)
     createStyledMeter(tile_throttle, "GASPEDAL", 0, 100, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct,
-                       false, &throttle_meter, &throttle_needle, &throttle_label, &throttle_secondary_label);
+                       false, &throttle_meter, &throttle_needle, &throttle_needle_tip, &throttle_label, &throttle_secondary_label);
 
     // TILE 4: DREHZAHL (0-8000 U/min, Schaltpunktanzeige statt digitaler Anzeige)
     createRpmTile(tile_rpm);
