@@ -42,7 +42,17 @@ es sendet): Für 16-Bit RGB565 müssen sowohl die DPI-Bits (6-4) als auch die
 DBI-Bits (2-0) `101` sein → `0x55`. Bei `0x05` bleiben die DPI-Bits auf `000`,
 wodurch das Panel die Farben verfälscht und **schwarze Pixel grün leuchten**.
 Der funktionierende Waveshare-Factory-Treiber `esp_lcd_sh8601.c` sendet für
-16 Bit ebenfalls `0x55`.
+16 Bit ebenfalls `0x55`. **Trotz `0xC4=0x80` und `COLMOD=0x55` blieben
+schwarze Flächen weiterhin grün** (andere Farben wie Weiß/Orange/Cyan waren
+bereits korrekt) – Ursache war die Kommando-*Reihenfolge*: Im Werks-Treiber
+(`esp_lcd_sh8601.c: panel_sh8601_init()`) werden **MADCTL (`0x36`) und
+COLMOD (`0x3A`) direkt nach dem Reset VOR `SLPOUT` gesendet**, nicht danach.
+Außerdem folgt nach `DISPON` als letzter Init-Schritt nochmal
+`WDBRIGHTNESSVALNOR (0x51) = 0xFF`, alles noch innerhalb der Init-Sequenz
+(nicht erst per separatem späteren `setBrightness()`-Aufruf). `tftInit()` in
+`Arduino_SH8601W` bildet diese Reihenfolge jetzt 1:1 nach; die im generischen
+Treiber vorhandenen `NORON`/`INVOFF`-Kommandos (im Werks-Init nicht enthalten)
+wurden entfernt.
 
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver

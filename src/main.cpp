@@ -40,13 +40,17 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     10 /* CS */, 11 /* SCK */, 4 /* D0 */, 5 /* D1 */, 6 /* D2 */, 7 /* D3 */
 );
 
-// Eigene SH8601-Unterklasse: der native Arduino_SH8601-Treiber der GFX-
-// Bibliothek sendet das Waveshare-spezifische Kommando 0xC4=0x80 (SPI-Mode-
-// Control) gar nicht. Es MUSS direkt nach SLPOUT und vor allen weiteren
-// Konfigurationskommandos (PIXFMT/WCTRLD1/Brightness) sowie vor DISPON
-// gesendet werden, sonst interpretiert das Panel die QSPI-Bilddaten falsch
-// (grüner/verfaelschter Hintergrund statt Schwarz). Reihenfolge 1:1 aus dem
-// offiziellen Waveshare-BSP (display_bsp.cpp) uebernommen.
+// Eigene SH8601-Unterklasse: Kommandoreihenfolge 1:1 aus dem offiziellen
+// Waveshare-Factory-Treiber uebernommen (esp_lcd_sh8601.c: panel_sh8601_init()
+// + display_bsp.cpp: lcd_init_cmds[]). Zwei Abweichungen zur vorherigen
+// eigenen Sequenz, die dort nachweislich zu gruen verfaelschten Schwarztoenen
+// fuehrten:
+// 1. MADCTL (0x36) und COLMOD (0x3A) werden im Werks-Treiber VOR SLPOUT
+//    gesendet (direkt nach dem Reset), nicht erst danach.
+// 2. Nach DISPON folgt als allerletzter Init-Schritt nochmal
+//    WDBRIGHTNESSVALNOR (0x51) = 0xFF (volle Helligkeit), noch INNERHALB
+//    derselben Init-Sequenz.
+// NORON/INVOFF kommen im Werks-Init nicht vor und wurden entfernt.
 class Arduino_SH8601W : public Arduino_SH8601 {
 public:
     Arduino_SH8601W(Arduino_DataBus *bus, int8_t rst, uint8_t r, int16_t w, int16_t h)
@@ -68,23 +72,39 @@ protected:
         }
 
         _bus->beginWrite();
-        _bus->writeCommand(SH8601_C_SLPOUT);
+        _bus->writeC8D8(SH8601_W_MADCTL, 0x00); // RGB-Farbreihenfolge
+        _bus->writeC8D8(SH8601_W_PIXFMT, 0x55);  // COLMOD: 16 bit/pixel RGB565
         _bus->endWrite();
-        delay(SH8601_SLPOUT_DELAY);
 
         _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_SPIMODECTL, 0x80); // MUSS zuerst kommen
-        _bus->writeCommand(SH8601_C_NORON);
-        _bus->writeCommand(SH8601_C_INVOFF);
-        _bus->writeC8D8(SH8601_W_PIXFMT, 0x55); // COLMOD: DPI+DBI = 16 bit/pixel (RGB565)
+        _bus->writeCommand(SH8601_C_SLPOUT);
+        _bus->endWrite();
+        delay(80);
+
+        _bus->beginWrite();
+        _bus->writeC8D8(SH8601_W_SPIMODECTL, 0x80);
         _bus->writeC8D8(SH8601_W_WCTRLD1, 0x20); // Brightness Control On
+        _bus->endWrite();
+        delay(1);
+
+        _bus->beginWrite();
         _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALHBM, 0xFF);
+        _bus->endWrite();
+        delay(1);
+
+        _bus->beginWrite();
         _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0x00);
+        _bus->endWrite();
+        delay(1);
+
+        _bus->beginWrite();
         _bus->writeCommand(SH8601_C_DISPON);
         _bus->endWrite();
         delay(10);
 
-        invertDisplay(false);
+        _bus->beginWrite();
+        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0xFF);
+        _bus->endWrite();
     }
 };
 
@@ -1263,9 +1283,8 @@ void setup() {
 
     gfx->begin(40000000); // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
     Serial.println("[BOOT] gfx->begin ok");
-    // 0xC4=0x80 wird bereits in Arduino_SH8601W::tftInit() in der korrekten
-    // Reihenfolge gesendet (vor PIXFMT/WCTRLD1/DISPON). Letzter Schritt laut
-    // Waveshare-BSP: Normal-Brightness nach DISPON auf den Zielwert setzen.
+    // Redundant zur letzten Zeile in Arduino_SH8601W::tftInit() (dort bereits
+    // auf 0xFF gesetzt), schadet aber nicht.
     gfx->setBrightness(255);
     gfx->fillScreen(RGB565_BLACK);
     Serial.println("[BOOT] display init ok");
