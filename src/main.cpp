@@ -57,6 +57,11 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
 //    GRAM des SH8601 ist 480x480, das sichtbare 466x466-Fenster beginnt bei
 //    Spalte 6. Fehlt dieser Versatz, landen alle Pixel 6 Spalten zu weit
 //    links im GRAM.
+// 4. Reset-Puls: Werks-Treiber (panel_sh8601_reset()) zieht RST OHNE
+//    vorherigen HIGH-Puls direkt auf LOW (10ms), dann HIGH (150ms Settle).
+//    Die generische GFX-Library macht vorher zusaetzlich 10ms HIGH und
+//    nutzt 200ms/200ms statt 10ms/150ms - hier auf die Werks-Timings
+//    angeglichen.
 class Arduino_SH8601W : public Arduino_SH8601 {
 public:
     Arduino_SH8601W(Arduino_DataBus *bus, int8_t rst, uint8_t r, int16_t w, int16_t h)
@@ -65,13 +70,15 @@ public:
 protected:
     void tftInit() override {
         if (_rst != GFX_NOT_DEFINED) {
+            // Werks-Reset (esp_lcd_sh8601.c: panel_sh8601_reset()): kein
+            // vorheriger HIGH-Puls, direkt LOW fuer 10ms, dann HIGH fuer
+            // 150ms Settle-Zeit (nicht die generischen 200ms/200ms der
+            // GFX-Library).
             pinMode(_rst, OUTPUT);
-            digitalWrite(_rst, HIGH);
-            delay(10);
             digitalWrite(_rst, LOW);
-            delay(SH8601_RST_DELAY);
+            delay(10);
             digitalWrite(_rst, HIGH);
-            delay(SH8601_RST_DELAY);
+            delay(150);
         } else {
             _bus->sendCommand(SH8601_C_SWRESET);
             delay(SH8601_RST_DELAY);
