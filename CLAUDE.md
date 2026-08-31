@@ -52,7 +52,13 @@ Außerdem folgt nach `DISPON` als letzter Init-Schritt nochmal
 (nicht erst per separatem späteren `setBrightness()`-Aufruf). `tftInit()` in
 `Arduino_SH8601W` bildet diese Reihenfolge jetzt 1:1 nach; die im generischen
 Treiber vorhandenen `NORON`/`INVOFF`-Kommandos (im Werks-Init nicht enthalten)
-wurden entfernt.
+wurden entfernt. **Zusätzlich fehlte ein horizontaler GRAM-Versatz von 6
+Pixeln** (`col_offset1=6` im `Arduino_SH8601W`-Konstruktor): Das offizielle
+Waveshare-Arduino-LVGL-Beispiel (`Example/Arduino/09_LVGL_V8_Test/lvgl_port.c`,
+`example_lvgl_flush_cb()`) addiert beim Pixel-Schreiben `+ 0x06` auf x1/x2
+(CASET-Fenster) – das SH8601-GRAM ist 480×480, das sichtbare 466×466-Fenster
+beginnt bei Spalte 6. Ohne diesen Versatz landen alle Pixel systematisch 6
+Spalten zu weit links im GRAM (Verifikation am Board steht noch aus).
 
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver

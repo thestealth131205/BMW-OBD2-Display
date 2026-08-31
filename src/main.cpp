@@ -51,10 +51,16 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
 //    WDBRIGHTNESSVALNOR (0x51) = 0xFF (volle Helligkeit), noch INNERHALB
 //    derselben Init-Sequenz.
 // NORON/INVOFF kommen im Werks-Init nicht vor und wurden entfernt.
+// 3. col_offset1=6: Das offizielle Waveshare-Arduino-LVGL-Beispiel
+//    (Example/Arduino/09_LVGL_V8_Test/lvgl_port.c, example_lvgl_flush_cb())
+//    addiert beim Pixel-Schreiben "+ 0x06" auf x1/x2 (CASET-Fenster) - das
+//    GRAM des SH8601 ist 480x480, das sichtbare 466x466-Fenster beginnt bei
+//    Spalte 6. Fehlt dieser Versatz, landen alle Pixel 6 Spalten zu weit
+//    links im GRAM.
 class Arduino_SH8601W : public Arduino_SH8601 {
 public:
     Arduino_SH8601W(Arduino_DataBus *bus, int8_t rst, uint8_t r, int16_t w, int16_t h)
-        : Arduino_SH8601(bus, rst, r, w, h) {}
+        : Arduino_SH8601(bus, rst, r, w, h, 6 /* col_offset1 */) {}
 
 protected:
     void tftInit() override {
