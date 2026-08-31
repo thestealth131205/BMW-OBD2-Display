@@ -76,7 +76,7 @@ protected:
         _bus->writeC8D8(SH8601_W_SPIMODECTL, 0x80); // MUSS zuerst kommen
         _bus->writeCommand(SH8601_C_NORON);
         _bus->writeCommand(SH8601_C_INVOFF);
-        _bus->writeC8D8(SH8601_W_PIXFMT, 0x05); // 16 bit/pixel
+        _bus->writeC8D8(SH8601_W_PIXFMT, 0x55); // COLMOD: DPI+DBI = 16 bit/pixel (RGB565)
         _bus->writeC8D8(SH8601_W_WCTRLD1, 0x20); // Brightness Control On
         _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALHBM, 0xFF);
         _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0x00);
@@ -856,10 +856,14 @@ void addZoneColoring(lv_obj_t *meter, lv_meter_scale_t *scale, float min_val, fl
 // aktualisiert werden (siehe updateGaugeUI()).
 void createM3StyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
                           lv_meter_indicator_t **out_base, lv_meter_indicator_t **out_tip) {
-    lv_color_t base_color = mix_colors(currentSettings.color_secondary, lv_color_black(), 0.45f);
+    lv_color_t base_color = mix_colors(currentSettings.color_secondary, lv_color_black(), 0.30f);
     lv_color_t tip_color = mix_colors(currentSettings.color_secondary, lv_color_white(), 0.25f);
 
-    *out_base = lv_meter_add_needle_line(meter, scale, 9, base_color, -70);
+    // Durchgehender, spitz zulaufender Zeiger: dicke Wurzel direkt am Hub, die
+    // ohne Luecke in die duenne Spitze bis fast an die Skala uebergeht. Die
+    // Basis reicht bis Radius-150 (kurze breite Wurzel), die Spitze darueber
+    // liegend bis Radius-8 - beide vom selben Drehpunkt, also kollinear.
+    *out_base = lv_meter_add_needle_line(meter, scale, 8, base_color, -150);
     *out_tip = lv_meter_add_needle_line(meter, scale, 3, tip_color, -8);
 
     lv_obj_t *hub_outer = lv_obj_create(meter);

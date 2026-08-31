@@ -36,7 +36,13 @@ allen weiteren Konfigurationskommandos (`PIXFMT`/`WCTRLD1`/Brightness) sowie
 vor `DISPON` gesendet werden, sonst interpretiert das Panel die QSPI-Bilddaten
 falsch. Deshalb überschreibt die eigene Unterklasse `Arduino_SH8601W`
 (`src/main.cpp`) `tftInit()` mit der werksseitigen Kommandoreihenfolge aus
-`display_bsp.cpp`.
+`display_bsp.cpp`. **Zusätzlich** muss das Pixelformat-Kommando `0x3A` (COLMOD)
+auf `0x55` gesetzt werden (nicht `0x05`, wie der generische GFX-Library-Treiber
+es sendet): Für 16-Bit RGB565 müssen sowohl die DPI-Bits (6-4) als auch die
+DBI-Bits (2-0) `101` sein → `0x55`. Bei `0x05` bleiben die DPI-Bits auf `000`,
+wodurch das Panel die Farben verfälscht und **schwarze Pixel grün leuchten**.
+Der funktionierende Waveshare-Factory-Treiber `esp_lcd_sh8601.c` sendet für
+16 Bit ebenfalls `0x55`.
 
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver
