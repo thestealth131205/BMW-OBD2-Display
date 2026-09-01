@@ -19,7 +19,7 @@ Farbpalette) und wirken sich auf alle 6 Anzeigen aus.
 | Mikrocontroller | ESP32-C6 (Waveshare 1.43" AMOLED Touch) | – |
 | Display | SH8601 AMOLED, 466×466, rund | QSPI (CS=GPIO10, SCK=GPIO11, D0=GPIO4, D1=GPIO5, D2=GPIO6, D3=GPIO7, RST=GPIO3) |
 | Touch | kapazitiv, I2C-Registerprotokoll (Adresse 0x38), LVGL Input-Device | I2C (SCL=GPIO8, SDA=GPIO18) |
-| IO-Expander | TCA9554 (Adresse 0x20), IO6=Power-Hold-Latch, IO7=Enable | I2C (gleicher Bus wie Touch) |
+| IO-Expander | TCA9554 (Adresse 0x20), IO2=LCD_EN, IO6=Power-Hold-Latch, IO7=Enable | I2C (gleicher Bus wie Touch) |
 | CAN-Bus | eingebauter ESP32-C6 TWAI-Controller + externer CAN-Transceiver | TX=GPIO19, RX=GPIO20 |
 | microSD | Boot-Animation (JPEG-Frames), teilt QSPI-Bus mit Display | SPI (CS=GPIO15, SCK=11/MOSI=D0=4/MISO=D1=5) |
 
@@ -28,6 +28,15 @@ der Display-Init IO6 (Power-Hold) und IO7 auf HIGH ziehen (`initIoExpander()`),
 sonst schaltet sich das Board nach dem Einschalt-Impuls selbst wieder aus
 (Bootloop, grüne LED flackert rhythmisch). Verifiziert gegen das offizielle
 Waveshare-Factory-SDK (`Tca9554_Init()`).
+
+**Wichtig (LCD_EN fehlte):** Laut offizieller Waveshare-Pin-Tabelle ist
+**EXIO2** des TCA9554 das **LCD_EN**-Signal (Display-Enable), nicht nur
+EXIO6/EXIO7. `initIoExpander()` setzte bisher nur EXIO6+EXIO7 als Ausgang auf
+HIGH (Output-Reg `0x01=0xC0`, Config-Reg `0x03=0x3F`) – EXIO2 blieb als
+Eingang unkonfiguriert, das Panel lief also ohne aktives Enable-Signal in
+einem undefinierten Power-Zustand. Fix: Output-Reg `0x01=0xC4`, Config-Reg
+`0x03=0x3B` (EXIO2+EXIO6+EXIO7 als Ausgang, alle auf HIGH) – möglicher
+weiterer Baustein zur Behebung des hartnäckigen Grünstichs bei Schwarz.
 
 **Wichtig (grüner/verfälschter Hintergrund):** Der native `Arduino_SH8601`-
 Treiber der GFX-Bibliothek sendet das Waveshare-spezifische Kommando

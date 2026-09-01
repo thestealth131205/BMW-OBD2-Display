@@ -247,19 +247,22 @@ void saveStartupGauge(uint8_t idx) {
     prefs.end();
 }
 
-// --- TCA9554 IO-EXPANDER: POWER-HOLD (IO6) + IO7 AUF HIGH ---
+// --- TCA9554 IO-EXPANDER: POWER-HOLD (IO6) + IO7 + LCD_EN (IO2) AUF HIGH ---
 // Muss VOR der Display-Init laufen, damit das Board unter Strom bleibt.
 void initIoExpander() {
-    // Output-Latch zuerst setzen (IO6+IO7 = HIGH), dann Richtung auf Ausgang,
-    // um einen kurzen LOW-Glitch beim Umschalten zu vermeiden.
+    // Output-Latch zuerst setzen (IO2+IO6+IO7 = HIGH), dann Richtung auf
+    // Ausgang, um einen kurzen LOW-Glitch beim Umschalten zu vermeiden.
+    // IO2 = LCD_EN (Display-Enable, laut offizieller Waveshare-Pin-Tabelle) –
+    // ohne dieses Signal läuft das Panel in einem undefinierten
+    // Power-Zustand (mögliche Ursache des hartnäckigen Grünstichs bei Schwarz).
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(0x01);       // Output Port Register
-    Wire.write(0xC0);       // Bit6 + Bit7 = HIGH
+    Wire.write(0xC4);       // Bit2 (LCD_EN) + Bit6 + Bit7 = HIGH
     Wire.endTransmission();
 
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(0x03);       // Configuration Register (1 = Eingang, 0 = Ausgang)
-    Wire.write(0x3F);       // IO6 + IO7 als Ausgang, Rest Eingang
+    Wire.write(0x3B);       // IO2 + IO6 + IO7 als Ausgang, Rest Eingang
     Wire.endTransmission();
 }
 
