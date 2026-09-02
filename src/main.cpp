@@ -299,12 +299,29 @@ void initIoExpander() {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(0x01);       // Output Port Register
     Wire.write(0xC4);       // Bit2 (LCD_EN) + Bit6 + Bit7 = HIGH
-    Wire.endTransmission();
+    uint8_t err1 = Wire.endTransmission();
+    Serial.printf("[IOEXP] output reg write: %s (err=%d)\n", err1 == 0 ? "OK" : "FAIL", err1);
 
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(0x03);       // Configuration Register (1 = Eingang, 0 = Ausgang)
     Wire.write(0x3B);       // IO2 + IO6 + IO7 als Ausgang, Rest Eingang
-    Wire.endTransmission();
+    uint8_t err2 = Wire.endTransmission();
+    Serial.printf("[IOEXP] config reg write: %s (err=%d)\n", err2 == 0 ? "OK" : "FAIL", err2);
+}
+
+// Scannt den I2C-Bus (Adressen 1-126) und listet alle antwortenden Geraete -
+// Diagnose, ob TCA9554 (0x20) und Touch (0x38) tatsaechlich am Bus haengen.
+void scanI2CBus() {
+    Serial.println("[I2C] Scanning bus...");
+    int found = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[I2C] Device found at 0x%02X\n", addr);
+            found++;
+        }
+    }
+    Serial.printf("[I2C] Scan done, %d device(s) found\n", found);
 }
 
 // --- I2C TOUCH TREIBER (FT-kompatibler Touch-Controller, Adresse 0x38) ---
@@ -1392,6 +1409,7 @@ void setup() {
     // Board nach dem Einschalt-Impuls wieder aus (Bootloop).
     Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
     Serial.println("[BOOT] Wire.begin ok");
+    scanI2CBus();
     pinMode(BUTTON_LEFT_PIN, INPUT_PULLUP);
     initIoExpander();
     Serial.println("[BOOT] initIoExpander ok");
