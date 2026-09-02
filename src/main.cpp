@@ -370,6 +370,16 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
     lv_disp_flush_ready(disp);
 }
 
+// Rundet jedes Flush-Rechteck auf gerade Spalten-/Zeilengrenzen (wie im offiziellen
+// Waveshare-Beispiel lvgl_port.c: example_lvgl_rounder_cb()) - verhindert ungerade
+// CASET-Fenstergrenzen bei kleinen Antialiasing-Flush-Bereichen.
+void my_disp_rounder(lv_disp_drv_t *disp, lv_area_t *area) {
+    area->x1 = (area->x1 >> 1) << 1;
+    area->y1 = (area->y1 >> 1) << 1;
+    area->x2 = ((area->x2 >> 1) << 1) + 1;
+    area->y2 = ((area->y2 >> 1) << 1) + 1;
+}
+
 // --- BOOT-ANIMATION (15 FPS JPEGs VON SD) ---
 void playBootAnimation(const char* brand) {
     TJpgDec.setJpgScale(1);
@@ -1380,6 +1390,7 @@ void setup() {
     disp_drv.hor_res = DISPLAY_WIDTH;
     disp_drv.ver_res = DISPLAY_HEIGHT;
     disp_drv.flush_cb = my_disp_flush;
+    disp_drv.rounder_cb = my_disp_rounder;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 

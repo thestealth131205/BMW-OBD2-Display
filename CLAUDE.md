@@ -67,7 +67,16 @@ Waveshare-Arduino-LVGL-Beispiel (`Example/Arduino/09_LVGL_V8_Test/lvgl_port.c`,
 `example_lvgl_flush_cb()`) addiert beim Pixel-Schreiben `+ 0x06` auf x1/x2
 (CASET-Fenster) – das SH8601-GRAM ist 480×480, das sichtbare 466×466-Fenster
 beginnt bei Spalte 6. Ohne diesen Versatz landen alle Pixel systematisch 6
-Spalten zu weit links im GRAM (Verifikation am Board steht noch aus).
+Spalten zu weit links im GRAM. **Trotz identischer Init-Sequenz, QSPI-Opcodes,
+Reset-Timing und GRAM-Offset blieb der Grünstich bestehen** – letzter Fund:
+Das offizielle Waveshare-Arduino-Beispiel (`lvgl_port.c: example_lvgl_
+rounder_cb()`) rundet jedes LVGL-Flush-Rechteck vor dem Senden auf gerade
+Spalten-/Zeilengrenzen (`x1 &= ~1`, `x2 = (x2 | 1)`, analog für y). Unser
+`disp_drv` registrierte keinen `rounder_cb` – kleine, ungerade Flush-Bereiche
+(z. B. Antialiasing-Ränder einzelner Labels/Icons) landeten mit ungeraden
+x1/x2 im CASET-Fenster. Fix: `my_disp_rounder()` in `src/main.cpp` ergänzt
+und als `disp_drv.rounder_cb` registriert (Verifikation am Board steht noch
+aus).
 
 Es wird **kein** MCP2515 mehr verwendet – der ESP32-C6 hat einen eingebauten
 TWAI-CAN-Controller (`driver/twai.h`), der nur noch einen externen CAN-Transceiver
