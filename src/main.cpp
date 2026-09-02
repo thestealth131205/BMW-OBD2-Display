@@ -6,7 +6,12 @@
 #include <TJpg_Decoder.h>
 #include <lvgl.h>
 #include <driver/twai.h>
-#include <Arduino_GFX_Library.h>
+#include <driver/spi_master.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_vendor.h>
+#include <esp_lcd_panel_ops.h>
+#include <esp_lcd_io_spi.h>
+#include "esp_lcd_sh8601.h"
 #include <math.h>
 #include <string.h>
 #include "multi_bg_img.h"
@@ -45,97 +50,111 @@
 #define DISPLAY_WIDTH   466
 #define DISPLAY_HEIGHT  466
 
-// Display-Bus setup für SH8601 QSPI
-Arduino_DataBus *bus = new Arduino_ESP32QSPI(
-    10 /* CS */, 11 /* SCK */, 4 /* D0 */, 5 /* D1 */, 6 /* D2 */, 7 /* D3 */
-);
+// --- SH8601-QSPI-PANEL-INIT ueber esp_lcd (statt Arduino_GFX) ---
+// Testzweig "test_waveshare": Anstelle der generischen Arduino_GFX-Bus-
+// Abstraktion wird hier 1:1 der offizielle Waveshare-Treiber verwendet
+// (Example/Arduino/09_LVGL_V8_Test/lvgl_port.c + src/sh8601/esp_lcd_sh8601.c,
+// vendored nach include/esp_lcd_sh8601.h + src/esp_lcd_sh8601.c). Ziel: pruefen,
+// ob der hartnaeckige Gruenstich an der Arduino_GFX-QSPI-Transaktionsebene lag
+// (Kommandoreihenfolge/-werte stimmten bereits nachweislich exakt ueberein).
+#define LCD_HOST            SPI2_HOST
+#define LCD_BIT_PER_PIXEL   16
+#define LCD_CS_PIN          10
+#define LCD_SCK_PIN         11
+#define LCD_D0_PIN          4
+#define LCD_D1_PIN          5
+#define LCD_D2_PIN          6
+#define LCD_D3_PIN          7
+#define LCD_RST_PIN         3
 
-// Eigene SH8601-Unterklasse: Kommandoreihenfolge 1:1 aus dem offiziellen
-// Waveshare-Factory-Treiber uebernommen (esp_lcd_sh8601.c: panel_sh8601_init()
-// + display_bsp.cpp: lcd_init_cmds[]). Zwei Abweichungen zur vorherigen
-// eigenen Sequenz, die dort nachweislich zu gruen verfaelschten Schwarztoenen
-// fuehrten:
-// 1. MADCTL (0x36) und COLMOD (0x3A) werden im Werks-Treiber VOR SLPOUT
-//    gesendet (direkt nach dem Reset), nicht erst danach.
-// 2. Nach DISPON folgt als allerletzter Init-Schritt nochmal
-//    WDBRIGHTNESSVALNOR (0x51) = 0xFF (volle Helligkeit), noch INNERHALB
-//    derselben Init-Sequenz.
-// NORON/INVOFF kommen im Werks-Init nicht vor und wurden entfernt.
-// 3. col_offset1=6: Das offizielle Waveshare-Arduino-LVGL-Beispiel
-//    (Example/Arduino/09_LVGL_V8_Test/lvgl_port.c, example_lvgl_flush_cb())
-//    addiert beim Pixel-Schreiben "+ 0x06" auf x1/x2 (CASET-Fenster) - das
-//    GRAM des SH8601 ist 480x480, das sichtbare 466x466-Fenster beginnt bei
-//    Spalte 6. Fehlt dieser Versatz, landen alle Pixel 6 Spalten zu weit
-//    links im GRAM.
-// 4. Reset-Puls: Werks-Treiber (panel_sh8601_reset()) zieht RST OHNE
-//    vorherigen HIGH-Puls direkt auf LOW (10ms), dann HIGH (150ms Settle).
-//    Die generische GFX-Library macht vorher zusaetzlich 10ms HIGH und
-//    nutzt 200ms/200ms statt 10ms/150ms - hier auf die Werks-Timings
-//    angeglichen.
-class Arduino_SH8601W : public Arduino_SH8601 {
-public:
-    Arduino_SH8601W(Arduino_DataBus *bus, int8_t rst, uint8_t r, int16_t w, int16_t h)
-        : Arduino_SH8601(bus, rst, r, w, h, 6 /* col_offset1 */) {}
+static esp_lcd_panel_io_handle_t g_lcd_io_handle = NULL;
+static esp_lcd_panel_handle_t g_lcd_panel_handle = NULL;
 
-protected:
-    void tftInit() override {
-        if (_rst != GFX_NOT_DEFINED) {
-            // Werks-Reset (esp_lcd_sh8601.c: panel_sh8601_reset()): kein
-            // vorheriger HIGH-Puls, direkt LOW fuer 10ms, dann HIGH fuer
-            // 150ms Settle-Zeit (nicht die generischen 200ms/200ms der
-            // GFX-Library).
-            pinMode(_rst, OUTPUT);
-            digitalWrite(_rst, LOW);
-            delay(10);
-            digitalWrite(_rst, HIGH);
-            delay(150);
-        } else {
-            _bus->sendCommand(SH8601_C_SWRESET);
-            delay(SH8601_RST_DELAY);
-        }
-
-        _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_MADCTL, 0x00); // RGB-Farbreihenfolge
-        _bus->writeC8D8(SH8601_W_PIXFMT, 0x55);  // COLMOD: 16 bit/pixel RGB565
-        _bus->endWrite();
-
-        _bus->beginWrite();
-        _bus->writeCommand(SH8601_C_SLPOUT);
-        _bus->endWrite();
-        delay(80);
-
-        _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_SPIMODECTL, 0x80);
-        _bus->writeC8D8(SH8601_W_WCTRLD1, 0x20); // Brightness Control On
-        _bus->endWrite();
-        delay(1);
-
-        _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALHBM, 0xFF);
-        _bus->endWrite();
-        delay(1);
-
-        _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0x00);
-        _bus->endWrite();
-        delay(1);
-
-        _bus->beginWrite();
-        _bus->writeCommand(SH8601_C_DISPON);
-        _bus->endWrite();
-        delay(10);
-
-        _bus->beginWrite();
-        _bus->writeC8D8(SH8601_W_WDBRIGHTNESSVALNOR, 0xFF);
-        _bus->endWrite();
-    }
+// Init-Kommandos 1:1 aus lvgl_port.c (sh8601_lcd_init_cmds[]) uebernommen.
+// MADCTL/COLMOD werden vom esp_lcd_sh8601-Treiber selbst VOR diesen
+// Kommandos gesendet (panel_sh8601_init()), tauchen hier also bewusst nicht auf.
+static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] = {
+    {0x11, (uint8_t []){0x00}, 0, 80},
+    {0xC4, (uint8_t []){0x80}, 1, 0},
+    {0x53, (uint8_t []){0x20}, 1, 1},
+    {0x63, (uint8_t []){0xFF}, 1, 1},
+    {0x51, (uint8_t []){0x00}, 1, 1},
+    {0x29, (uint8_t []){0x00}, 0, 10},
+    {0x51, (uint8_t []){0xFF}, 1, 0},
 };
-
-Arduino_SH8601W *gfx = new Arduino_SH8601W(bus, 3 /* RST */, 0 /* Rotation */, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
 // --- LVGL BUFFER (Partieller Line-Buffer im SRAM) ---
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf1[DISPLAY_WIDTH * 30];
+static lv_disp_drv_t disp_drv; // Dateiweiter Scope: initDisplay() braucht die Adresse als io_config.user_ctx
+
+// Wird von der esp_lcd-QSPI-Transaktions-ISR aufgerufen, sobald ein
+// Flush-DMA-Transfer abgeschlossen ist (asynchron, wie im offiziellen Beispiel).
+static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
+    lv_disp_drv_t *disp_driver = (lv_disp_drv_t *)user_ctx;
+    lv_disp_flush_ready(disp_driver);
+    return false;
+}
+
+void initDisplay() {
+    spi_bus_config_t buscfg = {};
+    buscfg.data0_io_num = LCD_D0_PIN;
+    buscfg.data1_io_num = LCD_D1_PIN;
+    buscfg.sclk_io_num = LCD_SCK_PIN;
+    buscfg.data2_io_num = LCD_D2_PIN;
+    buscfg.data3_io_num = LCD_D3_PIN;
+    buscfg.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * LCD_BIT_PER_PIXEL / 8;
+    spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO);
+
+    esp_lcd_panel_io_spi_config_t io_config = {};
+    io_config.cs_gpio_num = LCD_CS_PIN;
+    io_config.dc_gpio_num = -1;
+    io_config.spi_mode = 0;
+    io_config.pclk_hz = 40 * 1000 * 1000; // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
+    io_config.trans_queue_depth = 10;
+    io_config.on_color_trans_done = notify_lvgl_flush_ready;
+    io_config.user_ctx = &disp_drv;
+    io_config.lcd_cmd_bits = 32;
+    io_config.lcd_param_bits = 8;
+    io_config.flags.quad_mode = true;
+    esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &g_lcd_io_handle);
+
+    sh8601_vendor_config_t vendor_config = {};
+    vendor_config.flags.use_qspi_interface = 1;
+    vendor_config.init_cmds = sh8601_lcd_init_cmds;
+    vendor_config.init_cmds_size = sizeof(sh8601_lcd_init_cmds) / sizeof(sh8601_lcd_init_cmds[0]);
+
+    esp_lcd_panel_dev_config_t panel_config = {};
+    panel_config.reset_gpio_num = LCD_RST_PIN;
+    panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
+    panel_config.bits_per_pixel = LCD_BIT_PER_PIXEL;
+    panel_config.vendor_config = &vendor_config;
+
+    esp_lcd_new_panel_sh8601(g_lcd_io_handle, &panel_config, &g_lcd_panel_handle);
+    esp_lcd_panel_reset(g_lcd_panel_handle);
+    esp_lcd_panel_init(g_lcd_panel_handle);
+    esp_lcd_panel_disp_on_off(g_lcd_panel_handle, true);
+}
+
+esp_err_t set_amoled_backlight(uint8_t brig) {
+    uint32_t lcd_cmd = 0x51;
+    lcd_cmd &= 0xff;
+    lcd_cmd <<= 8;
+    lcd_cmd |= 0x02 << 24;
+    return esp_lcd_panel_io_tx_param(g_lcd_io_handle, lcd_cmd, &brig, 1);
+}
+
+// Fuellt den Schirm vor der LVGL-Init einmal schwarz (Ersatz fuer das
+// vorherige gfx->fillScreen()), damit vor der Boot-Animation kein GRAM-
+// Datenmuell sichtbar ist. Nutzt den ohnehin vorhandenen buf1-Puffer.
+void clearDisplayBlack() {
+    memset(buf1, 0, sizeof(buf1));
+    const int rowsPerChunk = 30;
+    for (int y = 0; y < DISPLAY_HEIGHT; y += rowsPerChunk) {
+        int h = min(rowsPerChunk, DISPLAY_HEIGHT - y);
+        esp_lcd_panel_draw_bitmap(g_lcd_panel_handle, 6, y, 6 + DISPLAY_WIDTH, y + h, buf1);
+    }
+}
 
 // --- EINSTELLUNGEN & KONFIGURATION ---
 struct Settings {
@@ -306,8 +325,10 @@ void touchpadReadCb(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 }
 
 // --- TJPGDEC DRAW CALLBACK ---
+// +6 Spaltenversatz wie im offiziellen Beispiel (SH8601-GRAM 480x480, 466x466
+// sichtbares Fenster beginnt bei Spalte 6, siehe initDisplay()/my_disp_flush()).
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-    gfx->draw16bitRGBBitmap(x, y, bitmap, w, h);
+    esp_lcd_panel_draw_bitmap(g_lcd_panel_handle, x + 6, y, x + 6 + w, y + h, bitmap);
     return true;
 }
 
@@ -363,11 +384,14 @@ lv_color_t computeZoneColor(float pos, float warn_val, float alert_val, bool inv
 }
 
 // --- LVGL FLUSH DISPLAY ---
+// esp_lcd queued Farbtransfers asynchron per DMA - lv_disp_flush_ready() wird
+// NICHT hier, sondern erst im on_color_trans_done-Callback (notify_lvgl_flush_ready())
+// aufgerufen, sobald der Transfer tatsaechlich abgeschlossen ist (1:1 wie im
+// offiziellen Waveshare-Beispiel lvgl_port.c: example_lvgl_flush_cb()).
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-    uint32_t w = (area->x2 - area->x1 + 1);
-    uint32_t h = (area->y2 - area->y1 + 1);
-    gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
-    lv_disp_flush_ready(disp);
+    const int offsetx1 = area->x1 + 0x06;
+    const int offsetx2 = area->x2 + 0x06;
+    esp_lcd_panel_draw_bitmap(g_lcd_panel_handle, offsetx1, area->y1, offsetx2 + 1, area->y2 + 1, color_p);
 }
 
 // Rundet jedes Flush-Rechteck auf gerade Spalten-/Zeilengrenzen (wie im offiziellen
@@ -1361,12 +1385,12 @@ void setup() {
     initIoExpander();
     Serial.println("[BOOT] initIoExpander ok");
 
-    gfx->begin(40000000); // 40 MHz QSPI, wie im offiziellen Waveshare-BSP
-    Serial.println("[BOOT] gfx->begin ok");
-    // Redundant zur letzten Zeile in Arduino_SH8601W::tftInit() (dort bereits
-    // auf 0xFF gesetzt), schadet aber nicht.
-    gfx->setBrightness(255);
-    gfx->fillScreen(RGB565_BLACK);
+    initDisplay(); // 40 MHz QSPI ueber esp_lcd, wie im offiziellen Waveshare-BSP
+    Serial.println("[BOOT] initDisplay ok");
+    // Redundant zur letzten Zeile in sh8601_lcd_init_cmds (dort bereits auf
+    // 0xFF gesetzt), schadet aber nicht.
+    set_amoled_backlight(255);
+    clearDisplayBlack();
     Serial.println("[BOOT] display init ok");
 
     SPI.begin();
@@ -1385,7 +1409,10 @@ void setup() {
     lv_init();
     lv_disp_draw_buf_init(&draw_buf, buf1, NULL, DISPLAY_WIDTH * 30);
 
-    static lv_disp_drv_t disp_drv;
+    // Dateiweite disp_drv wiederverwenden (nicht neu deklarieren!) - initDisplay()
+    // hat bereits ihre Adresse als io_config.user_ctx an den QSPI-Completion-
+    // Callback uebergeben; eine lokale Neu-Deklaration wuerde diese Verbindung
+    // kappen (notify_lvgl_flush_ready() riefe dann auf dem falschen Objekt auf).
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = DISPLAY_WIDTH;
     disp_drv.ver_res = DISPLAY_HEIGHT;
