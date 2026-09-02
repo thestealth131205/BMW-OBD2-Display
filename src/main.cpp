@@ -8,7 +8,9 @@
 #include <driver/twai.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>
+#include <string.h>
 #include "multi_bg_img.h"
+#include "needle_imgs.h"
 
 // --- HARDWARE & DISPLAY CONFIGURATION (Waveshare 1.43" AMOLED ESP32-C6) ---
 // Pinbelegung laut offiziellem Waveshare-SDK
@@ -23,6 +25,14 @@
 #define TOUCH_SCL_PIN   8
 #define TOUCH_SDA_PIN   18
 #define TOUCH_I2C_ADDR  0x38
+
+// Linker physischer Taster des Boards (BOOT-Button, GPIO9). Nur beim Booten
+// als Strapping-Pin relevant, danach frei als normaler Taster nutzbar (Zug
+// nach GND beim Druecken, intern per INPUT_PULLUP abgesichert). Der RESET-
+// Button des Boards haengt direkt am EN-Pin und loest bereits rein
+// hardwareseitig einen vollstaendigen ESP-Neustart aus - dafuer ist kein
+// Firmware-Code noetig.
+#define BUTTON_LEFT_PIN GPIO_NUM_9
 
 // TCA9554 I2C-IO-Expander (Adresse 0x20). Auf der Waveshare-1.43"-Platine
 // haengen an IO6 der Power-Hold-Latch (haelt das Board nach dem Einschalten
@@ -155,32 +165,33 @@ lv_obj_t *tile_bat;
 lv_obj_t *tile_throttle;
 lv_obj_t *tile_rpm;
 lv_obj_t *tile_gforce;
+lv_obj_t *main_tiles[6]; // Reihenfolge wie tileview: Multi/Wasser/Batterie/Gaspedal/Drehzahl/G-Force
+
+// Aktuell angezeigte Haupt-Kachel (fuer Zyklus per linkem Taster)
+uint8_t current_main_tile = 0;
 
 // Gauges
-// Jede Nadel besteht aus 2 Indikatoren (breite kurze Basis + duenne lange
-// Spitze), die zusammen einen tacho-typischen, spitz zulaufenden
-// "M3-Style"-Zeiger ergeben (siehe createStyledMeter()/createRpmTile()).
+// Die Nadel ist ein einzelnes Bild (Nadel-Assets in Ruhestellung nach 6 Uhr,
+// siehe include/needle_imgs.h), das per addImageNeedle() um den Meter-
+// Mittelpunkt rotiert wird - ersetzt die zuvor per LVGL gezeichnete Linien-
+// Nadel (siehe createImageNeedle()/createStyledMeter()/createRpmTile()).
 lv_obj_t *water_meter;
 lv_meter_indicator_t *water_needle;
-lv_meter_indicator_t *water_needle_tip;
 lv_obj_t *water_label;
 lv_obj_t *water_secondary_label;   // zeigt Batteriespannung
 
 lv_obj_t *bat_meter;
 lv_meter_indicator_t *bat_needle;
-lv_meter_indicator_t *bat_needle_tip;
 lv_obj_t *bat_label;
 lv_obj_t *bat_secondary_label;     // zeigt Kühlmitteltemperatur
 
 lv_obj_t *throttle_meter;
 lv_meter_indicator_t *throttle_needle;
-lv_meter_indicator_t *throttle_needle_tip;
 lv_obj_t *throttle_label;
 lv_obj_t *throttle_secondary_label; // zeigt Kühlmitteltemperatur
 
 lv_obj_t *rpm_meter;
 lv_meter_indicator_t *rpm_needle;
-lv_meter_indicator_t *rpm_needle_tip;
 lv_obj_t *rpm_leds[6]; // Schaltpunktanzeige statt digitaler Anzeige: 4x Gelb, 1x Gruen, 1x Rot
 
 lv_obj_t *gforce_blob;         // Punkt, der Richtung/Betrag der G-Kraft anzeigt (Sekundärfarbe)
@@ -188,11 +199,11 @@ lv_obj_t *gforce_value_label;  // Betrag in G (z.B. "0.56G")
 lv_obj_t *gforce_speed_label;  // Geschwindigkeit (z.B. "80 KM/H")
 
 // Multi-Daten-Anzeige (erste Kachel): RPM-Ring-Skala im Hintergrund (Nadel
-// als weißer Strich mit dunkel eingefärbtem "Schweif"), mittig groß die
-// Geschwindigkeit, darunter 4 Zusatzfelder (Batterie/Gaspedal/Drehzahl/Wasser).
+// als Bild wie bei den anderen 5 Anzeigen, siehe createImageNeedle()),
+// mittig groß die Geschwindigkeit, darunter 4 Zusatzfelder
+// (Batterie/Gaspedal/Drehzahl/Wasser).
 lv_obj_t *multi_meter;
-lv_meter_indicator_t *multi_needle_trail;
-lv_meter_indicator_t *multi_needle_tip;
+lv_meter_indicator_t *multi_needle;
 lv_obj_t *multi_speed_label;
 lv_obj_t *multi_bat_label;
 lv_obj_t *multi_throttle_label;
@@ -510,7 +521,6 @@ void updateGaugeUI() {
 
     // 1. WASSERTEMPERATUR
     lv_meter_set_indicator_value(water_meter, water_needle, (int32_t)current_water_temp);
-    lv_meter_set_indicator_value(water_meter, water_needle_tip, (int32_t)current_water_temp);
     lv_color_t water_color = computeGaugeColor(current_water_temp, currentSettings.warn_temp, currentSettings.max_temp, false, blink_state);
 
     lv_label_set_text_fmt(water_label, "%d°C", (int)current_water_temp);
@@ -519,7 +529,6 @@ void updateGaugeUI() {
 
     // 2. BATTERIESPANNUNG
     lv_meter_set_indicator_value(bat_meter, bat_needle, (int32_t)(current_bat_voltage * 10));
-    lv_meter_set_indicator_value(bat_meter, bat_needle_tip, (int32_t)(current_bat_voltage * 10));
     lv_color_t bat_color = computeGaugeColor(current_bat_voltage, currentSettings.warn_bat, currentSettings.min_bat, true, blink_state);
 
     lv_label_set_text_fmt(bat_label, "%.1fV", current_bat_voltage);
@@ -528,7 +537,6 @@ void updateGaugeUI() {
 
     // 3. GASPEDALSTELLUNG
     lv_meter_set_indicator_value(throttle_meter, throttle_needle, (int32_t)current_throttle_position);
-    lv_meter_set_indicator_value(throttle_meter, throttle_needle_tip, (int32_t)current_throttle_position);
     lv_color_t throttle_color = computeGaugeColor(current_throttle_position, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct, false, blink_state);
 
     lv_label_set_text_fmt(throttle_label, "%d%%", (int)current_throttle_position);
@@ -537,7 +545,6 @@ void updateGaugeUI() {
 
     // 4. DREHZAHL (Schaltpunktanzeige mit 6 LEDs statt digitaler Anzeige)
     lv_meter_set_indicator_value(rpm_meter, rpm_needle, (int32_t)current_rpm);
-    lv_meter_set_indicator_value(rpm_meter, rpm_needle_tip, (int32_t)current_rpm);
 
     float rpm_thresholds[6];
     computeRpmLedThresholds(rpm_thresholds);
@@ -573,8 +580,7 @@ void updateGaugeUI() {
 
     // 6. MULTI-DATEN-ANZEIGE (Geschwindigkeit zentral, RPM-Nadel im Hintergrund,
     // 4 Zusatzfelder in Weiß - nur das letzte Feld (Wasser) faerbt sich ab 110°C orange)
-    lv_meter_set_indicator_value(multi_meter, multi_needle_trail, (int32_t)current_rpm);
-    lv_meter_set_indicator_value(multi_meter, multi_needle_tip, (int32_t)current_rpm);
+    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_rpm);
     lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
     lv_label_set_text_fmt(multi_bat_label, "%.1fV", current_bat_voltage);
     lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_position);
@@ -883,45 +889,53 @@ void addZoneColoring(lv_obj_t *meter, lv_meter_scale_t *scale, float min_val, fl
     }
 }
 
-// Baut einen an einen BMW-M3-Drehzahlmesser angelehnten Zeiger statt eines
-// einfachen duennen Strichs: eine breite, kurze Basis (dunklere Sekundaerfarbe)
-// naeher am Zentrum, darueber eine duenne, bis an die Skala reichende Spitze
-// (helle Sekundaerfarbe) - zusammen ergibt das eine spitz zulaufende
-// Nadelform. Ein rundes Metall-Hub-Cap mit farbigem Mittelpunkt verdeckt den
-// Drehpunkt. Beide Indikatoren muessen zusammen mit lv_meter_set_indicator_value()
-// aktualisiert werden (siehe updateGaugeUI()).
-void createM3StyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
-                          lv_meter_indicator_t **out_base, lv_meter_indicator_t **out_tip) {
-    lv_color_t base_color = mix_colors(currentSettings.color_secondary, lv_color_black(), 0.30f);
-    lv_color_t tip_color = mix_colors(currentSettings.color_secondary, lv_color_white(), 0.25f);
+// Welches der 3 Nadel-Bilder (Tuerkis/Gelb/Rot) zur aktuell eingestellten
+// Sekundaerfarbe passt: Blau/Cyan -> Tuerkis, Gelb/Neongelb/Orange -> Gelb,
+// alle anderen (inkl. Standard Rot) -> Rot als Fallback.
+enum class NeedleColorFamily { TEAL, YELLOW, RED };
 
-    // Durchgehender, spitz zulaufender Zeiger: dicke Wurzel direkt am Hub, die
-    // ohne Luecke in die duenne Spitze bis fast an die Skala uebergeht. Die
-    // Basis reicht bis Radius-150 (kurze breite Wurzel), die Spitze darueber
-    // liegend bis Radius-8 - beide vom selben Drehpunkt, also kollinear.
-    *out_base = lv_meter_add_needle_line(meter, scale, 8, base_color, -150);
-    *out_tip = lv_meter_add_needle_line(meter, scale, 3, tip_color, -8);
+NeedleColorFamily classifySecondaryColor(lv_color_t c) {
+    for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
+        if (COLOR_PALETTE[i].color.full != c.full) continue;
+        const char *name = COLOR_PALETTE[i].name;
+        if (strcmp(name, "Blau") == 0 || strcmp(name, "Cyan") == 0) return NeedleColorFamily::TEAL;
+        if (strcmp(name, "Gelb") == 0 || strcmp(name, "Neongelb") == 0 || strcmp(name, "Orange") == 0) return NeedleColorFamily::YELLOW;
+        break;
+    }
+    return NeedleColorFamily::RED;
+}
 
-    lv_obj_t *hub_outer = lv_obj_create(meter);
-    lv_obj_set_size(hub_outer, 34, 34);
-    lv_obj_set_style_radius(hub_outer, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(hub_outer, lv_palette_darken(LV_PALETTE_GREY, 4), 0);
-    lv_obj_set_style_bg_opa(hub_outer, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(hub_outer, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
-    lv_obj_set_style_border_width(hub_outer, 2, 0);
-    lv_obj_center(hub_outer);
-    lv_obj_clear_flag(hub_outer, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(hub_outer, LV_OBJ_FLAG_CLICKABLE);
+// Bild-basierte Nadel (ersetzt die zuvor gezeichnete Linien-Nadel): LVGL
+// rotiert ein lv_img_dsc_t um einen Pivot-Punkt. Die bereitgestellten
+// Nadel-Bilder sind in Ruhestellung nach 6 Uhr ausgerichtet (Trigo-Winkel
+// 90°) - das liegt exakt in der 90°-Skalenluecke unten (Skala: rotation=135,
+// angle_range=270, Luecke von 45° bis 135°, zentriert bei 90°). Damit die
+// Nadel bei Skalenwert phi tatsaechlich auf den Trigo-Winkel phi zeigt,
+// braucht der Bild-Indikator eine eigene (unsichtbare) Skala mit um -90°
+// versetzter rotation (135-90=45) - sonst zeigt die Nadel systematisch 90°
+// daneben, weil LVGL den Bild-Rotationswinkel direkt als Skalenwinkel nutzt
+// (anders als bei der Linien-Nadel, wo 0°=rechts als Basisrichtung dient).
+lv_meter_indicator_t *addImageNeedle(lv_obj_t *meter, int32_t min_val, int32_t max_val,
+                                      const lv_img_dsc_t *img, lv_coord_t pivot_x, lv_coord_t pivot_y) {
+    lv_meter_scale_t *needle_scale = lv_meter_add_scale(meter);
+    lv_meter_set_scale_range(meter, needle_scale, min_val, max_val, 270, 45);
+    return lv_meter_add_needle_img(meter, needle_scale, img, pivot_x, pivot_y);
+}
 
-    lv_obj_t *hub_center = lv_obj_create(meter);
-    lv_obj_set_size(hub_center, 14, 14);
-    lv_obj_set_style_radius(hub_center, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(hub_center, currentSettings.color_primary, 0);
-    lv_obj_set_style_bg_opa(hub_center, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hub_center, 0, 0);
-    lv_obj_center(hub_center);
-    lv_obj_clear_flag(hub_center, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(hub_center, LV_OBJ_FLAG_CLICKABLE);
+// Waehlt anhand der Sekundaerfarbe eines der 3 Haupt-Nadel-Bilder (fuer
+// Wasser/Batterie/Gaspedal/Drehzahl) und haengt es als Bild-Indikator ein.
+lv_meter_indicator_t *createImageNeedle(lv_obj_t *meter, int32_t min_val, int32_t max_val) {
+    const lv_img_dsc_t *img;
+    lv_coord_t pivot_x, pivot_y;
+    switch (classifySecondaryColor(currentSettings.color_secondary)) {
+        case NeedleColorFamily::TEAL:
+            img = &needle_teal_img; pivot_x = NEEDLE_TEAL_PIVOT_X; pivot_y = NEEDLE_TEAL_PIVOT_Y; break;
+        case NeedleColorFamily::YELLOW:
+            img = &needle_yellow_img; pivot_x = NEEDLE_YELLOW_PIVOT_X; pivot_y = NEEDLE_YELLOW_PIVOT_Y; break;
+        default:
+            img = &needle_red_img; pivot_x = NEEDLE_RED_PIVOT_X; pivot_y = NEEDLE_RED_PIVOT_Y; break;
+    }
+    return addImageNeedle(meter, min_val, max_val, img, pivot_x, pivot_y);
 }
 
 // Baut ein rundes Tacho-Style-Meter mit Skalenstrichen, weich eingefärbten
@@ -930,7 +944,7 @@ void createM3StyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
 void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float max_val,
                         float warn_val, float alert_val, bool invert_zones,
                         lv_obj_t **out_meter, lv_meter_indicator_t **out_needle,
-                        lv_meter_indicator_t **out_needle_tip, lv_obj_t **out_value_label,
+                        lv_obj_t **out_value_label,
                         lv_obj_t **out_secondary_label) {
     setDarkBg(tile);
 
@@ -946,9 +960,7 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
 
     addZoneColoring(meter, scale, min_val, max_val, warn_val, alert_val, invert_zones);
 
-    lv_meter_indicator_t *needle;
-    lv_meter_indicator_t *needle_tip;
-    createM3StyleNeedle(meter, scale, &needle, &needle_tip);
+    lv_meter_indicator_t *needle = createImageNeedle(meter, (int32_t)min_val, (int32_t)max_val);
 
     lv_obj_t *value_label = lv_label_create(tile);
     lv_obj_set_style_text_font(value_label, &lv_font_montserrat_48, 0);
@@ -965,7 +977,6 @@ void createStyledMeter(lv_obj_t *tile, const char *title, float min_val, float m
 
     *out_meter = meter;
     *out_needle = needle;
-    *out_needle_tip = needle_tip;
     *out_value_label = value_label;
     *out_secondary_label = secondary_label;
 }
@@ -989,7 +1000,7 @@ void createRpmTile(lv_obj_t *tile) {
 
     addZoneColoring(rpm_meter, scale, 0, 8000, currentSettings.rpm_warn, currentSettings.rpm_limit, false);
 
-    createM3StyleNeedle(rpm_meter, scale, &rpm_needle, &rpm_needle_tip);
+    rpm_needle = createImageNeedle(rpm_meter, 0, 8000);
 
     // 6 LED-Punkte anstelle der digitalen Anzeige
     const int led_x[6] = {-125, -75, -25, 25, 75, 125};
@@ -1078,14 +1089,23 @@ void createGForceTile(lv_obj_t *tile) {
     lv_obj_align(gforce_speed_label, LV_ALIGN_CENTER, 0, 25);
 }
 
-// Baut einen weißen, spitz zulaufenden Nadel-Zeiger mit dunkel eingefärbtem
-// "Schweif" (kurze breite Basis nahe der Mitte, dünne helle Spitze bis zur
-// Skala) - für die Multi-Daten-Anzeige, unabhängig von der Sekundärfarbe.
-void createTrailStyleNeedle(lv_obj_t *meter, lv_meter_scale_t *scale,
-                             lv_meter_indicator_t **out_trail, lv_meter_indicator_t **out_tip) {
-    lv_color_t trail_color = mix_colors(lv_color_white(), lv_color_black(), 0.65f);
-    *out_trail = lv_meter_add_needle_line(meter, scale, 6, trail_color, -60);
-    *out_tip = lv_meter_add_needle_line(meter, scale, 2, lv_color_white(), -6);
+// Waehlt anhand der Sekundaerfarbe eines der 3 Multi-Nadel-Bilder (separates,
+// kleineres Asset-Set als bei den anderen 5 Anzeigen) und haengt es als
+// Bild-Indikator ein. Die Multi-Nadel-Bilder zeigen nur die aeussere
+// Nadelspitze (weit vom Drehpunkt entfernt, siehe MULTI_NEEDLE_*_PIVOT_Y),
+// daher zusaetzlich ein kleines weißes Hub-Cap zur Abdeckung des Drehpunkts.
+void createMultiImageNeedle(lv_obj_t *meter, lv_meter_indicator_t **out_needle) {
+    const lv_img_dsc_t *img;
+    lv_coord_t pivot_x, pivot_y;
+    switch (classifySecondaryColor(currentSettings.color_secondary)) {
+        case NeedleColorFamily::TEAL:
+            img = &multi_needle_teal_img; pivot_x = MULTI_NEEDLE_TEAL_PIVOT_X; pivot_y = MULTI_NEEDLE_TEAL_PIVOT_Y; break;
+        case NeedleColorFamily::YELLOW:
+            img = &multi_needle_yellow_img; pivot_x = MULTI_NEEDLE_YELLOW_PIVOT_X; pivot_y = MULTI_NEEDLE_YELLOW_PIVOT_Y; break;
+        default:
+            img = &multi_needle_red_img; pivot_x = MULTI_NEEDLE_RED_PIVOT_X; pivot_y = MULTI_NEEDLE_RED_PIVOT_Y; break;
+    }
+    *out_needle = addImageNeedle(meter, 0, 8000, img, pivot_x, pivot_y);
 
     lv_obj_t *hub = lv_obj_create(meter);
     lv_obj_set_size(hub, 14, 14);
@@ -1121,10 +1141,7 @@ void createMultiTile(lv_obj_t *tile) {
     lv_obj_center(multi_meter);
     lv_obj_set_size(multi_meter, 450, 450);
 
-    lv_meter_scale_t *scale = lv_meter_add_scale(multi_meter);
-    lv_meter_set_scale_range(multi_meter, scale, 0, 8000, 270, 135);
-
-    createTrailStyleNeedle(multi_meter, scale, &multi_needle_trail, &multi_needle_tip);
+    createMultiImageNeedle(multi_meter, &multi_needle);
 
     multi_speed_label = lv_label_create(tile);
     lv_obj_set_style_text_font(multi_speed_label, &lv_font_montserrat_48, 0);
@@ -1167,15 +1184,15 @@ void createGaugesUI() {
 
     // TILE 1: WASSERTEMP (40-130 °C, Warnung ab warn_temp, Alarm ab max_temp)
     createStyledMeter(tile_water, "WASSER", 40, 130, currentSettings.warn_temp, currentSettings.max_temp,
-                       false, &water_meter, &water_needle, &water_needle_tip, &water_label, &water_secondary_label);
+                       false, &water_meter, &water_needle, &water_label, &water_secondary_label);
 
     // TILE 2: BATTERIE (10.0-16.0 V, intern *10 skaliert für Ganzzahl-Genauigkeit)
     createStyledMeter(tile_bat, "BATTERIE", 100, 160, currentSettings.warn_bat * 10, currentSettings.min_bat * 10,
-                       true, &bat_meter, &bat_needle, &bat_needle_tip, &bat_label, &bat_secondary_label);
+                       true, &bat_meter, &bat_needle, &bat_label, &bat_secondary_label);
 
     // TILE 3: GASPEDALSTELLUNG (0-100 %)
     createStyledMeter(tile_throttle, "GASPEDAL", 0, 100, currentSettings.throttle_warn_pct, currentSettings.throttle_max_pct,
-                       false, &throttle_meter, &throttle_needle, &throttle_needle_tip, &throttle_label, &throttle_secondary_label);
+                       false, &throttle_meter, &throttle_needle, &throttle_label, &throttle_secondary_label);
 
     // TILE 4: DREHZAHL (0-8000 U/min, Schaltpunktanzeige statt digitaler Anzeige)
     createRpmTile(tile_rpm);
@@ -1185,6 +1202,25 @@ void createGaugesUI() {
 
     // Zuletzt in den Einstellungen gewählte Start-Kachel anzeigen (stromlos gespeichert)
     lv_obj_set_tile_id(tileview, startup_gauge, 0, LV_ANIM_OFF);
+    current_main_tile = startup_gauge;
+
+    // Kachel-Array + Event fuer den linken Taster (Kachelwechsel) und
+    // manuelles Wischen (haelt current_main_tile synchron)
+    main_tiles[0] = tile_multi;
+    main_tiles[1] = tile_water;
+    main_tiles[2] = tile_bat;
+    main_tiles[3] = tile_throttle;
+    main_tiles[4] = tile_rpm;
+    main_tiles[5] = tile_gforce;
+    lv_obj_add_event_cb(tileview, [](lv_event_t *e) {
+        lv_obj_t *act = lv_tileview_get_tile_act(tileview);
+        for (uint8_t i = 0; i < 6; i++) {
+            if (main_tiles[i] == act) {
+                current_main_tile = i;
+                break;
+            }
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
 // --- FEHLERCODE-ÜBERSICHT (per Doppeltipp erreichbar) ---
@@ -1283,6 +1319,23 @@ void checkDoubleTap() {
     was_pressed = pressed;
 }
 
+// --- LINKER TASTER (BOOT-Button, GPIO9): einmal tippen = naechste Ansicht ---
+void checkLeftButton() {
+    static bool last_raw = HIGH;
+    static uint32_t last_change = 0;
+
+    bool raw = digitalRead(BUTTON_LEFT_PIN);
+    if (raw != last_raw && (millis() - last_change) > 50) { // 50ms Entprellung
+        last_change = millis();
+        last_raw = raw;
+
+        if (raw == LOW && lv_scr_act() == main_screen) { // Tastendruck = LOW
+            current_main_tile = (current_main_tile + 1) % 6;
+            lv_obj_set_tile_id(tileview, current_main_tile, 0, LV_ANIM_ON);
+        }
+    }
+}
+
 // --- SETUP & MAIN LOOP ---
 void setup() {
     Serial.begin(115200);
@@ -1294,6 +1347,7 @@ void setup() {
     // Board nach dem Einschalt-Impuls wieder aus (Bootloop).
     Wire.begin(TOUCH_SDA_PIN, TOUCH_SCL_PIN);
     Serial.println("[BOOT] Wire.begin ok");
+    pinMode(BUTTON_LEFT_PIN, INPUT_PULLUP);
     initIoExpander();
     Serial.println("[BOOT] initIoExpander ok");
 
@@ -1353,5 +1407,6 @@ void loop() {
     updateGaugeUI();
     checkCenterTouch();
     checkDoubleTap();
+    checkLeftButton();
     delay(5);
 }

@@ -114,6 +114,25 @@ offizielle PlatformIO-`espressif32`-Plattform kein `esp32-c6-devkitc-1`-Board mi
 ausreichend aktuellem Core bereitstellt, den `pioarduino`-Community-Fork der Plattform
 verwenden (siehe Kommentar in `platformio.ini`).
 
+**Wichtig (Flash-Größe/Partitionstabelle):** Das pioarduino-Board-File
+`esp32-c6-devkitc-1.json` geht standardmäßig von 8 MB Flash und der
+Standard-Partitionstabelle (kleine Dual-OTA-Slots) aus. Laut offizieller
+Waveshare-Arduino-IDE-Konfiguration (`Example/Arduino/Tools Configuration.png`)
+hat das Modul aber tatsächlich **16 MB Flash** mit dem Schema **„Huge APP
+(3MB No OTA/1MB SPIFFS)"**. `platformio.ini` überschreibt das deshalb explizit
+mit `board_upload.flash_size = 16MB` und `board_build.partitions =
+huge_app.csv`.
+
+**Wichtig (RESET-Taster ist reine Hardware, nicht firmwarekonfigurierbar):**
+Laut offizieller Waveshare-Pin-Tabelle hängt der RESET-Taster über die
+`KEY_IO`-Spalte direkt am dedizierten Chip-Reset-Pin (EN/CHIP_PU) – er hat
+**keine** GPIO-Nummer (im Gegensatz zum linken BOOT-Taster an IO9) und taucht
+in keinem einzigen Waveshare-Arduino-Beispiel im Code auf. Sein Verhalten kann
+also durch keine Firmware-/Tools-Einstellung verändert werden. Der zuvor als
+"rechter Taster" vermutete Knopf war tatsächlich nicht der RESET-Taster
+(vom Nutzer bestätigt) – das erklärt die frühere Beobachtung, dass Drücken
+keine Wirkung zeigte, war also kein Hardwaredefekt.
+
 ## Projektstruktur
 
 ```
@@ -138,7 +157,23 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
 - **Tileview mit 6 Kacheln** (horizontales Wischen), Wasser/Batterie/Gaspedal
   erzeugt über den gemeinsamen Helper `createStyledMeter()` (Skalenstriche,
   3 Farbzonen-Bögen, Nadel, große digitale Anzeige im Zentrum, kleines
-  Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`):
+  Sekundär-Label darunter – Tacho-Style, dunkler Hintergrund via `setDarkBg()`).
+  **Nadeln sind Bild-Assets** (nicht mehr aus LVGL-Linien gezeichnet):
+  `include/needle_imgs.h`/`src/needle_imgs.cpp` enthalten je 3 Bilder (Türkis/
+  Gelb/Rot, RGB565+Alpha) für die 5 Standard-Anzeigen (`needle_*_img`, inkl.
+  eigenem Nabe-Grafikelement) sowie ein separates, kleineres Bild-Set für die
+  Multi-Kachel (`multi_needle_*_img`, nur die äußere Nadelspitze – dafür
+  zusätzlich ein manuell gezeichnetes weißes Hub-Cap in
+  `createMultiImageNeedle()`). Auswahl per `classifySecondaryColor()`: Blau/
+  Cyan → Türkis-Bild, Gelb/Neongelb/Orange → Gelb-Bild, alle anderen Farben
+  (inkl. Standard Rot) → Rot-Bild als Fallback – wirkt bei allen 6 Anzeigen
+  identisch. Die Bilder sind in Ruhestellung nach 6 Uhr ausgerichtet und werden
+  über `lv_meter_add_needle_img()` um den Meter-Mittelpunkt rotiert
+  (`addImageNeedle()`/`createImageNeedle()`); da LVGL den Bild-Rotationswinkel
+  direkt als Skalenwinkel interpretiert (anders als bei Linien-Nadeln, wo 0°=
+  rechts als Basisrichtung dient), bekommt jede Bild-Nadel eine eigene
+  unsichtbare Hilfsskala mit um -90° versetzter `rotation`, damit die
+  6-Uhr-Ruhestellung mit der Skalenlücke übereinstimmt.
   1. **Multi-Daten-Kachel** (`createMultiTile()`, erste/Standard-Startkachel) –
      ohne Titel: statisches Hintergrundbild (`assets/multi_bg.jpg`, als RGB565
      im Flash eingebettet über `include/multi_bg_img.h`/`src/multi_bg_img.cpp`,
@@ -146,9 +181,8 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
      Farbverlauf – **fest im Bild vorgegeben, reagiert nicht auf die
      Primär-/Sekundärfarb-Einstellung**, anders als die übrigen 5 Anzeigen.
      Ein transparentes `lv_meter`-Objekt ohne eigene Skala/Ticks dient nur
-     noch der Winkelberechnung für die Nadel; Nadel als weißer, spitz
-     zulaufender Zeiger mit dunkel eingefärbtem „Schweif"
-     (`createTrailStyleNeedle()`), zeigt die aktuelle Drehzahl an. Mittig groß
+     noch der Winkelberechnung für die Nadel (Bild-Nadel siehe oben,
+     `createMultiImageNeedle()`), zeigt die aktuelle Drehzahl an. Mittig groß
      die Geschwindigkeit (`current_speed_kmh`) in Primärfarbe, darunter
      „KM/H", darunter 4 Zusatzfelder in Weiß (Batterie, Gaspedal, Drehzahl,
      Wasser) – nur das letzte Feld (Wasser) färbt sich ab 110 °C orange, alle
@@ -203,6 +237,14 @@ microSD-Karte für die Boot-Animation (Ordnerstruktur, JPEG-Frames):
   `loadStartupGauge()` gelesen wird. „Speichern & Beenden"-Button liegt als
   Overlay über dem Tileview und schreibt direkt in `currentSettings`
 - **Doppeltipp** auf dem Hauptbildschirm öffnet die Fehlercode-Übersicht
+- **Physische Taster:** Der **RESET-Button** des Boards hängt direkt am
+  EN-Pin und löst rein hardwareseitig einen kompletten ESP-Neustart aus
+  (kein Firmware-Code nötig). Der **linke Taster (BOOT-Button, GPIO9)**
+  ist nach dem Booten als normaler Taster nutzbar (`checkLeftButton()`,
+  50 ms entprellt) – einmal tippen springt auf dem Hauptbildschirm zur
+  nächsten Kachel (`current_main_tile`, zyklisch 0–5), synchron zum
+  manuellen Wischen über ein `LV_EVENT_VALUE_CHANGED`-Callback auf dem
+  Tileview
 - **Boot-Animation** aus JPEG-Frames von der SD-Karte läuft vor der LVGL-Initialisierung
 
 ## OBD2 / UDS-Protokoll
