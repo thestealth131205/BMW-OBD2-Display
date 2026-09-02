@@ -104,7 +104,10 @@ void initDisplay() {
     buscfg.data2_io_num = LCD_D2_PIN;
     buscfg.data3_io_num = LCD_D3_PIN;
     buscfg.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * LCD_BIT_PER_PIXEL / 8;
-    spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    esp_err_t err;
+
+    err = spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    Serial.printf("[LCD] spi_bus_initialize: %s\n", esp_err_to_name(err));
 
     esp_lcd_panel_io_spi_config_t io_config = {};
     io_config.cs_gpio_num = LCD_CS_PIN;
@@ -117,7 +120,8 @@ void initDisplay() {
     io_config.lcd_cmd_bits = 32;
     io_config.lcd_param_bits = 8;
     io_config.flags.quad_mode = true;
-    esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &g_lcd_io_handle);
+    err = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &g_lcd_io_handle);
+    Serial.printf("[LCD] esp_lcd_new_panel_io_spi: %s\n", esp_err_to_name(err));
 
     sh8601_vendor_config_t vendor_config = {};
     vendor_config.flags.use_qspi_interface = 1;
@@ -130,10 +134,17 @@ void initDisplay() {
     panel_config.bits_per_pixel = LCD_BIT_PER_PIXEL;
     panel_config.vendor_config = &vendor_config;
 
-    esp_lcd_new_panel_sh8601(g_lcd_io_handle, &panel_config, &g_lcd_panel_handle);
-    esp_lcd_panel_reset(g_lcd_panel_handle);
-    esp_lcd_panel_init(g_lcd_panel_handle);
-    esp_lcd_panel_disp_on_off(g_lcd_panel_handle, true);
+    err = esp_lcd_new_panel_sh8601(g_lcd_io_handle, &panel_config, &g_lcd_panel_handle);
+    Serial.printf("[LCD] esp_lcd_new_panel_sh8601: %s\n", esp_err_to_name(err));
+
+    err = esp_lcd_panel_reset(g_lcd_panel_handle);
+    Serial.printf("[LCD] esp_lcd_panel_reset: %s\n", esp_err_to_name(err));
+
+    err = esp_lcd_panel_init(g_lcd_panel_handle);
+    Serial.printf("[LCD] esp_lcd_panel_init: %s\n", esp_err_to_name(err));
+
+    err = esp_lcd_panel_disp_on_off(g_lcd_panel_handle, true);
+    Serial.printf("[LCD] esp_lcd_panel_disp_on_off: %s\n", esp_err_to_name(err));
 }
 
 esp_err_t set_amoled_backlight(uint8_t brig) {
