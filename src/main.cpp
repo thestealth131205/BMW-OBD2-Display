@@ -1396,6 +1396,15 @@ void setup() {
     initIoExpander();
     Serial.println("[BOOT] initIoExpander ok");
 
+    // draw_buf muss VOR initDisplay() gueltig sein: der QSPI-Completion-
+    // Callback (notify_lvgl_flush_ready) wird bereits durch initDisplay()/
+    // clearDisplayBlack() ausgeloest (esp_lcd_panel_draw_bitmap ist async)
+    // und dereferenziert disp_drv.draw_buf - war das noch NULL (globale,
+    // nullinitialisierte Struct), fuehrte das zu einem Store-Access-Fault-
+    // Bootloop direkt nach "initDisplay ok".
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, DISPLAY_WIDTH * 30);
+    disp_drv.draw_buf = &draw_buf;
+
     initDisplay(); // 40 MHz QSPI ueber esp_lcd, wie im offiziellen Waveshare-BSP
     Serial.println("[BOOT] initDisplay ok");
     // Redundant zur letzten Zeile in sh8601_lcd_init_cmds (dort bereits auf
