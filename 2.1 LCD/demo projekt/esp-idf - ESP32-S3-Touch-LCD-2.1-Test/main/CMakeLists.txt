@@ -16,6 +16,7 @@ idf_component_register(
                               "BMW_UI/bmw_ui.c"
                               "BMW_UI/multi_bg_img.c"
                               "BMW_UI/needle_imgs.c"
+                              "BMW_UI/img_lvgl_logo.c"
 
                         INCLUDE_DIRS "./EXIO"
                                      "./LCD_Driver"

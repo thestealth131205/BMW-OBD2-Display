@@ -7,9 +7,5 @@ CONFIG_LV_USE_PERF_MONITOR=y
 # BMW-Multi-Ansicht: grosse Geschwindigkeitsanzeige (montserrat 48)
 CONFIG_LV_FONT_MONTSERRAT_48=y
 
-# Widgets-Demo aktiviert, damit die Original-Demo-Seite (Lvgl_Example1)
-# ihr img_lvgl_logo-Asset gelinkt bekommt
-CONFIG_LV_USE_DEMO_WIDGETS=y
-
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
