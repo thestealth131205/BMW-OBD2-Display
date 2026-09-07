@@ -1,0 +1,61 @@
+name: ESP-IDF S3 Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_DIR: "2.1 LCD/demo projekt/esp-idf - ESP32-S3-Touch-LCD-2.1-Test"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: ${{ env.PROJECT_DIR }}
+
+      - name: Collect build artifacts
+        run: |
+          BUILD_DIR="$PROJECT_DIR/build"
+          mkdir -p s3-artifacts
+          cp "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin" s3-artifacts/firmware-s3.bin
+          cp "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.elf" s3-artifacts/firmware-s3.elf
+          cp "$BUILD_DIR/bootloader/bootloader.bin"   s3-artifacts/bootloader.bin
+          cp "$BUILD_DIR/partition_table/partition-table.bin" s3-artifacts/partition-table.bin
+
+      - name: Merge into single flashable image
+        run: |
+          BUILD_DIR="$PROJECT_DIR/build"
+          pip install --upgrade esptool
+          esptool --chip esp32s3 merge_bin -o s3-artifacts/firmware-s3-merged.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0     "$BUILD_DIR/bootloader/bootloader.bin" \
+            0x8000  "$BUILD_DIR/partition_table/partition-table.bin" \
+            0x10000 "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32-s3
+          path: s3-artifacts/
+
+      - name: Create/Update Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: s3-latest
+          name: Latest S3 Build
+          make_latest: false
+          files: |
+            s3-artifacts/firmware-s3.bin
+            s3-artifacts/firmware-s3.elf
+            s3-artifacts/firmware-s3-merged.bin

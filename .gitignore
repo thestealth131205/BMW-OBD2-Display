@@ -2,3 +2,13 @@
 .vscode/
 .DS_Store
 *.o
+
+# ESP-IDF (S3 project) build artifacts
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# Vendored LVGL managed component (auto-fetched via idf_component.yml)
+2.1 LCD/demo projekt/esp-idf - ESP32-S3-Touch-LCD-2.1-Test/components/lvgl__lvgl/
