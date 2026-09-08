@@ -1,122 +1,174 @@
 # BMW E90 OBD2 Display
 
-ESP32-C6-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
-Zeigt Kühlmitteltemperatur und Batteriespannung als analoge Rundinstrumente (LVGL)
-auf einem runden 466×466 AMOLED-Touchdisplay an, inkl. Boot-Animation, Diagnose
-(DTCs lesen/löschen) und BMW CBS-Service-Reset.
+ESP32-S3-basiertes CAN-Bus-Gauge-Display für einen BMW E90 320i (N43B20A, 2010).
+Zeigt eine Multi-Daten-Kachel (Geschwindigkeit zentral, Kühlmitteltemperatur-Ring
+im Hintergrund plus Batterie/Gaspedal/Drehzahl als Zusatzfelder) sowie
+Kühlmitteltemperatur, Batteriespannung, Gaspedalstellung als analoge
+Tacho-Style-Rundinstrumente (LVGL) mit Farbzonen, Drehzahl als
+Schaltpunktanzeige (6 LEDs) sowie G-Kraft als Polar-Raster-Grafik auf einem
+480×480 RGB-Touchdisplay an, inkl. Diagnose (DTCs lesen/löschen) und BMW
+CBS-Service-Reset.
 
 ## Hardware
 
 | Komponente | Modell |
 |---|---|
-| Mikrocontroller | ESP32-C6 (Waveshare 1.43" AMOLED Touch) |
-| Display | CO5300 AMOLED, 466×466, rund, QSPI |
-| Touch | Kapazitiv (integriert im Display-Modul) |
-| CAN-Transceiver | z. B. TJA1050 / SN65HVD230 |
-| microSD-Karte | Boot-Animation (JPEG-Frames) |
+| Mikrocontroller | ESP32-S3 (Waveshare ESP32-S3-Touch-LCD-2.1) |
+| Display | ST7701S RGB-TFT, 480×480, über SPI-Init + paralleles RGB-Interface |
+| Touch | CST820 (kapazitiv), I2C |
+| IO-Expander | TCA9554 (Adresse 0x20) – steuert u. a. Touch-Reset/weitere Enable-Leitungen |
+| CAN-Bus | externes **MCP2515-Modul** (SPI, TJA1050-Transceiver) |
+| Batteriemessung | interner ADC (Spannungsteiler auf dem Board) |
 
-Es wird **kein** MCP2515 verwendet – der ESP32-C6 besitzt einen eingebauten
-TWAI-CAN-Controller (`driver/twai.h`). Es wird nur noch ein externer
-CAN-Transceiver zwischen den GPIOs und dem OBD2-Stecker benötigt.
+Framework: **ESP-IDF** (nicht Arduino/PlatformIO), LVGL v8.2 via ESP Component
+Manager.
 
 ## Pinbelegung
 
-### Display (CO5300, QSPI)
+### ST7701S-Display (fest verlötet, keine externe Verdrahtung nötig)
 
-| Signal | ESP32-C6 GPIO |
+| Signal | GPIO | Signal | GPIO |
+|---|---|---|---|
+| SPI SDA (Init) | 1 | SPI SCLK (Init) | 2 |
+| HSYNC | 38 | VSYNC | 39 |
+| DE | 40 | PCLK | 41 |
+| Backlight (PWM) | 6 | | |
+| B0–B4 (DATA0–4) | 5, 45, 48, 47, 21 | | |
+| G0–G5 (DATA5–10) | 14, 13, 12, 11, 10, 9 | | |
+| R0–R4 (DATA11–15) | 46, 3, 8, 18, 17 | | |
+
+### I2C-Bus (Touch CST820 + IO-Expander TCA9554)
+
+| Signal | GPIO |
 |---|---|
-| CS | GPIO6 |
-| SCK | GPIO10 |
-| D0 | GPIO0 |
-| D1 | GPIO1 |
-| D2 | GPIO2 |
-| D3 | GPIO3 |
-| RST | GPIO7 |
+| SCL | 7 |
+| SDA | 15 |
+| Touch-INT | 16 |
+| Touch-RST | -1 (nicht verbunden, Reset über TCA9554) |
 
-### microSD-Karte (SPI)
+Ebenfalls fest verlötet, keine externe Verdrahtung nötig.
 
-| Signal | ESP32-C6 GPIO |
-|---|---|
-| CS | GPIO13 |
+### MCP2515-CAN-Modul (extern anzuschließen)
 
-Die restlichen SPI-Signale (MOSI/MISO/SCK) laufen über den Standard-`SPI`-Bus
-des Boards (Waveshare-1.43"-AMOLED-Modul).
+**Wichtig:** Auf dem ESP32-S3-Touch-LCD-2.1 sind fast alle GPIOs durch das
+RGB-Display und I2C belegt. Nur **GPIO 0, 19, 20, 43, 44** sind frei
+herausgeführt.
 
-### CAN-Bus (TWAI, eingebauter Controller)
+| MCP2515-Modul | ESP32-S3 GPIO | Funktion |
+|---|---|---|
+| VCC | 3V3 | Versorgung |
+| GND | GND | Masse |
+| SCK | GPIO43 | SPI-Takt |
+| SI (MOSI) | GPIO44 | SPI Data ESP→MCP2515 |
+| SO (MISO) | GPIO19 | SPI Data MCP2515→ESP |
+| CS | GPIO20 | SPI Chip-Select |
+| INT | GPIO0 | Interrupt (Polling-Fallback möglich) |
 
-| Signal | ESP32-C6 GPIO |
-|---|---|
-| TX (zum Transceiver) | GPIO19 |
-| RX (vom Transceiver) | GPIO20 |
+**Achtung Pin-Konflikt:** GPIO43/44 sind gleichzeitig die UART-Konsole des
+ESP32-S3 – mit dieser Belegung ist die serielle Debug-Ausgabe (`idf.py
+monitor`) zur Laufzeit nicht nutzbar (Flashen funktioniert weiterhin über den
+USB-Download-Modus). GPIO19/20 sind außerdem die nativen-USB-Pins – auch
+diese Funktion steht dadurch nicht mehr zur Verfügung.
 
 ## Anschlussplan
 
 ```
                  +------------------+
-                 |     ESP32-C6     |
-                 |  (Waveshare 1.43"|
-                 |   AMOLED Touch)  |
+                 |     ESP32-S3     |
+                 | (Waveshare 2.1"  |
+                 |  Touch-LCD)      |
                  +--------+---------+
                           |
      ------------------------------------------------
-     |               |                |             |
-     v               v                v             v
-+---------+     +-----------+   +-----------+  +-----------+
-| Display |     | microSD   |   |   CAN-    |  |   Touch   |
-| CO5300  |     |   Karte   |   |Transceiver|  | (im       |
-| (QSPI)  |     |  (SPI)    |   |(TJA1050/  |  | Display-  |
-|         |     |           |   | SN65HVD230)| | Modul)   |
-+---------+     +-----------+   +-----+-----+  +-----------+
-                                       |
-                            CANH/CANL |
-                                       v
-                              +----------------+
-                              |  OBD2-Stecker  |
-                              |  (BMW E90)     |
-                              |  Pin 6 = CANH  |
-                              |  Pin 14 = CANL |
-                              +----------------+
+     |               |                              |
+     v               v                              v
++---------+     +-----------+                 +-----------+
+| Display |     |   Touch   |                 | MCP2515-  |
+|ST7701S  |     | (CST820,  |                 | CAN-Modul |
+| (RGB)   |     |  I2C)     |                 | (SPI)     |
++---------+     +-----------+                 +-----+-----+
+                                                     |
+                                          CANH/CANL |
+                                                     v
+                                          +----------------+
+                                          |  OBD2-Stecker  |
+                                          |  (BMW E90)     |
+                                          |  Pin 6 = CANH  |
+                                          |  Pin 14 = CANL |
+                                          +----------------+
 ```
 
-### CAN-Transceiver-Verkabelung
+### MCP2515-Modul → CAN-Transceiver → OBD2-Stecker
 
-| CAN-Transceiver-Pin | Verbindung |
-|---|---|
-| TXD | ESP32-C6 GPIO19 |
-| RXD | ESP32-C6 GPIO20 |
-| VCC | 3.3V oder 5V (je nach Transceiver-Modul) |
-| GND | GND (gemeinsame Masse mit ESP32-C6 und OBD2-Stecker) |
-| CANH | OBD2-Stecker Pin 6 |
-| CANL | OBD2-Stecker Pin 14 |
-
-### OBD2-Stecker (BMW E90, PT-CAN)
+Nach dem MCP2515 (SPI-Anschluss siehe oben) geht es weiter zum
+CAN-Transceiver (meist TJA1050, schon auf dem Modul integriert) und von dort
+zum BMW E90 OBD2-Stecker:
 
 | OBD2-Pin | Signal |
 |---|---|
 | 6 | CANH |
 | 14 | CANL |
-| 16 | +12V (Dauerplus) |
-| 4/5 | GND |
 
-- Baudrate: **500 kbps**
+- Baudrate: **500 kbit/s** (Quarz auf dem MCP2515-Modul muss passen, Standard
+  8 MHz)
 - Verbunden mit dem PT-CAN (Powertrain-CAN) des Fahrzeugs
 
 ## Software / Build
 
-Framework: Arduino via PlatformIO
-
 ```bash
-# Build
-pio run
-
-# Flashen
-pio run --target upload
-
-# Serielle Ausgabe (Debugging)
-pio device monitor
+# Im Projektverzeichnis (ESP-IDF-Environment muss aktiviert sein, z. B. via
+# `. $HOME/esp/esp-idf/export.sh`)
+idf.py set-target esp32s3
+idf.py build
+idf.py -p PORT flash monitor
 ```
 
-Details zu Abhängigkeiten, LVGL-Konfiguration und Projektstruktur siehe [CLAUDE.md](CLAUDE.md).
+- **LVGL** wird per Component-Manager (`main/idf_component.yml`) geladen,
+  Version 8.2.
+- **Flash-Layout**: 16 MB, eigene `partitions.csv` (kein OTA).
+- **CI**: `.github/workflows/build-s3.yml` baut das Projekt per
+  `espressif/esp-idf-ci-action` (ESP-IDF v5.3.1, Target `esp32s3`) und lädt
+  bei Push auf `test_waveshare` `firmware-s3.bin`/`.elf`/`-merged.bin` in das
+  GitHub-Release **`s3-latest`**. Merge-Offsets: Bootloader `0x0`,
+  Partitionstabelle `0x8000`, App `0x10000`.
+
+## OBD2 / CAN-Auswertung
+
+Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber + Decode-Task,
+kein ESP-IDF-`twai`). CAN-IDs sind **Platzhalter**, am Fahrzeug per
+CAN-Sniffer verifizieren:
+
+| CAN-ID | Inhalt |
+|---|---|
+| `0x0AA` | Drehzahl (Byte 2–3 LE × 0,25 = U/min) |
+| `0x0C4` | G-Kraft (Byte 0/1 int8 × 0,01 = g) + Geschwindigkeit (Byte 2–3 LE × 0,1 = km/h) |
+| `0x1D0` | Kühlmitteltemperatur (Byte 0 − 40 = °C) |
+| `0x1F0` | Gaspedalstellung (Byte 0 linear 0–255 → 0–100 %) |
+| `0x7DF` | OBD2-Funktionsadresse (DTC lesen/löschen, Mode 03/04) |
+| `0x611` | Kombiinstrument (CBS-Öl-Service-Reset, UDS Service `0x31`) |
+
+Solange kein CAN-Signal anliegt, zeigt die UI Platzhalterwerte/Testanimation
+an. Batteriespannung kommt vom internen ADC, nicht von CAN.
+
+## UI-Logik (Kurzfassung)
+
+- **Multi-Kachel**: Geschwindigkeit zentral, Ring zeigt Kühlmitteltemperatur
+  (Skala 40–119 °C, ab 95 °C Farbwechsel der Nadel), Drehzahl zusätzlich
+  digital sichtbar (großer Font).
+- **Schaltpunkt-Kästchen** (6 Stück, Drehzahl-Kachel): füllen sich einzeln je
+  nach Drehzahl (Schwellen 1500/2500/3500/4500/5500/6500 U/min), ab
+  6800 U/min blinken alle gemeinsam wie eine digitale Schaltanzeige.
+- **Gaspedal-/Drehzahl-/Wasser-Temperatur-Felder** in großem Font mit
+  schmaler schwarzer Umrandung für bessere Lesbarkeit.
+- **3 Sekunden Touch in der Bildschirmmitte** zeigt den Waveshare-Demo-Screen,
+  ein „Zurück“-Button führt zur BMW-Ansicht zurück.
+- **Doppeltipp** in der Mitte öffnet den Farb-Einstellungsbildschirm
+  (Primär-/Sekundärfarbe, wirkt sich auf alle Anzeigen und die Nadelfarbe
+  aus).
+
+Details zur BMW-Multi-Ansicht siehe `CLAUDE.md` im Repo-Root sowie die
+projektspezifischen Notizen unter `2.1 LCD/demo projekt/esp-idf -
+ESP32-S3-Touch-LCD-2.1-Test/README.md`.
 
 ## Lizenz
 

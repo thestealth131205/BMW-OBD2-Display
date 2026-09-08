@@ -10,6 +10,8 @@ Der eingebaute Waveshare-Demo-Screen bleibt erreichbar: **3 Sekunden Touch in
 der Bildschirmmitte** zeigt ihn an, ein „Zurück“-Button führt zur BMW-Ansicht
 zurück. **Doppeltipp** in der Mitte öffnet den Farb-Einstellungsbildschirm.
 
+![Multi-Ansicht auf dem Display](docs/multi_view_photo.png)
+
 ## Hardware
 
 | Komponente | Modell |
