@@ -1,113 +1,144 @@
-| Supported Targets | ESP32-S3 |
-| ----------------- | -------- |
+# BMW E90 OBD2 Display – ESP32-S3-Touch-LCD-2.1 (RGB, ESP-IDF)
 
-# RGB LCD Panel Example
+Portierung der BMW-E90-Multi-Anzeige (siehe Haupt-`CLAUDE.md` im Repo-Root) auf
+das Waveshare-Board **ESP32-S3-Touch-LCD-2.1** (480×480 ST7701S RGB-Display,
+CST820-Touch). Framework: **ESP-IDF** (nicht Arduino/PlatformIO), LVGL v8.2
+via ESP Component Manager. Basis ist das offizielle Waveshare-Demo-Projekt,
+darauf aufgebaut liegt die BMW-UI in `main/BMW_UI/`.
 
-[esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) supports RGB interfaced LCD panel, with one or two frame buffer(s) managed by the driver itself.
+Der eingebaute Waveshare-Demo-Screen bleibt erreichbar: **3 Sekunden Touch in
+der Bildschirmmitte** zeigt ihn an, ein „Zurück“-Button führt zur BMW-Ansicht
+zurück. **Doppeltipp** in der Mitte öffnet den Farb-Einstellungsbildschirm.
 
-This example shows the general process of installing an RGB panel driver, and displays a scatter chart on the screen based on the LVGL library. For more information about porting the LVGL library, please refer to [official porting guide](https://docs.lvgl.io/master/porting/index.html). This example uses two kinds of **buffering mode** based on the number of frame buffers:
+## Hardware
 
-| Number of Frame Buffers | LVGL buffering mode | Way to avoid tear effect                                                                                    |
-|-------------------------|---------------------|-------------------------------------------------------------------------------------------------------------|
-| 1                       | Two buffers         | Extra synchronization mechanism is needed, e.g. using semaphore.                                            |
-| 2                       | Full refresh        | There's no intersection between writing to an offline frame buffer and reading from an online frame buffer. |
+| Komponente | Modell |
+|---|---|
+| Mikrocontroller | ESP32-S3 (Waveshare ESP32-S3-Touch-LCD-2.1) |
+| Display | ST7701S RGB-TFT, 480×480, über SPI-Init + paralleles RGB-Interface |
+| Touch | CST820 (kapazitiv), I2C |
+| IO-Expander | TCA9554 (Adresse 0x20) – steuert u. a. Touch-Reset/weitere Enable-Leitungen |
+| CAN-Bus | externes **MCP2515-Modul** (SPI, TJA1050-Transceiver) |
+| Batteriemessung | interner ADC (Spannungsteiler auf dem Board) |
 
-## How to use the example
+Board-eigene Peripherie (RTC PCF85063, IMU QMI8658, microSD, WLAN) ist aus dem
+Waveshare-Demo übernommen und unverändert nutzbar, wird von der BMW-UI aber
+nicht benötigt.
 
-### Hardware Required
+## Verdrahtungsplan
 
-* An ESP development board, which has RGB LCD peripheral supported and **Octal PSRAM** onboard
-* A general RGB panel, 16 bit-width, with HSYNC, VSYNC and DE signal
-* An USB cable for power supply and programming
+### ST7701S-Display (fest verlötet, keine externe Verdrahtung nötig)
 
-### Hardware Connection
+Das Display ist bereits fest mit dem ESP32-S3-Modul verlötet (Waveshare-
+Compound-Board). Pin-Zuordnung nur zur Referenz (`main/LCD_Driver/ST7701S.h`):
 
-The connection between ESP Board and the LCD is as follows:
+| Signal | GPIO | Signal | GPIO |
+|---|---|---|---|
+| SPI SDA (Init) | 1 | SPI SCLK (Init) | 2 |
+| HSYNC | 38 | VSYNC | 39 |
+| DE | 40 | PCLK | 41 |
+| Backlight (PWM) | 6 | | |
+| B0–B4 (DATA0–4) | 5, 45, 48, 47, 21 | | |
+| G0–G5 (DATA5–10) | 14, 13, 12, 11, 10, 9 | | |
+| R0–R4 (DATA11–15) | 46, 3, 8, 18, 17 | | |
 
-```
-       ESP Board                           RGB  Panel
-+-----------------------+              +-------------------+
-|                   GND +--------------+GND                |
-|                       |              |                   |
-|                   3V3 +--------------+VCC                |
-|                       |              |                   |
-|                   PCLK+--------------+PCLK               |
-|                       |              |                   |
-|             DATA[15:0]+--------------+DATA[15:0]         |
-|                       |              |                   |
-|                  HSYNC+--------------+HSYNC              |
-|                       |              |                   |
-|                  VSYNC+--------------+VSYNC              |
-|                       |              |                   |
-|                     DE+--------------+DE                 |
-|                       |              |                   |
-|               BK_LIGHT+--------------+BLK                |
-+-----------------------+              |                   |
-                               3V3-----+DISP_EN            |
-                                       |                   |
-                                       +-------------------+
-```
+### I2C-Bus (Touch CST820 + IO-Expander TCA9554)
 
-The GPIO number used by this example can be changed in [lvgl_example_main.c](main/rgb_lcd_example_main.c).
+| Signal | GPIO |
+|---|---|
+| SCL | 7 |
+| SDA | 15 |
+| Touch-INT | 16 |
+| Touch-RST | -1 (nicht verbunden, Reset über TCA9554) |
 
-Especially, please pay attention to the level used to turn on the LCD backlight, some LCD module needs a low level to turn it on, while others take a high level. You can change the backlight level macro `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL` in [lvgl_example_main.c](main/rgb_lcd_example_main.c).
+Ebenfalls fest verlötet, keine externe Verdrahtung nötig.
 
-If the RGB LCD panel only supports DE mode, you can even bypass the `HSYNC` and `VSYNC` signals, by assigning `EXAMPLE_PIN_NUM_HSYNC` and `EXAMPLE_PIN_NUM_VSYNC` with `-1`.
+### MCP2515-CAN-Modul (extern anzuschließen – einzige Verdrahtung, die der
+Nutzer selbst vornehmen muss)
 
-### Configure
+**Wichtig:** Auf dem ESP32-S3-Touch-LCD-2.1 sind fast alle GPIOs durch das
+RGB-Display und I2C belegt. Nur **GPIO 0, 19, 20, 43, 44** sind frei
+herausgeführt. Verdrahtung des MCP2515-Moduls (blaue Platine mit TJA1050,
+`main/CAN_Driver/mcp2515.h`):
 
-Run `idf.py menuconfig` and go to `Example Configuration`:
+| MCP2515-Modul | ESP32-S3 GPIO | Funktion |
+|---|---|---|
+| VCC | 3V3 | Versorgung |
+| GND | GND | Masse |
+| SCK | GPIO43 | SPI-Takt |
+| SI (MOSI) | GPIO44 | SPI Data ESP→MCP2515 |
+| SO (MISO) | GPIO19 | SPI Data MCP2515→ESP |
+| CS | GPIO20 | SPI Chip-Select |
+| INT | GPIO0 | Interrupt (Polling-Fallback möglich) |
 
-1. Choose whether to `Use double Frame Buffer`
-2. Choose whether to `Avoid tearing effect` (available only when step `1` was chosen to false)
-3. Choose whether to `Use bounce buffer` (available only when step `1` was chosen to false)
+Danach MCP2515 → CAN-Transceiver (TJA1050 ist meist schon auf dem Modul
+integriert) → BMW E90 OBD2-Stecker:
 
-### Build and Flash
+| OBD2-Pin | Signal |
+|---|---|
+| Pin 6 | CANH |
+| Pin 14 | CANL |
 
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A scatter chart will show up on the LCD as expected.
+Baudrate: **500 kbit/s**. Quarz auf dem MCP2515-Modul muss zu
+`MCP2515_XTAL_MHZ` in `mcp2515.h` passen (Standard: 8 MHz – am Modul
+nachprüfen, sonst stimmt die Baudrate nicht).
 
-The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from registry into `managed_components` folder.
+**Achtung Pin-Konflikt:** GPIO43/44 sind gleichzeitig die UART-Konsole des
+ESP32-S3. Mit dieser Pinbelegung ist die serielle Debug-Ausgabe (`idf.py
+monitor`) zur Laufzeit nicht nutzbar (Flashen funktioniert weiterhin über den
+USB-Download-Modus). GPIO19/20 sind außerdem die nativen-USB-Pins – auch diese
+Funktion steht dadurch nicht mehr zur Verfügung.
 
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
-
-### Example Output
+## Software / Build
 
 ```bash
-...
-I (0) cpu_start: Starting scheduler on APP CPU.
-I (856) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
-I (856) example: Create semaphores
-I (866) example: Turn off LCD backlight
-I (866) gpio: GPIO[4]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (876) example: Install RGB LCD panel driver
-I (906) example: Register event callbacks
-I (906) example: Initialize RGB LCD panel
-I (906) example: Turn on LCD backlight
-I (906) example: Initialize LVGL library
-I (916) example: Allocate separate LVGL draw buffers from PSRAM
-I (916) example: Register display driver to LVGL
-I (926) example: Install LVGL tick timer
-I (926) example: Display LVGL Scatter Chart
-...
+# Im Projektverzeichnis (ESP-IDF-Environment muss aktiviert sein, z. B. via
+# `. $HOME/esp/esp-idf/export.sh`)
+idf.py set-target esp32s3
+idf.py build
+idf.py -p PORT flash monitor
 ```
 
-## Troubleshooting
+- **LVGL** wird per Component-Manager (`main/idf_component.yml`) geladen,
+  Version 8.2. Der vendorte Ordner `components/lvgl__lvgl/` wird von CI/Build
+  automatisch nachgezogen und ist per `.gitignore` vom Repo ausgeschlossen.
+- **Flash-Layout**: 16 MB, eigene `partitions.csv` (kein OTA).
+- **CI**: `.github/workflows/build-s3.yml` baut das Projekt per
+  `espressif/esp-idf-ci-action` (ESP-IDF v5.3.1, Target `esp32s3`) und lädt
+  bei Push auf `test_waveshare` `firmware-s3.bin`/`.elf`/`-merged.bin` in das
+  GitHub-Release **`s3-latest`**. Merge-Offsets: Bootloader `0x0`,
+  Partitionstabelle `0x8000`, App `0x10000`.
 
-* Why the LCD doesn't light up?
-  * Check the backlight's turn-on level, and update it in `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL`
-* No memory for frame buffer
-  * The frame buffer of RGB panel is located in ESP side (unlike other controller based LCDs, where the frame buffer is located in external chip). As the frame buffer usually consumes much RAM (depends on the LCD resolution and color depth), we recommend to put the frame buffer into PSRAM (like what we do in this example). However, putting frame buffer in PSRAM will limit the maximum PCLK due to the bandwidth of **SPI0**.
-* LCD screen drift
-  * Slow down the PCLK frequency
-  * Adjust other timing parameters like PCLK clock edge (by `pclk_active_neg`), sync porches like VBP (by `vsync_back_porch`) according to your LCD spec
-  * Enable `CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and `CONFIG_SPIRAM_RODATA`, which can saves some bandwidth of SPI0 from being consumed by ICache.
-* LCD screen tear effect
-  * Using double frame buffers
-  * Or adding an extra synchronization mechanism between writing (by Cache) and reading (by EDMA) the frame buffer.
-* Low PCLK frequency
-  * Enable `CONFIG_EXAMPLE_USE_BOUNCE_BUFFER`, which will make the LCD controller fetch data from internal SRAM (instead of the PSRAM), but at the cost of increasing CPU usage.
-  * Enable `CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and `CONFIG_SPIRAM_RODATA` can also help if the you're not using the bounce buffer mode. These two configurations can save some **SPI0** bandwidth from being consumed by ICache.
+## OBD2 / CAN-Auswertung
 
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber +
+Decode-Task, kein ESP-IDF-`twai`). CAN-IDs identisch zum C6-Hauptprojekt –
+**Platzhalter**, am Fahrzeug per CAN-Sniffer verifizieren:
+
+| CAN-ID | Inhalt |
+|---|---|
+| `0x0AA` | Drehzahl (Byte 2–3 LE × 0,25 = U/min) |
+| `0x0C4` | G-Kraft (Byte 0/1 int8 × 0,01 = g) + Geschwindigkeit (Byte 2–3 LE × 0,1 = km/h) |
+| `0x1D0` | Kühlmitteltemperatur (Byte 0 − 40 = °C) |
+| `0x1F0` | Gaspedalstellung (Byte 0 linear 0–255 → 0–100 %) |
+| `0x7DF` | OBD2-Funktionsadresse (DTC lesen/löschen, Mode 03/04) |
+| `0x611` | Kombiinstrument (CBS-Öl-Service-Reset, UDS Service `0x31`) |
+
+Solange kein CAN-Signal anliegt (`CAN_OBD2_online()` == false), zeigt die UI
+Platzhalterwerte/Testanimation an. Batteriespannung kommt weiterhin vom
+internen ADC (`BAT_Driver`), nicht von CAN.
+
+## UI-Logik (Kurzfassung)
+
+Details zur BMW-Multi-Ansicht (Anzeigen, Farbzonen, Schwellenwerte, Nadeln,
+Einstellungs-Screen) siehe Haupt-`CLAUDE.md` im Repo-Root – die Logik ist
+weitgehend 1:1 vom C6-Projekt übernommen (`main/BMW_UI/bmw_ui.c`). Abweichungen
+zum C6-Projekt:
+
+- Ringnadel der Multi-Kachel zeigt Kühlmitteltemperatur (Skala 40–119 °C,
+  ab 95 °C Farbwechsel), Drehzahl bleibt zusätzlich digital sichtbar.
+- Schaltpunkt-Kästchen (6 Stück) füllen sich einzeln je nach Drehzahl
+  (aktuelle Schwellen: 1500/2500/3500/4500/5500/6500 U/min), ab 6800 U/min
+  blinken alle gemeinsam.
+- Farbverwaltung/Nadel-Auswahl per Einstellungs-Screen (Doppeltipp), analog
+  zur Farbpalette im C6-Projekt.

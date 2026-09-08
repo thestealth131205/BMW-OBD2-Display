@@ -51,6 +51,13 @@ static float current_water_temp      = 105.0f;
 #define ANIM_THROTTLE_MAX   100.0f
 #define ANIM_RPM_MAX       8000.0f
 
+// Skala der Multi-Nadel (zeigt die Kuehlmitteltemperatur, nicht die Drehzahl -
+// die Drehzahl wird bereits digital + ueber die Schaltanzeige-Kaestchen
+// dargestellt). Ende der Skala = 119 Grad, ab 95 Grad faerbt sich die Nadel
+// lila (siehe BMW_UI_Update()).
+#define MULTI_WATER_SCALE_MIN   40
+#define MULTI_WATER_SCALE_MAX  119
+
 static uint32_t anim_start_tick;
 static bool anim_done = false;
 
@@ -66,6 +73,9 @@ static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
 static lv_obj_t *multi_rpm_label;
 static lv_obj_t *multi_water_label;
+// Schwarze Umrandung (8 versetzte Kopien) hinter dem Wasser-Feld, damit die
+// weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
+static lv_obj_t *multi_water_outline[8];
 
 // --- Schaltanzeige (6 Fuell-Kaestchen ueber den im Hintergrundbild
 // gezeichneten Kaesten): fuellen sich mit steigender Drehzahl (je Kaestchen
@@ -75,7 +85,7 @@ static lv_obj_t *multi_water_label;
 #define RPM_SHIFT_BLINK 6800
 static lv_obj_t *rpm_boxes[6];
 static const lv_coord_t rpm_box_x[6]  = {-117, -73, -28, 17, 62, 109};
-static const int32_t    rpm_box_thr[6] = {4000, 4560, 5120, 5680, 6240, 6800};
+static const int32_t    rpm_box_thr[6] = {1500, 2500, 3500, 4500, 5500, 6500};
 static const lv_color_t rpm_box_col[6] = {
     LV_COLOR_MAKE(205, 212, 205), LV_COLOR_MAKE(205, 212, 205),
     LV_COLOR_MAKE(205, 212, 205), LV_COLOR_MAKE(205, 212, 205),
@@ -297,7 +307,8 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     const lv_img_dsc_t *init_needle_img;
     lv_coord_t init_pivot_x, init_pivot_y;
     get_base_needle_img(&init_needle_img, &init_pivot_x, &init_pivot_y);
-    multi_needle = add_image_needle(multi_meter, 0, 8000, init_needle_img, init_pivot_x, init_pivot_y);
+    multi_needle = add_image_needle(multi_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
+                                     init_needle_img, init_pivot_x, init_pivot_y);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
@@ -326,6 +337,21 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     multi_bat_label      = lv_label_create(scr_multi);
     multi_throttle_label = lv_label_create(scr_multi);
     multi_rpm_label      = lv_label_create(scr_multi);
+
+    // Schwarze Umrandungs-Kopien VOR dem eigentlichen Wasser-Label erzeugen,
+    // damit sie im Z-Order dahinter liegen (2px-Versatz in 8 Richtungen)
+    static const lv_coord_t outline_off[8][2] = {
+        {-2, 0}, {2, 0}, {0, -2}, {0, 2}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2},
+    };
+    for (int i = 0; i < 8; i++) {
+        multi_water_outline[i] = lv_label_create(scr_multi);
+        lv_obj_set_style_text_font(multi_water_outline[i], &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(multi_water_outline[i], lv_color_black(), 0);
+        lv_obj_align(multi_water_outline[i], LV_ALIGN_CENTER,
+                     field_x[3] + outline_off[i][0], 60 + outline_off[i][1]);
+        lv_label_set_text(multi_water_outline[i], "-");
+    }
+
     multi_water_label    = lv_label_create(scr_multi);
     lv_obj_t *fields[4] = {multi_bat_label, multi_throttle_label, multi_rpm_label, multi_water_label};
     for (int i = 0; i < 4; i++) {
@@ -333,9 +359,10 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
         lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
         lv_label_set_text(fields[i], "-");
     }
-    // Gaspedal- und Drehzahl-Feld doppelt so gross (Font 28 statt Standard 14)
+    // Gaspedal-, Drehzahl- und Wasser-Feld doppelt so gross (Font 28 statt Standard 14)
     lv_obj_set_style_text_font(multi_throttle_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_rpm_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(multi_water_label, &lv_font_montserrat_28, 0);
 
     // Schaltanzeige-Kaestchen (initial leer/transparent, ueber den
     // Hintergrund-Kaesten positioniert)
@@ -414,7 +441,7 @@ void BMW_UI_Update(void)
         }
     }
 
-    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_rpm);
+    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_water_temp);
     lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
     lv_label_set_text_fmt(multi_bat_label, "%.1fV", current_bat_voltage);
     lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
@@ -422,6 +449,9 @@ void BMW_UI_Update(void)
     lv_label_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
     lv_obj_set_style_text_color(multi_water_label,
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
+    for (int i = 0; i < 8; i++) {
+        lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
+    }
 
     // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)
     // erst ab seiner eigenen Drehzahlschwelle (rpm_box_thr). Ab RPM_SHIFT_BLINK
