@@ -13,6 +13,7 @@
 #include "LVGL_Example.h"
 #include "Wireless.h"
 #include "bmw_ui.h"
+#include "can_obd2.h"
 
 void Driver_Loop(void *parameter)
 {
@@ -51,6 +52,9 @@ void app_main(void)
     Touch_Init();
     SD_Init();
     LVGL_Init();
+
+    // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
+    CAN_OBD2_Init();
 /********************* BMW Multi-Ansicht (Standard) + Waveshare-Demo *********************/
     // Demo-Seite des Waveshare-Projekts auf einem eigenen Screen aufbauen
     // (erscheint beim 3-Sekunden-Halten in der Bildschirmmitte).

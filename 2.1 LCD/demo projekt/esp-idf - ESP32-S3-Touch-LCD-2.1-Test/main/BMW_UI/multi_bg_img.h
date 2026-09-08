@@ -1,5 +1,5 @@
 // Hintergrundbild fuer die Multi-Daten-Kachel (466x466, RGB565).
-// Rohdaten in src/multi_bg_img.cpp, aus assets/multi_bg.jpg generiert.
+// Rohdaten in multi_bg_img.c, aus vom Nutzer bereitgestelltem PNG generiert.
 #pragma once
 
 #include <lvgl.h>

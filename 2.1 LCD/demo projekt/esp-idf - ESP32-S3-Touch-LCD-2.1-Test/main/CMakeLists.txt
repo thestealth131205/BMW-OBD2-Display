@@ -17,6 +17,8 @@ idf_component_register(
                               "BMW_UI/multi_bg_img.c"
                               "BMW_UI/needle_imgs.c"
                               "BMW_UI/img_lvgl_logo.c"
+                              "CAN_Driver/mcp2515.c"
+                              "CAN_Driver/can_obd2.c"
 
                         INCLUDE_DIRS "./EXIO"
                                      "./LCD_Driver"
@@ -32,5 +34,6 @@ idf_component_register(
                                      "./Buzzer"
                                      "./BAT_Driver"
                                      "./BMW_UI"
+                                     "./CAN_Driver"
                                      "."
                         )
