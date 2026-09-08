@@ -4,8 +4,10 @@ CONFIG_LV_USE_USER_DATA=y
 CONFIG_LV_USE_CHART=y
 CONFIG_LV_USE_PERF_MONITOR=y
 
-# BMW-Multi-Ansicht: grosse Geschwindigkeitsanzeige (montserrat 48)
+# BMW-Multi-Ansicht: grosse Geschwindigkeitsanzeige (montserrat 48),
+# vergroesserte Gaspedal-/Drehzahl-Felder (montserrat 28)
 CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
 
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y

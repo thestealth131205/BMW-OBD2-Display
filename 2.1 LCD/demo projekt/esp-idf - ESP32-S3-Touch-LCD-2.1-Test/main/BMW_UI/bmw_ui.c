@@ -67,6 +67,22 @@ static lv_obj_t *multi_throttle_label;
 static lv_obj_t *multi_rpm_label;
 static lv_obj_t *multi_water_label;
 
+// --- Schaltanzeige (6 Fuell-Kaestchen ueber den im Hintergrundbild
+// gezeichneten Kaesten): fuellen sich mit steigender Drehzahl (je Kaestchen
+// eine eigene Schwelle), ab RPM_SHIFT_BLINK blinken alle gemeinsam wie eine
+// digitale Schaltanzeige. Fuellfarben = Umrandungsfarben aus dem
+// Hintergrundbild (1-4 weiss/grau, 5 hell-lila, 6 blau). ---
+#define RPM_SHIFT_BLINK 6800
+static lv_obj_t *rpm_boxes[6];
+static const lv_coord_t rpm_box_x[6]  = {-117, -73, -28, 17, 62, 109};
+static const int32_t    rpm_box_thr[6] = {4000, 4560, 5120, 5680, 6240, 6800};
+static const lv_color_t rpm_box_col[6] = {
+    LV_COLOR_MAKE(205, 212, 205), LV_COLOR_MAKE(205, 212, 205),
+    LV_COLOR_MAKE(205, 212, 205), LV_COLOR_MAKE(205, 212, 205),
+    LV_COLOR_MAKE(190, 85, 246),   // hell-lila
+    LV_COLOR_MAKE(70, 95, 235),    // blau
+};
+
 // Dunkler Tacho-Hintergrund
 static void set_dark_bg(lv_obj_t *obj)
 {
@@ -317,6 +333,23 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
         lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
         lv_label_set_text(fields[i], "-");
     }
+    // Gaspedal- und Drehzahl-Feld doppelt so gross (Font 28 statt Standard 14)
+    lv_obj_set_style_text_font(multi_throttle_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(multi_rpm_label, &lv_font_montserrat_28, 0);
+
+    // Schaltanzeige-Kaestchen (initial leer/transparent, ueber den
+    // Hintergrund-Kaesten positioniert)
+    for (int i = 0; i < 6; i++) {
+        rpm_boxes[i] = lv_obj_create(scr_multi);
+        lv_obj_set_size(rpm_boxes[i], 32, 16);
+        lv_obj_align(rpm_boxes[i], LV_ALIGN_CENTER, rpm_box_x[i], 172);
+        lv_obj_set_style_radius(rpm_boxes[i], 3, 0);
+        lv_obj_set_style_border_width(rpm_boxes[i], 0, 0);
+        lv_obj_set_style_bg_color(rpm_boxes[i], rpm_box_col[i], 0);
+        lv_obj_set_style_bg_opa(rpm_boxes[i], LV_OPA_TRANSP, 0);
+        lv_obj_clear_flag(rpm_boxes[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(rpm_boxes[i], LV_OBJ_FLAG_CLICKABLE);
+    }
 
     // Unsichtbares Center-Overlay: 3-Sekunden-Halten -> Demo-Seite,
     // Doppeltipp -> Einstellungs-Screen (Farben)
@@ -389,6 +422,31 @@ void BMW_UI_Update(void)
     lv_label_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
     lv_obj_set_style_text_color(multi_water_label,
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
+
+    // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)
+    // erst ab seiner eigenen Drehzahlschwelle (rpm_box_thr). Ab RPM_SHIFT_BLINK
+    // (6800 U/min) leuchten alle gemeinsam blinkend im 250-ms-Takt auf wie eine
+    // digitale Schaltanzeige.
+    bool shift_blink = (current_rpm >= RPM_SHIFT_BLINK);
+    lv_opa_t blink_opa = LV_OPA_COVER;
+    if (shift_blink) {
+        static bool box_blink_state = true;
+        static uint32_t box_last_blink = 0;
+        if (lv_tick_elaps(box_last_blink) > 250) {
+            box_blink_state = !box_blink_state;
+            box_last_blink = lv_tick_get();
+        }
+        blink_opa = box_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+    }
+    for (int i = 0; i < 6; i++) {
+        lv_opa_t opa;
+        if (shift_blink) {
+            opa = blink_opa;
+        } else {
+            opa = (current_rpm >= (float)rpm_box_thr[i]) ? LV_OPA_COVER : LV_OPA_TRANSP;
+        }
+        lv_obj_set_style_bg_opa(rpm_boxes[i], opa, 0);
+    }
 
     // Nadelfarbe: Basis = eingestellte Sekundaerfarbe (Standard Rot) bis
     // 95 Grad, ab 95 Grad neongelb, ab 106 Grad blinkt die Nadel (250ms-Takt,
