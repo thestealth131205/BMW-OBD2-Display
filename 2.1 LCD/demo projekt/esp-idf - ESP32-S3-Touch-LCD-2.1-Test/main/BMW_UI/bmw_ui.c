@@ -3,6 +3,7 @@
 #include "needle_imgs.h"
 #include "BAT_Driver.h"
 #include "can_obd2.h"
+#include "PCF85063.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -247,6 +248,54 @@ static void back_from_settings_cb(lv_event_t *e)
     lv_scr_load(scr_multi);
 }
 
+// --- Datenlogging auf SD-Karte (CSV, Excel-kompatibel: Semikolon-Trenner,
+// CRLF-Zeilenenden, Dezimalpunkt) ---
+#define LOG_INTERVAL_MS 500
+static FILE *log_file = NULL;
+static uint32_t log_last_tick = 0;
+static lv_obj_t *log_status_label;
+
+static void start_datalogging(void)
+{
+    datetime_t now;
+    PCF85063_Read_Time(&now);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/sdcard/log_%04d%02d%02d_%02d%02d%02d.csv",
+             now.year, now.month, now.day, now.hour, now.minute, now.second);
+
+    log_file = fopen(path, "w");
+    if (!log_file) {
+        lv_label_set_text(log_status_label, "SD-Fehler!");
+        return;
+    }
+    fprintf(log_file,
+            "Zeit_ms;Geschwindigkeit_kmh;Drehzahl_U_min;Wassertemperatur_C;"
+            "Gaspedal_pct;Batterie_OBD2_V;GKraft_Quer_g;GKraft_Laengs_g\r\n");
+    fflush(log_file);
+    log_last_tick = lv_tick_get();
+    lv_label_set_text(log_status_label, "Aktiv");
+}
+
+static void stop_datalogging(void)
+{
+    if (log_file) {
+        fclose(log_file);
+        log_file = NULL;
+    }
+    lv_label_set_text(log_status_label, "");
+}
+
+static void log_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+        start_datalogging();
+    } else {
+        stop_datalogging();
+    }
+}
+
 // Einstellungs-Screen mit Primaer-/Sekundaerfarb-Auswahl, erreichbar per
 // Doppeltipp in der Bildschirmmitte der Multi-Ansicht.
 static void create_settings_screen(void)
@@ -258,6 +307,18 @@ static void create_settings_screen(void)
     lv_obj_t *title = lv_label_create(scr_settings);
     lv_label_set_text(title, "FARBEN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    lv_obj_t *log_label = lv_label_create(scr_settings);
+    lv_label_set_text(log_label, "Datenlogging");
+    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 15, 12);
+
+    lv_obj_t *log_switch = lv_switch_create(scr_settings);
+    lv_obj_align(log_switch, LV_ALIGN_TOP_LEFT, 15, 34);
+    lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    log_status_label = lv_label_create(scr_settings);
+    lv_label_set_text(log_status_label, "");
+    lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
 
     create_color_picker_column(scr_settings, "Primaer", -115, true, primary_color_ctx);
     create_color_picker_column(scr_settings, "Sekundaer", 115, false, secondary_color_ctx);
@@ -563,6 +624,16 @@ void BMW_UI_Update(void)
     float obd2_bat = CAN_OBD2_bat_voltage();
     if (obd2_bat > 0.0f) {
         lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
+    }
+
+    // Datenlogging auf SD-Karte (CSV-Zeile alle LOG_INTERVAL_MS)
+    if (log_file && lv_tick_elaps(log_last_tick) >= LOG_INTERVAL_MS) {
+        log_last_tick = lv_tick_get();
+        fprintf(log_file, "%lu;%.1f;%.0f;%.1f;%.0f;%.2f;%.2f;%.2f\r\n",
+                (unsigned long)lv_tick_get(), current_speed_kmh, current_rpm,
+                current_water_temp, current_throttle_pct, obd2_bat,
+                CAN_OBD2_gforce_x(), CAN_OBD2_gforce_y());
+        fflush(log_file);
     }
 
     // Fehlercode-Liste auf dem DTC-Screen aktualisieren
