@@ -148,18 +148,28 @@ CAN-Sniffer verifizieren:
 | `0x611` | Kombiinstrument (CBS-Öl-Service-Reset, UDS Service `0x31`) |
 
 Solange kein CAN-Signal anliegt, zeigt die UI Platzhalterwerte/Testanimation
-an. Batteriespannung kommt vom internen ADC, nicht von CAN.
+an. Das Board-Akku-Feld kommt vom internen ADC, nicht von CAN. Die
+Fahrzeug-Batteriespannung im Multi-View wird per Mode-01-PID-0x42-Anfrage
+(1×/s) live über OBD2 ausgelesen. DTC-Antworten (`0x7E8`, Mode 03) werden zu
+Klartext-Codes decodiert (nur Single-Frame-ISO-TP, kein Multi-Frame-
+Reassembly).
 
 ## UI-Logik (Kurzfassung)
 
 - **Multi-Kachel**: Geschwindigkeit zentral, Ring zeigt Kühlmitteltemperatur
   (Skala 40–119 °C, ab 95 °C Farbwechsel der Nadel), Drehzahl zusätzlich
-  digital sichtbar (großer Font).
+  digital sichtbar (großer Font). Zusatzfelder: Board-Akku-Spannung (ADC),
+  Gaspedal, Drehzahl, Wasser-Temperatur – dazwischen mittig, tiefer versetzt,
+  die live per OBD2 (Mode 01 PID 0x42) ausgelesene Fahrzeug-Batteriespannung.
 - **Schaltpunkt-Kästchen** (6 Stück, Drehzahl-Kachel): füllen sich einzeln je
   nach Drehzahl (Schwellen 1500/2500/3500/4500/5500/6500 U/min), ab
   6800 U/min blinken alle gemeinsam wie eine digitale Schaltanzeige.
 - **Gaspedal-/Drehzahl-/Wasser-Temperatur-Felder** in großem Font mit
   schmaler schwarzer Umrandung für bessere Lesbarkeit.
+- **Wisch nach links** auf der Multi-Ansicht öffnet den Fehlercode-Screen:
+  oben eine scrollbare Liste der ausgelesenen DTCs (Klartext, z. B. „P0301“),
+  darunter „Auslesen“/„Löschen“ nebeneinander sowie „Service Reset“ (CBS-
+  Öl-Service). **Wisch nach rechts** führt zurück zur Multi-Ansicht.
 - **3 Sekunden Touch in der Bildschirmmitte** zeigt den Waveshare-Demo-Screen,
   ein „Zurück“-Button führt zur BMW-Ansicht zurück.
 - **Doppeltipp** in der Mitte öffnet den Farb-Einstellungsbildschirm

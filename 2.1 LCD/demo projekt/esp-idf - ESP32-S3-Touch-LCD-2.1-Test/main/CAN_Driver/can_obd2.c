@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include <stdio.h>
 
 static const char *TAG = "CAN_OBD2";
 
@@ -15,7 +16,10 @@ static const char *TAG = "CAN_OBD2";
 
 // OBD2 / UDS
 #define ID_OBD2_FUNC  0x7DF   // funktionale Broadcast-Adresse
+#define ID_OBD2_RESP  0x7E8   // Antwort-ID des Motorsteuergeraets
 #define ID_KOMBI      0x611   // Kombiinstrument (CBS-Reset, UDS 0x31)
+
+#define OBD2_BAT_POLL_MS 1000  // Intervall fuer Mode-01-PID-0x42-Anfragen
 
 static volatile float s_speed_kmh    = 0.0f;
 static volatile float s_rpm          = 0.0f;
@@ -24,10 +28,49 @@ static volatile float s_throttle_pct = 0.0f;
 static volatile float s_gforce_x     = 0.0f;
 static volatile float s_gforce_y     = 0.0f;
 static volatile bool  s_online       = false;
+static volatile float s_obd2_bat_voltage = 0.0f;
+
+#define MAX_DTC 8
+static volatile int s_dtc_count = -1;   // -1 = noch nicht ausgelesen
+static char s_dtc_codes[MAX_DTC][6];    // z.B. "P0301"
+
+// Dekodiert einen 2-Byte-DTC (OBD2 Mode 03/07, ISO 15031) in Textform,
+// z.B. Byte1=0x03,Byte2=0x01 -> "P0301". Liefert false bei Fuell-Bytes (0x00 0x00).
+static bool decode_dtc_bytes(uint8_t b1, uint8_t b2, char out[6])
+{
+    if (b1 == 0 && b2 == 0) return false;
+    static const char sys_chars[4] = {'P', 'C', 'B', 'U'};
+    char sys = sys_chars[(b1 >> 6) & 0x3];
+    int d1 = (b1 >> 4) & 0x3;
+    int d2 = b1 & 0x0F;
+    int d3 = (b2 >> 4) & 0x0F;
+    int d4 = b2 & 0x0F;
+    snprintf(out, 6, "%c%d%X%X%X", sys, d1, d2, d3, d4);
+    return true;
+}
 
 static void decode_frame(const mcp2515_frame_t *f)
 {
     switch (f->id) {
+    case ID_OBD2_RESP:
+        if (f->dlc >= 5 && f->data[1] == 0x41 && f->data[2] == 0x42) {
+            // Mode 01, PID 0x42 (Steuergeraete-Spannung): A/B in mV
+            uint16_t raw = ((uint16_t)f->data[3] << 8) | f->data[4];
+            s_obd2_bat_voltage = raw / 1000.0f;
+        } else if (f->dlc >= 2 && f->data[1] == 0x43) {
+            // Mode 03, positive Antwort: Fehlercodes ab Byte 2, je 2 Byte
+            int n = 0;
+            for (int i = 2; i + 1 < f->dlc && n < MAX_DTC; i += 2) {
+                if (decode_dtc_bytes(f->data[i], f->data[i + 1], s_dtc_codes[n])) {
+                    n++;
+                }
+            }
+            s_dtc_count = n;
+        } else if (f->dlc >= 2 && f->data[1] == 0x44) {
+            // Mode 04, positive Antwort: Fehlercodes geloescht
+            s_dtc_count = 0;
+        }
+        break;
     case ID_RPM:
         if (f->dlc >= 4) {
             uint16_t raw = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
@@ -60,6 +103,7 @@ static void decode_frame(const mcp2515_frame_t *f)
 static void can_task(void *arg)
 {
     mcp2515_frame_t f;
+    uint32_t last_bat_poll = 0;
     while (1) {
         int drained = 0;
         while (mcp2515_receive(&f) && drained < 16) {
@@ -67,6 +111,14 @@ static void can_task(void *arg)
             decode_frame(&f);
             drained++;
         }
+
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (now - last_bat_poll >= OBD2_BAT_POLL_MS) {
+            last_bat_poll = now;
+            uint8_t req[8] = {0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00};
+            mcp2515_send(ID_OBD2_FUNC, req, 8);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(drained ? 2 : 10));
     }
 }
@@ -99,6 +151,7 @@ void CAN_OBD2_clear_dtc(void)
 {
     uint8_t req[8] = {0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     mcp2515_send(ID_OBD2_FUNC, req, 8);
+    s_dtc_count = 0;   // optimistisch, wird ggf. per 0x44-Antwort bestaetigt
 }
 
 void CAN_OBD2_reset_service_oil(void)
@@ -107,3 +160,13 @@ void CAN_OBD2_reset_service_oil(void)
     uint8_t req[8] = {0x04, 0x31, 0x01, 0xFF, 0x01, 0x00, 0x00, 0x00};
     mcp2515_send(ID_KOMBI, req, 8);
 }
+
+int CAN_OBD2_dtc_count(void) { return s_dtc_count; }
+
+const char *CAN_OBD2_dtc_code(int idx)
+{
+    if (idx < 0 || idx >= s_dtc_count || idx >= MAX_DTC) return NULL;
+    return s_dtc_codes[idx];
+}
+
+float CAN_OBD2_bat_voltage(void) { return s_obd2_bat_voltage; }

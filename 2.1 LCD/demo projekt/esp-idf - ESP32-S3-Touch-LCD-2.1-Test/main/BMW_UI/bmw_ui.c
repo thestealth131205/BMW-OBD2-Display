@@ -4,6 +4,7 @@
 #include "BAT_Driver.h"
 #include "can_obd2.h"
 #include <string.h>
+#include <stdio.h>
 
 // --- Farbpalette fuer die Einstellungen (Primaer-/Sekundaerfarbe, wie im
 // C6-Projekt inkl. Neongelb) ---
@@ -65,6 +66,7 @@ static bool anim_done = false;
 static lv_obj_t *scr_multi;
 static lv_obj_t *scr_demo;
 static lv_obj_t *scr_settings;
+static lv_obj_t *scr_dtc;
 
 static lv_obj_t *multi_meter;
 static lv_meter_indicator_t *multi_needle;
@@ -76,6 +78,13 @@ static lv_obj_t *multi_water_label;
 // Schwarze Umrandung (8 versetzte Kopien) hinter dem Wasser-Feld, damit die
 // weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
 static lv_obj_t *multi_water_outline[8];
+
+// Live OBD2-Batteriespannung (Mode 01 PID 0x42), mittig zwischen Gaspedal-
+// und Drehzahlfeld, tiefer als die Feldreihe positioniert.
+static lv_obj_t *multi_obd2_bat_label;
+
+// --- Fehlercode-Screen (per Wisch-Geste erreichbar) ---
+static lv_obj_t *dtc_list_label;
 
 // --- Schaltanzeige (6 Fuell-Kaestchen ueber den im Hintergrundbild
 // gezeichneten Kaesten): fuellen sich mit steigender Drehzahl (je Kaestchen
@@ -261,6 +270,91 @@ static void create_settings_screen(void)
     lv_obj_center(back_lbl);
 }
 
+// --- Fehlercode-Screen: erreichbar per Wisch nach links auf der Multi-
+// Ansicht, per Wisch nach rechts geht es zurueck. Obere Haelfte zeigt die
+// zuletzt ausgelesenen Fehlercodes, darunter Auslesen/Loeschen-Buttons und
+// ein Service-Reset-Button.
+static void swipe_gesture_cb(lv_event_t *e)
+{
+    lv_obj_t *scr = lv_event_get_current_target(e);
+    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+    if (scr == scr_multi && dir == LV_DIR_LEFT) {
+        lv_scr_load_anim(scr_dtc, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    } else if (scr == scr_dtc && dir == LV_DIR_RIGHT) {
+        lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    }
+}
+
+static void dtc_read_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    CAN_OBD2_read_dtc();
+}
+
+static void dtc_clear_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    CAN_OBD2_clear_dtc();
+}
+
+static void dtc_service_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    CAN_OBD2_reset_service_oil();
+}
+
+static void create_dtc_screen(void)
+{
+    scr_dtc = lv_obj_create(NULL);
+    set_dark_bg(scr_dtc);
+    lv_obj_clear_flag(scr_dtc, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(scr_dtc);
+    lv_label_set_text(title, "FEHLERCODES");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+
+    // Obere Haelfte: scrollbare Liste der ausgelesenen Fehlercodes
+    lv_obj_t *list_box = lv_obj_create(scr_dtc);
+    set_dark_bg(list_box);
+    lv_obj_set_size(list_box, 440, 190);
+    lv_obj_align(list_box, LV_ALIGN_TOP_MID, 0, 55);
+    lv_obj_set_scroll_dir(list_box, LV_DIR_VER);
+
+    dtc_list_label = lv_label_create(list_box);
+    lv_label_set_long_mode(dtc_list_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(dtc_list_label, 410);
+    lv_obj_align(dtc_list_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
+
+    // Auslesen / Loeschen nebeneinander
+    lv_obj_t *btn_read = lv_btn_create(scr_dtc);
+    lv_obj_set_size(btn_read, 200, 60);
+    lv_obj_align(btn_read, LV_ALIGN_TOP_MID, -105, 270);
+    lv_obj_add_event_cb(btn_read, dtc_read_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *read_lbl = lv_label_create(btn_read);
+    lv_label_set_text(read_lbl, "Auslesen");
+    lv_obj_center(read_lbl);
+
+    lv_obj_t *btn_clear = lv_btn_create(scr_dtc);
+    lv_obj_set_size(btn_clear, 200, 60);
+    lv_obj_align(btn_clear, LV_ALIGN_TOP_MID, 105, 270);
+    lv_obj_add_event_cb(btn_clear, dtc_clear_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *clear_lbl = lv_label_create(btn_clear);
+    lv_label_set_text(clear_lbl, "Loeschen");
+    lv_obj_center(clear_lbl);
+
+    // Service-Reset darunter
+    lv_obj_t *btn_service = lv_btn_create(scr_dtc);
+    lv_obj_set_size(btn_service, 300, 60);
+    lv_obj_align(btn_service, LV_ALIGN_TOP_MID, 0, 345);
+    lv_obj_add_event_cb(btn_service, dtc_service_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *service_lbl = lv_label_create(btn_service);
+    lv_label_set_text(service_lbl, "Service Reset");
+    lv_obj_center(service_lbl);
+
+    lv_obj_add_event_cb(scr_dtc, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+
 // Rampe fuer die Start-Testanimation: 0 -> max (ANIM_UP_MS) -> 0 (ANIM_DOWN_MS),
 // erst nach ANIM_DELAY_MS Wartezeit
 static float anim_ramp(float max_val, uint32_t elapsed)
@@ -364,6 +458,13 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_text_font(multi_rpm_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_water_label, &lv_font_montserrat_28, 0);
 
+    // OBD2-Batteriespannung (live per CAN, Mode 01 PID 0x42) - mittig zwischen
+    // Gaspedal- (field_x[1]) und Drehzahlfeld (field_x[2]), tiefer als die Feldreihe
+    multi_obd2_bat_label = lv_label_create(scr_multi);
+    lv_obj_set_style_text_color(multi_obd2_bat_label, lv_color_white(), 0);
+    lv_obj_align(multi_obd2_bat_label, LV_ALIGN_CENTER, (field_x[1] + field_x[2]) / 2, 110);
+    lv_label_set_text(multi_obd2_bat_label, "-");
+
     // Schaltanzeige-Kaestchen (initial leer/transparent, ueber den
     // Hintergrund-Kaesten positioniert)
     for (int i = 0; i < 6; i++) {
@@ -389,6 +490,9 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_add_flag(center_hold, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(center_hold, center_touch_cb, LV_EVENT_ALL, NULL);
 
+    // Wisch nach links -> Fehlercode-Screen
+    lv_obj_add_event_cb(scr_multi, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+
     // "Zurueck"-Button oben auf dem Demo-Screen (ueber dem Tabview, da als
     // letztes Kind von scr_demo erzeugt -> liegt im Z-Order oben)
     lv_obj_t *back_btn = lv_btn_create(scr_demo);
@@ -400,6 +504,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_center(back_lbl);
 
     create_settings_screen();
+    create_dtc_screen();
 
     anim_start_tick = lv_tick_get();
     anim_done = false;
@@ -451,6 +556,30 @@ void BMW_UI_Update(void)
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
     for (int i = 0; i < 8; i++) {
         lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
+    }
+
+    // Live OBD2-Batteriespannung (Mode 01 PID 0x42), solange noch keine
+    // Antwort da war bleibt der Platzhalter stehen
+    float obd2_bat = CAN_OBD2_bat_voltage();
+    if (obd2_bat > 0.0f) {
+        lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
+    }
+
+    // Fehlercode-Liste auf dem DTC-Screen aktualisieren
+    int dtc_count = CAN_OBD2_dtc_count();
+    if (dtc_count < 0) {
+        lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
+    } else if (dtc_count == 0) {
+        lv_label_set_text(dtc_list_label, "Keine Fehler gespeichert");
+    } else {
+        char buf[8 * 7 + 1] = {0};
+        int pos = 0;
+        for (int i = 0; i < dtc_count; i++) {
+            const char *code = CAN_OBD2_dtc_code(i);
+            if (!code) break;
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%s", i > 0 ? "\n" : "", code);
+        }
+        lv_label_set_text(dtc_list_label, buf);
     }
 
     // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)
