@@ -555,13 +555,17 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_add_event_cb(scr_multi, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     // "Zurueck"-Button oben auf dem Demo-Screen (ueber dem Tabview, da als
-    // letztes Kind von scr_demo erzeugt -> liegt im Z-Order oben)
+    // letztes Kind von scr_demo erzeugt -> liegt im Z-Order oben). Kraeftige
+    // rote Einfaerbung, damit er sich sichtbar von der Tab-Leiste abhebt.
     lv_obj_t *back_btn = lv_btn_create(scr_demo);
     lv_obj_set_size(back_btn, 110, 40);
     lv_obj_align(back_btn, LV_ALIGN_TOP_RIGHT, -10, 5);
+    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xCC2222), 0);
+    lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(back_btn, back_to_multi_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
     lv_label_set_text(back_lbl, "Zurueck");
+    lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
     lv_obj_center(back_lbl);
 
     create_settings_screen();
