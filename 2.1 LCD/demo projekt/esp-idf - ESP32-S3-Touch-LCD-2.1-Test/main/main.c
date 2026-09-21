@@ -14,6 +14,7 @@
 #include "Wireless.h"
 #include "bmw_ui.h"
 #include "can_obd2.h"
+#include "ble_obd.h"
 
 void Driver_Loop(void *parameter)
 {
@@ -55,6 +56,10 @@ void app_main(void)
 
     // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
     CAN_OBD2_Init();
+
+    // OBD2 per Bluetooth-LE-ELM327-Adapter (z.B. Veepeak OBDCheck BLE) -
+    // scannt/verbindet im Hintergrund, Standard-Datenquelle in bmw_ui.c
+    BLE_OBD_Init();
 /********************* BMW Multi-Ansicht (Standard) + Waveshare-Demo *********************/
     // Demo-Seite des Waveshare-Projekts auf einem eigenen Screen aufbauen
     // (erscheint beim 3-Sekunden-Halten in der Bildschirmmitte).

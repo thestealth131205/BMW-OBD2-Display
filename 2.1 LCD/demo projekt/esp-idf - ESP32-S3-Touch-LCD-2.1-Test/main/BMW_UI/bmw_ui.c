@@ -3,6 +3,7 @@
 #include "needle_imgs.h"
 #include "BAT_Driver.h"
 #include "can_obd2.h"
+#include "ble_obd.h"
 #include "PCF85063.h"
 #include <string.h>
 #include <stdio.h>
@@ -33,6 +34,15 @@ static const int COLOR_PALETTE_SIZE = sizeof(COLOR_PALETTE) / sizeof(COLOR_PALET
 // veraenderbar, Standardwerte wie im C6-Projekt.
 static lv_color_t g_color_primary   = LV_COLOR_MAKE(0, 162, 255);  // Blau
 static lv_color_t g_color_secondary = LV_COLOR_MAKE(255, 0, 0);    // Rot
+
+// --- Datenquellen-Auswahl (per gedrückt-halten-Menue umschaltbar):
+// Standardmaessig BLE-OBD2 (z.B. Veepeak OBDCheck BLE), alternativ das
+// verdrahtete MCP2515-CAN-Modul. ---
+typedef enum {
+    DATA_SRC_BLE_OBD,
+    DATA_SRC_MCP2515,
+} data_source_t;
+static data_source_t g_data_source = DATA_SRC_BLE_OBD;
 
 // --- Live-Werte (ohne CAN: Platzhalter; Batterie kommt live vom Sensor) ---
 static float current_speed_kmh       = 0.0f;
@@ -188,6 +198,32 @@ static void back_to_multi_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     lv_scr_load(scr_multi);
+}
+
+// --- Datenquellen-Auswahl (BLE-OBD2 / MCP2515) im gedrueckt-halten-Menue ---
+static lv_obj_t *btn_src_ble;
+static lv_obj_t *btn_src_mcp;
+
+static void update_source_btn_styles(void)
+{
+    lv_obj_set_style_bg_color(btn_src_ble,
+        g_data_source == DATA_SRC_BLE_OBD ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_bg_color(btn_src_mcp,
+        g_data_source == DATA_SRC_MCP2515 ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
+}
+
+static void src_ble_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    g_data_source = DATA_SRC_BLE_OBD;
+    update_source_btn_styles();
+}
+
+static void src_mcp_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    g_data_source = DATA_SRC_MCP2515;
+    update_source_btn_styles();
 }
 
 // --- Einstellungs-Screen (Farben) ---
@@ -349,19 +385,22 @@ static void swipe_gesture_cb(lv_event_t *e)
 static void dtc_read_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    CAN_OBD2_read_dtc();
+    if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_read_dtc();
+    else CAN_OBD2_read_dtc();
 }
 
 static void dtc_clear_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    CAN_OBD2_clear_dtc();
+    if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_clear_dtc();
+    else CAN_OBD2_clear_dtc();
 }
 
 static void dtc_service_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    CAN_OBD2_reset_service_oil();
+    if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_reset_service_oil();
+    else CAN_OBD2_reset_service_oil();
 }
 
 static void create_dtc_screen(void)
@@ -554,12 +593,15 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // Wisch nach links -> Fehlercode-Screen
     lv_obj_add_event_cb(scr_multi, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 
-    // "Zurueck"-Button oben auf dem Demo-Screen (ueber dem Tabview, da als
-    // letztes Kind von scr_demo erzeugt -> liegt im Z-Order oben). Kraeftige
-    // rote Einfaerbung, damit er sich sichtbar von der Tab-Leiste abhebt.
+    // "Zurueck"-Button + Datenquellen-Auswahl (BLE-OBD2/MCP2515) oben auf
+    // dem Demo-Screen (ueber dem Tabview, da als letzte Kinder von scr_demo
+    // erzeugt -> liegen im Z-Order oben). Tiefer gesetzt (y=55) und kleiner
+    // als zuvor, damit sie nicht mit der Tab-Leiste des Waveshare-Demos
+    // ueberlappen. Kraeftige rote Einfaerbung beim Zurueck-Button, damit er
+    // sich sichtbar von der Tab-Leiste abhebt.
     lv_obj_t *back_btn = lv_btn_create(scr_demo);
-    lv_obj_set_size(back_btn, 110, 40);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_RIGHT, -10, 5);
+    lv_obj_set_size(back_btn, 78, 30);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_RIGHT, -10, 55);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xCC2222), 0);
     lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(back_btn, back_to_multi_cb, LV_EVENT_CLICKED, NULL);
@@ -567,6 +609,28 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_label_set_text(back_lbl, "Zurueck");
     lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
     lv_obj_center(back_lbl);
+
+    btn_src_mcp = lv_btn_create(scr_demo);
+    lv_obj_set_size(btn_src_mcp, 70, 30);
+    lv_obj_align(btn_src_mcp, LV_ALIGN_TOP_RIGHT, -94, 55);
+    lv_obj_set_style_bg_opa(btn_src_mcp, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(btn_src_mcp, src_mcp_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *src_mcp_lbl = lv_label_create(btn_src_mcp);
+    lv_label_set_text(src_mcp_lbl, "MCP");
+    lv_obj_set_style_text_color(src_mcp_lbl, lv_color_white(), 0);
+    lv_obj_center(src_mcp_lbl);
+
+    btn_src_ble = lv_btn_create(scr_demo);
+    lv_obj_set_size(btn_src_ble, 70, 30);
+    lv_obj_align(btn_src_ble, LV_ALIGN_TOP_RIGHT, -170, 55);
+    lv_obj_set_style_bg_opa(btn_src_ble, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(btn_src_ble, src_ble_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *src_ble_lbl = lv_label_create(btn_src_ble);
+    lv_label_set_text(src_ble_lbl, "BLE OBD");
+    lv_obj_set_style_text_color(src_ble_lbl, lv_color_white(), 0);
+    lv_obj_center(src_ble_lbl);
+
+    update_source_btn_styles(); // Standard: BLE OBD (gruen) aktiv markieren
 
     create_settings_screen();
     create_dtc_screen();
@@ -602,12 +666,15 @@ void BMW_UI_Update(void)
         // Batteriespannung live vom Sensor
         current_bat_voltage = BAT_analogVolts;
 
-        // Motordaten live vom MCP2515-CAN (falls online), sonst Platzhalter
-        if (CAN_OBD2_online()) {
-            current_speed_kmh    = CAN_OBD2_speed_kmh();
-            current_rpm          = CAN_OBD2_rpm();
-            current_water_temp   = CAN_OBD2_water_temp();
-            current_throttle_pct = CAN_OBD2_throttle_pct();
+        // Motordaten live von der eingestellten Datenquelle (BLE-OBD2 oder
+        // MCP2515-CAN), falls online - sonst bleiben die Platzhalter stehen
+        bool use_ble = (g_data_source == DATA_SRC_BLE_OBD);
+        bool source_online = use_ble ? BLE_OBD_online() : CAN_OBD2_online();
+        if (source_online) {
+            current_speed_kmh    = use_ble ? BLE_OBD_speed_kmh()    : CAN_OBD2_speed_kmh();
+            current_rpm          = use_ble ? BLE_OBD_rpm()          : CAN_OBD2_rpm();
+            current_water_temp   = use_ble ? BLE_OBD_water_temp()   : CAN_OBD2_water_temp();
+            current_throttle_pct = use_ble ? BLE_OBD_throttle_pct() : CAN_OBD2_throttle_pct();
         }
     }
 
@@ -623,9 +690,10 @@ void BMW_UI_Update(void)
         lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
     }
 
-    // Live OBD2-Batteriespannung (Mode 01 PID 0x42), solange noch keine
-    // Antwort da war bleibt der Platzhalter stehen
-    float obd2_bat = CAN_OBD2_bat_voltage();
+    // Live OBD2-Batteriespannung, solange noch keine Antwort da war bleibt
+    // der Platzhalter stehen
+    bool use_ble_src = (g_data_source == DATA_SRC_BLE_OBD);
+    float obd2_bat = use_ble_src ? BLE_OBD_bat_voltage() : CAN_OBD2_bat_voltage();
     if (obd2_bat > 0.0f) {
         lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
     }
@@ -633,15 +701,16 @@ void BMW_UI_Update(void)
     // Datenlogging auf SD-Karte (CSV-Zeile alle LOG_INTERVAL_MS)
     if (log_file && lv_tick_elaps(log_last_tick) >= LOG_INTERVAL_MS) {
         log_last_tick = lv_tick_get();
+        float gx = use_ble_src ? BLE_OBD_gforce_x() : CAN_OBD2_gforce_x();
+        float gy = use_ble_src ? BLE_OBD_gforce_y() : CAN_OBD2_gforce_y();
         fprintf(log_file, "%lu;%.1f;%.0f;%.1f;%.0f;%.2f;%.2f;%.2f\r\n",
                 (unsigned long)lv_tick_get(), current_speed_kmh, current_rpm,
-                current_water_temp, current_throttle_pct, obd2_bat,
-                CAN_OBD2_gforce_x(), CAN_OBD2_gforce_y());
+                current_water_temp, current_throttle_pct, obd2_bat, gx, gy);
         fflush(log_file);
     }
 
     // Fehlercode-Liste auf dem DTC-Screen aktualisieren
-    int dtc_count = CAN_OBD2_dtc_count();
+    int dtc_count = use_ble_src ? BLE_OBD_dtc_count() : CAN_OBD2_dtc_count();
     if (dtc_count < 0) {
         lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
     } else if (dtc_count == 0) {
@@ -650,7 +719,7 @@ void BMW_UI_Update(void)
         char buf[8 * 7 + 1] = {0};
         int pos = 0;
         for (int i = 0; i < dtc_count; i++) {
-            const char *code = CAN_OBD2_dtc_code(i);
+            const char *code = use_ble_src ? BLE_OBD_dtc_code(i) : CAN_OBD2_dtc_code(i);
             if (!code) break;
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%s", i > 0 ? "\n" : "", code);
         }
