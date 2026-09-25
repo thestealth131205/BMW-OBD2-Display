@@ -9,6 +9,7 @@
 #include "ST7701S.h"
 #include "CST820.h"
 #include "SD_MMC.h"
+#include "sd_log.h"
 #include "LVGL_Driver.h"
 #include "LVGL_Example.h"
 #include "Wireless.h"
@@ -52,6 +53,7 @@ void app_main(void)
     LCD_Init();
     Touch_Init();
     SD_Init();
+    SD_Log_Init();
     LVGL_Init();
 
     // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
