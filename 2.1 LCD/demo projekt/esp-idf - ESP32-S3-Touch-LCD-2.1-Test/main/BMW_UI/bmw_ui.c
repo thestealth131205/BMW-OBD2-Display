@@ -7,6 +7,7 @@
 #include "PCF85063.h"
 #include <string.h>
 #include <stdio.h>
+#include "esp_timer.h"
 
 // --- Farbpalette fuer die Einstellungen (Primaer-/Sekundaerfarbe, wie im
 // C6-Projekt inkl. Neongelb) ---
@@ -93,6 +94,9 @@ static lv_obj_t *multi_water_outline[8];
 // Live OBD2-Batteriespannung (Mode 01 PID 0x42), mittig zwischen Gaspedal-
 // und Drehzahlfeld, tiefer als die Feldreihe positioniert.
 static lv_obj_t *multi_obd2_bat_label;
+static lv_obj_t *multi_rx_dot;
+static lv_obj_t *multi_tx_dot;
+#define ACT_DOT_FLASH_MS 120
 
 // --- Fehlercode-Screen (per Wisch-Geste erreichbar) ---
 static lv_obj_t *dtc_list_label;
@@ -526,6 +530,20 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_text_color(unit_label, lv_color_white(), 0);
     lv_obj_align(unit_label, LV_ALIGN_CENTER, 0, -15);
 
+    // RX (gruen) / TX (rot) Aktivitaetspunkte unter KM/H, nur bei BLE-OBD
+    multi_rx_dot = lv_obj_create(scr_multi);
+    multi_tx_dot = lv_obj_create(scr_multi);
+    lv_obj_t *dots[2] = {multi_rx_dot, multi_tx_dot};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_set_size(dots[i], 12, 12);
+        lv_obj_set_style_radius(dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(dots[i], 0, 0);
+        lv_obj_set_style_bg_opa(dots[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(dots[i], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(dots[i], LV_ALIGN_CENTER, i == 0 ? -14 : 14, 12);
+        lv_obj_add_flag(dots[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
     // 4 Zusatzfelder (Batterie/Gaspedal/Drehzahl/Wasser)
     const int field_x[4] = {-165, -55, 55, 165};
     multi_bat_label      = lv_label_create(scr_multi);
@@ -698,6 +716,23 @@ void BMW_UI_Update(void)
         lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
     } else if (use_ble_src) {
         lv_label_set_text_fmt(multi_obd2_bat_label, "BLE: %s", BLE_OBD_status());
+    }
+
+    // RX/TX-Punkte: erscheinen nach dem ersten empfangenen Datum, leuchten
+    // kurz bei jedem Senden (rot) bzw. Empfangen (gruen)
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t rx_ms = BLE_OBD_last_rx_ms();
+    uint32_t tx_ms = BLE_OBD_last_tx_ms();
+    bool show_dots = use_ble_src && rx_ms != 0;
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *dot = i == 0 ? multi_rx_dot : multi_tx_dot;
+        if (!show_dots) { lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN); continue; }
+        uint32_t t = i == 0 ? rx_ms : tx_ms;
+        bool lit = t != 0 && (now_ms - t) < ACT_DOT_FLASH_MS;
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(dot, lit
+            ? lv_palette_main(i == 0 ? LV_PALETTE_GREEN : LV_PALETTE_RED)
+            : lv_palette_darken(i == 0 ? LV_PALETTE_GREEN : LV_PALETTE_RED, 4), 0);
     }
 
     // Datenlogging auf SD-Karte (CSV-Zeile alle LOG_INTERVAL_MS)

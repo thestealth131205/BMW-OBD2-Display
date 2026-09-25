@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
@@ -60,6 +61,8 @@ static esp_bd_addr_t s_remote_bda = {0};
 static volatile bool s_connecting = false;
 static volatile bool s_connected = false;
 static volatile bool s_notify_ready = false;
+static volatile uint32_t s_last_tx_ms = 0;
+static volatile uint32_t s_last_rx_ms = 0;
 static esp_gatt_write_type_t s_tx_write_type = ESP_GATT_WRITE_TYPE_NO_RSP;
 static const char *volatile s_status = "Init";
 static char s_status_buf[24];
@@ -285,6 +288,19 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
                          ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP;
                 }
             }
+            // Bevorzugt eine Charakteristik mit Notify UND Write (viele Adapter,
+            // z. B. Veepeak, nutzen eine einzige fuer beide Richtungen; eine
+            // reine Read/Write-Charakteristik daneben ist meist Konfiguration).
+            for (int c = 0; c < got; c++) {
+                uint8_t p = chars[c].properties;
+                if ((p & ESP_GATT_CHAR_PROP_BIT_NOTIFY) &&
+                    (p & (ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR))) {
+                    rx = tx = chars[c].char_handle;
+                    wt = (p & ESP_GATT_CHAR_PROP_BIT_WRITE_NR) ?
+                         ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP;
+                    break;
+                }
+            }
             if (rx && tx) {
                 s_rx_handle = rx;
                 s_tx_handle = tx;
@@ -345,6 +361,7 @@ static void ble_obd_enable_notify_cccd(esp_gatt_if_t gattc_if)
 
 static void ble_obd_handle_notify(esp_ble_gattc_cb_param_t *param)
 {
+    s_last_rx_ms = (uint32_t)(esp_timer_get_time() / 1000);
     int add = param->notify.value_len;
     if (s_notify_acc_len + add < (int)sizeof(s_notify_acc) - 1) {
         memcpy(s_notify_acc + s_notify_acc_len, param->notify.value, add);
@@ -460,6 +477,7 @@ static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, T
                                               (uint16_t)len, (uint8_t *)buf,
                                               s_tx_write_type, ESP_GATT_AUTH_REQ_NONE);
     if (err != ESP_OK) return false;
+    s_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
     if (xSemaphoreTake(s_resp_ready, timeout) != pdTRUE) return false;
     if (resp_out) {
@@ -648,6 +666,8 @@ void BLE_OBD_Init(void)
 }
 
 bool BLE_OBD_online(void) { return s_online; }
+uint32_t BLE_OBD_last_tx_ms(void) { return s_last_tx_ms; }
+uint32_t BLE_OBD_last_rx_ms(void) { return s_last_rx_ms; }
 const char *BLE_OBD_status(void) { return s_online ? "Online" : s_status; }
 float BLE_OBD_speed_kmh(void) { return s_speed_kmh; }
 float BLE_OBD_rpm(void) { return s_rpm; }

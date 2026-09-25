@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,10 @@ void BLE_OBD_Init(void);
 bool BLE_OBD_online(void);
 // Kurzer Verbindungsstatus-Text fuer die Anzeige (Suche/Verbinde/ELM Init/...).
 const char *BLE_OBD_status(void);
+// Zeitpunkt (ms seit Boot) des letzten gesendeten Kommandos bzw. der letzten
+// empfangenen Notification, 0 = noch nie. Fuer die TX/RX-Aktivitaetspunkte.
+uint32_t BLE_OBD_last_tx_ms(void);
+uint32_t BLE_OBD_last_rx_ms(void);
 
 // --- Live-Werte (Standard-OBD2-PIDs, Mode 01) ---
 float BLE_OBD_speed_kmh(void);
