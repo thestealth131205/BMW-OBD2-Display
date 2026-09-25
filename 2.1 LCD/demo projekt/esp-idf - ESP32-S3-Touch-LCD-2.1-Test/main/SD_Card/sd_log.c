@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -28,6 +29,7 @@ void SD_Log_Init(void)
     fprintf(s_file, "\r\n=== Start %04d-%02d-%02d %02d:%02d:%02d ===\r\n",
             now.year, now.month, now.day, now.hour, now.minute, now.second);
     fflush(s_file);
+    fsync(fileno(s_file));
 }
 
 void SD_Log(const char *fmt, ...)
@@ -42,5 +44,6 @@ void SD_Log(const char *fmt, ...)
     va_end(ap);
     fputs("\r\n", s_file);
     fflush(s_file);
+    fsync(fileno(s_file));
     xSemaphoreGive(s_mutex);
 }
