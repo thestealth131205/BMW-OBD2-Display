@@ -539,7 +539,7 @@ static void ble_obd_setup_security(void)
     // stellt (ESP_GAP_BLE_SEC_REQ_EVT/PASSKEY_REQ_EVT).
     esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
-    uint8_t auth_req = ESP_LE_AUTH_REQ_BOND_MITM;
+    uint8_t auth_req = ESP_LE_AUTH_NO_BOND;
     esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
     uint8_t key_size = 16;
     esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
