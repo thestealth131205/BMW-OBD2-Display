@@ -48,12 +48,26 @@ jobs:
           name: firmware-esp32-s3
           path: s3-artifacts/
 
+      - name: Move release tag to current commit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'
+        run: |
+          git tag -f s3-latest "$GITHUB_SHA"
+          git push -f origin refs/tags/s3-latest
+
+      - name: Write release notes from last commit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          printf '%s\n\nCommit: %s\n' "$COMMIT_MSG" "$GITHUB_SHA" > release-notes.md
+
       - name: Create/Update Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: s3-latest
           name: Latest S3 Build
+          body_path: release-notes.md
           make_latest: false
           files: |
             s3-artifacts/firmware-s3.bin

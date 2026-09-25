@@ -17,7 +17,7 @@ CBS-Service-Reset.
 | Display | ST7701S RGB-TFT, 480×480, über SPI-Init + paralleles RGB-Interface |
 | Touch | CST820 (kapazitiv), I2C |
 | IO-Expander | TCA9554 (Adresse 0x20) – steuert u. a. Touch-Reset/weitere Enable-Leitungen |
-| CAN-Bus | externes **MCP2515-Modul** (SPI, TJA1050-Transceiver) |
+| CAN-Bus | externes **MCP2515-Modul** (SPI, TJA1050-Transceiver) oder alternativ **BLE-OBD-Adapter** (Veepeak OBDCheck BLE) |
 | Batteriemessung | interner ADC (Spannungsteiler auf dem Board) |
 
 Framework: **ESP-IDF** (nicht Arduino/PlatformIO), LVGL v8.2 via ESP Component
@@ -132,7 +132,7 @@ idf.py -p PORT flash monitor
   GitHub-Release **`s3-latest`**. Merge-Offsets: Bootloader `0x0`,
   Partitionstabelle `0x8000`, App `0x10000`.
 
-## OBD2 / CAN-Auswertung
+## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
 Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber + Decode-Task,
 kein ESP-IDF-`twai`). CAN-IDs sind **Platzhalter**, am Fahrzeug per
@@ -153,6 +153,46 @@ Fahrzeug-Batteriespannung im Multi-View wird per Mode-01-PID-0x42-Anfrage
 (1×/s) live über OBD2 ausgelesen. DTC-Antworten (`0x7E8`, Mode 03) werden zu
 Klartext-Codes decodiert (nur Single-Frame-ISO-TP, kein Multi-Frame-
 Reassembly).
+
+## Datenquelle: BLE-OBD oder MCP2515
+
+Das Display kann seine Live-Daten aus zwei Quellen beziehen. Die Auswahl
+erfolgt im Demo-Menü (**3 Sekunden Touch in der Bildschirmmitte**) über die
+Buttons **„BLE OBD“** und **„MCP“** (aktive Quelle grün). **Standard ist
+BLE OBD.** Die Wahl gilt für alle Live-Werte, DTC-Lesen/-Löschen,
+Service-Reset und das CSV-Logging.
+
+| Quelle | Hardware | Modul |
+|---|---|---|
+| **BLE OBD** (Standard) | ELM327-Adapter mit Bluetooth LE, z. B. **Veepeak OBDCheck BLE** | `main/BLE_OBD/` |
+| **MCP** | MCP2515-Modul direkt am PT-CAN (siehe Verdrahtung oben) | `main/CAN_Driver/` |
+
+### BLE-OBD-Adapter (Veepeak OBDCheck BLE)
+
+- Der ESP32-S3 hat nur **Bluetooth 5 LE**, kein klassisches Bluetooth
+  (BR/EDR/SPP). Adapter, die nur klassisches Bluetooth sprechen (z. B.
+  Veepeak **VP11**), können deshalb **nicht** verbunden werden – es muss ein
+  BLE-Adapter sein.
+- Beim Start initialisiert das Display Bluetooth und scannt fortlaufend nach
+  Geräten, deren Name `OBD`, `VEEPEAK`, `VLINK` oder `ELM327` enthält
+  (Groß-/Kleinschreibung egal). Der Veepeak-Adapter meldet sich als
+  **VEEPEAK**. Bei Fund wird automatisch verbunden.
+- Die GATT-Charakteristiken (Notify = RX, Write = TX) werden generisch
+  erkannt, da ELM327-Klone unterschiedliche UUIDs verwenden.
+- **Kopplung:** Bei BLE ist normalerweise keine Kopplung nötig (Sicherheit:
+  `ESP_LE_AUTH_NO_BOND`). Verlangt ein Adapter dennoch eine PIN, probiert das
+  Display nacheinander **1234 → 5678 → 0000**.
+- Nach dem Verbinden: `ATZ`, `ATE0`, `ATH0`, `ATSP6` (ISO 15765-4 CAN,
+  500 kbit/s), danach zyklisches Polling per Standard-OBD2:
+  Drehzahl, Geschwindigkeit, Kühlmitteltemperatur, Gaspedalstellung,
+  Batteriespannung (`ATRV`) sowie DTC lesen/löschen (Mode 03/04) und
+  Service-Reset.
+- **Einschränkung:** G-Kraft ist über Standard-OBD2 nicht verfügbar und
+  bleibt bei BLE-OBD auf 0,0 – dafür wird die MCP-Quelle benötigt.
+- Der BLE-Scan startet erst ca. 7 s nach dem Boot, um den bestehenden Scan
+  der Waveshare-Demo (`Wireless.c`) nicht zu stören.
+- Ein BLE-Adapter benötigt **keine** Verdrahtung – GPIO19/20/43/44 bleiben bei
+  reiner BLE-Nutzung frei (MCP2515 dann nicht anschließen).
 
 ## UI-Logik (Kurzfassung)
 
