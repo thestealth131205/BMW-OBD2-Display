@@ -22,6 +22,8 @@ void BLE_OBD_Init(void);
 
 // true, sobald mindestens eine gueltige PID-Antwort ausgewertet wurde.
 bool BLE_OBD_online(void);
+// Kurzer Verbindungsstatus-Text fuer die Anzeige (Suche/Verbinde/ELM Init/...).
+const char *BLE_OBD_status(void);
 
 // --- Live-Werte (Standard-OBD2-PIDs, Mode 01) ---
 float BLE_OBD_speed_kmh(void);

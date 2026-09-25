@@ -55,6 +55,8 @@ static esp_bd_addr_t s_remote_bda = {0};
 static volatile bool s_connecting = false;
 static volatile bool s_connected = false;
 static volatile bool s_notify_ready = false;
+static esp_gatt_write_type_t s_tx_write_type = ESP_GATT_WRITE_TYPE_NO_RSP;
+static const char *volatile s_status = "Init";
 
 static ble_obd_service_t s_services[MAX_BLE_OBD_SERVICES];
 static int s_service_count = 0;
@@ -181,6 +183,7 @@ static int hex_tokenize(const char *resp, uint8_t *out, int max_out)
 static void ble_obd_start_scan(void)
 {
     s_connecting = false;
+    s_status = "Suche";
     esp_ble_gap_start_scanning(0); // 0 = dauerhaft scannen, bis esp_ble_gap_stop_scanning()
 }
 
@@ -194,10 +197,11 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
         if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT && !s_connecting && !s_connected) {
             char name[32];
-            if (extract_adv_name(param->scan_rst.ble_adv, param->scan_rst.adv_data_len, name, sizeof(name)) &&
+            if (extract_adv_name(param->scan_rst.ble_adv, param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len, name, sizeof(name)) &&
                 name_matches_obd_adapter(name)) {
                 ESP_LOGI(TAG, "OBD2-BLE-Adapter gefunden: %s - verbinde...", name);
                 s_connecting = true;
+                s_status = "Verbinde";
                 esp_ble_gap_stop_scanning();
                 esp_ble_gattc_open(s_gattc_if, (uint8_t *)param->scan_rst.bda,
                                     param->scan_rst.ble_addr_type, true);
@@ -256,17 +260,22 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
                                     chars, &got, 0);
         if (st == ESP_GATT_OK) {
             uint16_t rx = 0, tx = 0;
+            esp_gatt_write_type_t wt = ESP_GATT_WRITE_TYPE_NO_RSP;
             for (int c = 0; c < got; c++) {
                 if (!rx && (chars[c].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY)) {
                     rx = chars[c].char_handle;
                 }
                 if (!tx && (chars[c].properties & (ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR))) {
                     tx = chars[c].char_handle;
+                    wt = (chars[c].properties & ESP_GATT_CHAR_PROP_BIT_WRITE_NR) ?
+                         ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP;
                 }
             }
             if (rx && tx) {
                 s_rx_handle = rx;
                 s_tx_handle = tx;
+                s_tx_write_type = wt;
+                s_status = "Service ok";
                 s_found_service_start = s_services[i].start_handle;
                 s_found_service_end = s_services[i].end_handle;
                 free(chars);
@@ -278,6 +287,8 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
         free(chars);
     }
     ESP_LOGW(TAG, "Kein Service mit Notify+Write-Charakteristik gefunden - Geraet nicht ELM327-kompatibel?");
+    s_status = "Kein Service";
+    esp_ble_gattc_close(gattc_if, conn_id); // -> DISCONNECT_EVT -> erneuter Scan
 }
 
 static void ble_obd_enable_notify_cccd(esp_gatt_if_t gattc_if)
@@ -349,10 +360,19 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         esp_ble_gap_set_scan_params(&s_scan_params);
         break;
 
+    case ESP_GATTC_OPEN_EVT:
+        if (param->open.status != ESP_GATT_OK) {
+            ESP_LOGW(TAG, "Verbindungsaufbau fehlgeschlagen (Status %d)", (int)param->open.status);
+            s_status = "Open Fehler";
+            ble_obd_start_scan();
+        }
+        break;
+
     case ESP_GATTC_CONNECT_EVT:
         s_conn_id = param->connect.conn_id;
         memcpy(s_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         s_service_count = 0;
+        s_status = "Suche Service";
         esp_ble_gattc_search_service(gattc_if, param->connect.conn_id, NULL);
         break;
 
@@ -361,6 +381,7 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         s_connected = false;
         s_notify_ready = false;
         s_online = false;
+        s_status = "Getrennt";
         s_service_count = 0;
         s_rx_handle = 0;
         s_tx_handle = 0;
@@ -412,7 +433,7 @@ static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, T
     xSemaphoreTake(s_resp_ready, 0); // evtl. stehen gebliebene alte Antwort verwerfen
     esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_tx_handle,
                                               (uint16_t)len, (uint8_t *)buf,
-                                              ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                              s_tx_write_type, ESP_GATT_AUTH_REQ_NONE);
     if (err != ESP_OK) return false;
 
     if (xSemaphoreTake(s_resp_ready, timeout) != pdTRUE) return false;
@@ -428,13 +449,16 @@ static void ble_obd_task(void *arg)
     (void)arg;
     xSemaphoreTake(s_session_ready, portMAX_DELAY);
 
-    char resp[256];
+    char resp[256] = "";
     // ELM327-Initsequenz: Reset, Echo aus, Header aus, Protokoll = ISO
     // 15765-4 CAN (11 Bit, 500 kBit/s) - passend zum BMW-E90-PT-CAN.
-    send_at_cmd("ATZ", resp, sizeof(resp), pdMS_TO_TICKS(3000));
+    s_status = "ELM Init";
+    bool elm_ok = send_at_cmd("ATZ", resp, sizeof(resp), pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "ATZ -> %s: %s", elm_ok ? "ok" : "KEINE ANTWORT", resp);
     send_at_cmd("ATE0", resp, sizeof(resp), pdMS_TO_TICKS(1000));
     send_at_cmd("ATH0", resp, sizeof(resp), pdMS_TO_TICKS(1000));
     send_at_cmd("ATSP6", resp, sizeof(resp), pdMS_TO_TICKS(1000));
+    s_status = elm_ok ? "Warte Daten" : "ELM stumm";
 
     int poll_step = 0;
     uint32_t last_bat_poll = 0;
@@ -477,6 +501,7 @@ static void ble_obd_task(void *arg)
 
         uint8_t bytes[16];
         int n;
+        if (!s_online && poll_step == 0) ESP_LOGI(TAG, "Poll, noch offline. Letzte Antwort: %s", resp);
         switch (poll_step) {
         case 0:
             if (send_at_cmd("010C", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
@@ -581,6 +606,7 @@ void BLE_OBD_Init(void)
 }
 
 bool BLE_OBD_online(void) { return s_online; }
+const char *BLE_OBD_status(void) { return s_online ? "Online" : s_status; }
 float BLE_OBD_speed_kmh(void) { return s_speed_kmh; }
 float BLE_OBD_rpm(void) { return s_rpm; }
 float BLE_OBD_water_temp(void) { return s_water_temp; }

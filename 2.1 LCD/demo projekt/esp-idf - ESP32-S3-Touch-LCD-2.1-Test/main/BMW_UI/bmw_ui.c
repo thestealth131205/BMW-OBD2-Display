@@ -696,6 +696,8 @@ void BMW_UI_Update(void)
     float obd2_bat = use_ble_src ? BLE_OBD_bat_voltage() : CAN_OBD2_bat_voltage();
     if (obd2_bat > 0.0f) {
         lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
+    } else if (use_ble_src) {
+        lv_label_set_text_fmt(multi_obd2_bat_label, "BLE: %s", BLE_OBD_status());
     }
 
     // Datenlogging auf SD-Karte (CSV-Zeile alle LOG_INTERVAL_MS)
