@@ -272,17 +272,24 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
         if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT && !s_connecting && !s_connected) {
             char name[32];
-            static uint8_t seen[8][6];
+            static uint8_t seen[48][6];
+            static bool seen_named[48];
             static int seen_n = 0;
             bool has_name = extract_adv_name(param->scan_rst.ble_adv, param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len, name, sizeof(name));
-            bool known = false;
-            for (int i = 0; i < seen_n; i++) if (!memcmp(seen[i], param->scan_rst.bda, 6)) known = true;
-            if (!known && seen_n < 8) {
-                memcpy(seen[seen_n++], param->scan_rst.bda, 6);
+            int idx = -1;
+            for (int i = 0; i < seen_n; i++) if (!memcmp(seen[i], param->scan_rst.bda, 6)) idx = i;
+            if (idx < 0 && seen_n < 48) {
+                idx = seen_n++;
+                memcpy(seen[idx], param->scan_rst.bda, 6);
+                seen_named[idx] = false;
+            }
+            // Nur Geraete mit Namen loggen, einmal je Geraet (Name kommt oft erst per Scan-Response)
+            if (idx >= 0 && has_name && !seen_named[idx]) {
+                seen_named[idx] = true;
                 OBD_LOGI("Scan: %02X:%02X:%02X:%02X:%02X:%02X name='%s' rssi=%d addr_type=%d adv=%d scanrsp=%d",
                          param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
                          param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5],
-                         has_name ? name : "-", param->scan_rst.rssi, (int)param->scan_rst.ble_addr_type,
+                         name, param->scan_rst.rssi, (int)param->scan_rst.ble_addr_type,
                          param->scan_rst.adv_data_len, param->scan_rst.scan_rsp_len);
             }
             if (has_name && name_matches_obd_adapter(name)) {
