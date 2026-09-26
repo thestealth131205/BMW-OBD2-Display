@@ -235,7 +235,7 @@ static void fmt_props(uint8_t p, char *out, size_t n)
              (p & ESP_GATT_CHAR_PROP_BIT_WRITE) ? "WRITE " : "",
              (p & ESP_GATT_CHAR_PROP_BIT_NOTIFY) ? "NOTIFY " : "",
              (p & ESP_GATT_CHAR_PROP_BIT_INDICATE) ? "INDICATE " : "",
-             (p & ESP_GATT_CHAR_PROP_BIT_WRITE_SIGNED) ? "SIGNED " : "");
+             (p & ESP_GATT_CHAR_PROP_BIT_AUTH) ? "SIGNED " : "");
 }
 
 static void tx_seq_add(uint16_t h, esp_gatt_write_type_t t)
