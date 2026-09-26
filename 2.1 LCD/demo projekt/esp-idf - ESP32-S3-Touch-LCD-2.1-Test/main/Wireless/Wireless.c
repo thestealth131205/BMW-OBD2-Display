@@ -6,6 +6,7 @@ bool Scan_finish = 0;
 
 bool WiFi_Scan_Finish = 0;
 bool BLE_Scan_Finish = 0;
+volatile bool BLE_Stack_Ready = 0;
 void Wireless_Init(void)
 {
     // Initialize NVS.
@@ -120,9 +121,13 @@ static bool extract_device_name(const uint8_t *adv_data, uint8_t adv_data_len, c
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     static char device_name[100];
 
+    // Alle GAP-Events zusaetzlich an den BLE-OBD-Client weiterreichen
+    // (Bluedroid kennt nur einen globalen GAP-Callback).
+    BLE_OBD_gap_event(event, param);
+
     switch (event) {
         case ESP_GAP_BLE_SCAN_RESULT_EVT:
-            if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
+            if (!BLE_Scan_Finish && param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
                 if (!is_device_discovered(param->scan_rst.bda)) {
                     add_device_to_list(param->scan_rst.bda);
                     BLE_NUM++; 
@@ -147,7 +152,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             }
             break;
         case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-            ESP_LOGI(GATTC_TAG, "Scan complete. Total devices found: %d (with names: %d)", BLE_NUM, num_devices_with_name);
+            ESP_LOGI(GATTC_TAG, "Scan stopped. Total devices found: %d (with names: %d)", BLE_NUM, num_devices_with_name);
             break;
         default:
             break;
@@ -181,31 +186,19 @@ void BLE_Init(void *arg)
         printf("%s gap register error, error code = %x\n", __func__, ret);                      
         return;
     }
+    // Stack ist bereit: der BLE-OBD-Client kann sofort mit Suche/Verbindung
+    // starten (parallel zur Start-Animation). Den Geraetezaehler der
+    // Demo-Seite fuettert dessen Dauerscan waehrend der ersten Sekunden.
+    BLE_Stack_Ready = 1;
     BLE_Scan();
     vTaskDelete(NULL);
 
 }
 uint16_t BLE_Scan(void)
 {
-    esp_ble_scan_params_t scan_params = {
-        .scan_type = BLE_SCAN_TYPE_ACTIVE,
-        .own_addr_type = BLE_ADDR_TYPE_RPA_PUBLIC,
-        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,   
-        .scan_window = 0x30,       
-        .scan_duplicate         = BLE_SCAN_DUPLICATE_DISABLE
-    };
-    ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
-
-    printf("Starting BLE scan...\n");
-    ESP_ERROR_CHECK(esp_ble_gap_start_scanning(SCAN_DURATION));
-    
-    // Set scanning duration
+    // Kein eigener Scan mehr: der BLE-OBD-Client scannt dauerhaft. Wir zaehlen
+    // nur SCAN_DURATION Sekunden lang die dabei gefundenen Geraete mit.
     vTaskDelay(SCAN_DURATION * 1000 / portTICK_PERIOD_MS);
-    
-    printf("Stopping BLE scan...\n");
-    // ESP_ERROR_CHECK(esp_ble_gap_stop_scanning());
-    ESP_ERROR_CHECK(esp_ble_dtm_stop());
     BLE_Scan_Finish = 1;
     if(WiFi_Scan_Finish == 1)
         Scan_finish = 1;

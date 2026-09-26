@@ -3,9 +3,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "esp_gap_ble_api.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// GAP-Events von Wireless.c (dem einzigen registrierten GAP-Callback) hier einspeisen.
+void BLE_OBD_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 
 // Initialisiert einen BLE-GATT-Client fuer einen ELM327-kompatiblen
 // Bluetooth-Low-Energy-OBD2-Adapter (Ziel: Veepeak OBDCheck BLE). Scannt
@@ -15,9 +20,10 @@ extern "C" {
 // Geraet eine PIN verlangt) und pollt danach zyklisch Standard-OBD2-PIDs.
 //
 // Muss NACH Wireless_Init() aufgerufen werden, da derselbe Bluedroid-Stack
-// (BT-Controller + GAP) mitgenutzt wird. Wartet intern, bis der einmalige
-// WiFi/BLE-Demo-Scan aus Wireless.c abgeschlossen ist, bevor der GAP-
-// Callback uebernommen wird (Bluedroid erlaubt nur einen globalen
+// (BT-Controller + GAP) mitgenutzt wird. Wartet intern nur, bis der
+// Bluedroid-Stack aus Wireless.c bereit ist (BLE_Stack_Ready), sodass die
+// Suche parallel zur Start-Animation laeuft. GAP-Events kommen ueber
+// BLE_OBD_gap_event() aus Wireless.c (Bluedroid erlaubt nur einen globalen
 // GAP-Callback).
 void BLE_OBD_Init(void);
 

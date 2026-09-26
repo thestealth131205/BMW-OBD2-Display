@@ -12,12 +12,14 @@
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
 #include "esp_bt_main.h"
+#include "ble_obd.h"
 
 
 
 extern uint16_t BLE_NUM;
 extern uint16_t WIFI_NUM;
 extern bool Scan_finish;
+extern volatile bool BLE_Stack_Ready;
 
 void Wireless_Init(void);
 void WIFI_Init(void *arg);

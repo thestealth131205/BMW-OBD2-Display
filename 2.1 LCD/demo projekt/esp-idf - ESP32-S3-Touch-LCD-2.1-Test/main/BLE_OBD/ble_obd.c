@@ -18,6 +18,7 @@
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
 #include "sd_log.h"
+#include "Wireless.h"
 #include "service_funcs.h"
 
 static const char *TAG = "BLE_OBD";
@@ -258,8 +259,11 @@ static void ble_obd_start_scan(void)
     esp_ble_gap_start_scanning(0); // 0 = dauerhaft scannen, bis esp_ble_gap_stop_scanning()
 }
 
+static volatile bool s_started = false;
+
 static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
+    if (!s_started) return;
     switch (event) {
     case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
         ble_obd_start_scan();
@@ -773,27 +777,28 @@ static void ble_obd_setup_security(void)
 static void ble_obd_start_task(void *arg)
 {
     (void)arg;
-    // Wireless.c fuehrt beim Boot einen einmaligen ~5s-BLE-Scan fuer die
-    // Demo-Seite (WIFI/BLE-Geraetezaehler) durch und registriert dafuer
-    // seinen eigenen GAP-Callback. Bluedroid erlaubt nur einen globalen
-    // GAP-Callback gleichzeitig - wir warten daher, bis dieser Scan sicher
-    // abgeschlossen ist, bevor wir unseren Callback registrieren (der
-    // WIFI/BLE-Zaehler auf der Demo-Seite ist zu diesem Zeitpunkt laengst
-    // final und wird dadurch nicht beeinflusst).
-    vTaskDelay(pdMS_TO_TICKS(7000));
+    // Nur auf den Bluedroid-Stack aus Wireless.c warten (nicht mehr feste
+    // 7 s), damit Suche/Verbindung parallel zur Start-Animation laufen.
+    // GAP-Events kommen ueber BLE_OBD_gap_event() aus Wireless.c.
+    while (!BLE_Stack_Ready) vTaskDelay(pdMS_TO_TICKS(50));
 
     s_resp_ready = xSemaphoreCreateBinary();
     s_session_ready = xSemaphoreCreateBinary();
     s_request_queue = xQueueCreate(4, sizeof(ble_obd_request_t));
 
     ble_obd_setup_security();
-    esp_ble_gap_register_callback(ble_obd_gap_cb);
+    s_started = true;
     esp_ble_gattc_register_callback(ble_obd_gattc_cb);
     esp_ble_gattc_app_register(BLE_OBD_APP_ID);
 
     xTaskCreatePinnedToCore(ble_obd_task, "ble_obd", 4096, NULL, 4, NULL, 0);
 
     vTaskDelete(NULL);
+}
+
+void BLE_OBD_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    ble_obd_gap_cb(event, param);
 }
 
 void BLE_OBD_Init(void)
