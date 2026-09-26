@@ -52,7 +52,17 @@ typedef enum {
 typedef struct {
     uint16_t start_handle;
     uint16_t end_handle;
+    uint16_t uuid16;      // 0, falls 128-Bit-UUID
 } ble_obd_service_t;
+
+// Reihenfolge, in der bei "ELM stumm" Schreib-Charakteristik/-Modus probiert wird
+#define MAX_TX_SEQ 8
+typedef struct {
+    uint16_t handle;
+    esp_gatt_write_type_t type;
+} ble_obd_tx_try_t;
+static ble_obd_tx_try_t s_tx_seq[MAX_TX_SEQ];
+static int s_tx_seq_n = 0;
 
 // --- Bluedroid-Zustand ---
 static esp_gatt_if_t s_gattc_if = ESP_GATT_IF_NONE;
@@ -196,6 +206,49 @@ static int hex_tokenize(const char *resp, uint8_t *out, int max_out)
     return n;
 }
 
+// Rohdaten als "41 0C 1A" plus druckbare ASCII-Ansicht ('.' fuer Steuerzeichen)
+static void fmt_bytes(const uint8_t *d, int len, char *out, size_t out_size)
+{
+    size_t o = 0;
+    int max = len > 40 ? 40 : len;
+    for (int i = 0; i < max && o + 4 < out_size; i++) o += snprintf(out + o, out_size - o, "%02X ", d[i]);
+    if (o + 4 < out_size) { out[o++] = '|'; }
+    for (int i = 0; i < max && o + 2 < out_size; i++) out[o++] = (d[i] >= 32 && d[i] < 127) ? (char)d[i] : '.';
+    if (len > max && o + 4 < out_size) { out[o++] = '.'; out[o++] = '.'; out[o++] = '.'; }
+    out[o] = '\0';
+}
+
+static void fmt_uuid(const esp_bt_uuid_t *u, char *out, size_t n)
+{
+    if (u->len == ESP_UUID_LEN_16) snprintf(out, n, "0x%04X", u->uuid.uuid16);
+    else if (u->len == ESP_UUID_LEN_32) snprintf(out, n, "0x%08lX", (unsigned long)u->uuid.uuid32);
+    else snprintf(out, n, "%02X%02X%02X%02X-..-%02X%02X",
+                  u->uuid.uuid128[15], u->uuid.uuid128[14], u->uuid.uuid128[13], u->uuid.uuid128[12],
+                  u->uuid.uuid128[1], u->uuid.uuid128[0]);
+}
+
+static void fmt_props(uint8_t p, char *out, size_t n)
+{
+    snprintf(out, n, "%s%s%s%s%s%s",
+             (p & ESP_GATT_CHAR_PROP_BIT_READ) ? "READ " : "",
+             (p & ESP_GATT_CHAR_PROP_BIT_WRITE_NR) ? "WRITE_NR " : "",
+             (p & ESP_GATT_CHAR_PROP_BIT_WRITE) ? "WRITE " : "",
+             (p & ESP_GATT_CHAR_PROP_BIT_NOTIFY) ? "NOTIFY " : "",
+             (p & ESP_GATT_CHAR_PROP_BIT_INDICATE) ? "INDICATE " : "",
+             (p & ESP_GATT_CHAR_PROP_BIT_WRITE_SIGNED) ? "SIGNED " : "");
+}
+
+static void tx_seq_add(uint16_t h, esp_gatt_write_type_t t)
+{
+    for (int i = 0; i < s_tx_seq_n; i++)
+        if (s_tx_seq[i].handle == h && s_tx_seq[i].type == t) return;
+    if (s_tx_seq_n < MAX_TX_SEQ) {
+        s_tx_seq[s_tx_seq_n].handle = h;
+        s_tx_seq[s_tx_seq_n].type = t;
+        s_tx_seq_n++;
+    }
+}
+
 static void ble_obd_start_scan(void)
 {
     s_connecting = false;
@@ -213,8 +266,20 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
         if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT && !s_connecting && !s_connected) {
             char name[32];
-            if (extract_adv_name(param->scan_rst.ble_adv, param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len, name, sizeof(name)) &&
-                name_matches_obd_adapter(name)) {
+            static uint8_t seen[8][6];
+            static int seen_n = 0;
+            bool has_name = extract_adv_name(param->scan_rst.ble_adv, param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len, name, sizeof(name));
+            bool known = false;
+            for (int i = 0; i < seen_n; i++) if (!memcmp(seen[i], param->scan_rst.bda, 6)) known = true;
+            if (!known && seen_n < 8) {
+                memcpy(seen[seen_n++], param->scan_rst.bda, 6);
+                OBD_LOGI("Scan: %02X:%02X:%02X:%02X:%02X:%02X name='%s' rssi=%d addr_type=%d adv=%d scanrsp=%d",
+                         param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
+                         param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5],
+                         has_name ? name : "-", param->scan_rst.rssi, (int)param->scan_rst.ble_addr_type,
+                         param->scan_rst.adv_data_len, param->scan_rst.scan_rsp_len);
+            }
+            if (has_name && name_matches_obd_adapter(name)) {
                 OBD_LOGI("OBD2-BLE-Adapter gefunden: %s - verbinde...", name);
                 s_connecting = true;
                 set_status("Verbinde");
@@ -226,6 +291,7 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
         break;
 
     case ESP_GAP_BLE_SEC_REQ_EVT:
+        OBD_LOGI("GAP: Security-Request vom Adapter -> akzeptiert");
         esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
         break;
 
@@ -235,10 +301,13 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
         break;
 
     case ESP_GAP_BLE_NC_REQ_EVT:
+        OBD_LOGI("GAP: Numeric-Comparison-Anfrage -> bestaetigt");
         esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
         break;
 
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        OBD_LOGI("GAP: Auth abgeschlossen success=%d reason=0x%X", (int)param->ble_security.auth_cmpl.success,
+                 (unsigned)param->ble_security.auth_cmpl.fail_reason);
         if (!param->ble_security.auth_cmpl.success) {
             OBD_LOGW("BLE-Pairing mit PIN %u fehlgeschlagen", (unsigned)OBD_PASSKEYS[s_passkey_idx]);
             esp_ble_remove_bond_device(param->ble_security.auth_cmpl.bd_addr);
@@ -261,8 +330,11 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
 // variieren (haeufig FFE0/FFE1 oder FFF0/FFF1/FFF2, aber nicht garantiert).
 static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
 {
+    OBD_LOGI("Service-Suche fertig: %d Services", s_service_count);
     for (int i = 0; i < s_service_count; i++) {
         uint16_t count = 0;
+        OBD_LOGI("Service %d: uuid16=0x%04X handles 0x%04X-0x%04X", i, s_services[i].uuid16,
+                 s_services[i].start_handle, s_services[i].end_handle);
         esp_ble_gattc_get_attr_count(gattc_if, conn_id, ESP_GATT_DB_CHARACTERISTIC,
                                       s_services[i].start_handle, s_services[i].end_handle,
                                       0, &count);
@@ -278,7 +350,11 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
             uint16_t rx = 0, tx = 0;
             esp_gatt_write_type_t wt = ESP_GATT_WRITE_TYPE_NO_RSP;
             for (int c = 0; c < got; c++) {
-                OBD_LOGI("Char handle=0x%04X props=0x%02X", chars[c].char_handle, chars[c].properties);
+                char us[24], ps[48];
+                fmt_uuid(&chars[c].uuid, us, sizeof(us));
+                fmt_props(chars[c].properties, ps, sizeof(ps));
+                OBD_LOGI("  Char handle=0x%04X uuid=%s props=0x%02X [%s]", chars[c].char_handle, us,
+                         chars[c].properties, ps);
                 if (!rx && (chars[c].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY)) {
                     rx = chars[c].char_handle;
                 }
@@ -302,6 +378,18 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
                 }
             }
             if (rx && tx) {
+                // Versuchsreihenfolge fuer den ELM-Init: gewaehlte Char zuerst, danach
+                // alle uebrigen schreibbaren Chars (jeweils unterstuetzter Modus zuerst,
+                // danach der andere Modus als letzter Ausweg).
+                s_tx_seq_n = 0;
+                tx_seq_add(tx, wt);
+                tx_seq_add(tx, wt == ESP_GATT_WRITE_TYPE_RSP ? ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP);
+                for (int c = 0; c < got; c++) {
+                    uint8_t p = chars[c].properties;
+                    if (!(p & (ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR))) continue;
+                    if (p & ESP_GATT_CHAR_PROP_BIT_WRITE) tx_seq_add(chars[c].char_handle, ESP_GATT_WRITE_TYPE_RSP);
+                    if (p & ESP_GATT_CHAR_PROP_BIT_WRITE_NR) tx_seq_add(chars[c].char_handle, ESP_GATT_WRITE_TYPE_NO_RSP);
+                }
                 s_rx_handle = rx;
                 s_tx_handle = tx;
                 s_tx_write_type = wt;
@@ -395,6 +483,8 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         break;
 
     case ESP_GATTC_OPEN_EVT:
+        OBD_LOGI("GATTC OPEN status=%d conn_id=%d mtu=%d", (int)param->open.status,
+                 (int)param->open.conn_id, (int)param->open.mtu);
         if (param->open.status != ESP_GATT_OK) {
             OBD_LOGW("Verbindungsaufbau fehlgeschlagen (Status %d)", (int)param->open.status);
             set_status("Open Fehler");
@@ -402,7 +492,12 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         }
         break;
 
+    case ESP_GATTC_CFG_MTU_EVT:
+        OBD_LOGI("GATTC MTU status=%d mtu=%d", (int)param->cfg_mtu.status, (int)param->cfg_mtu.mtu);
+        break;
+
     case ESP_GATTC_CONNECT_EVT:
+        OBD_LOGI("GATTC CONNECT conn_id=%d", (int)param->connect.conn_id);
         s_conn_id = param->connect.conn_id;
         memcpy(s_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         s_service_count = 0;
@@ -411,7 +506,7 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         break;
 
     case ESP_GATTC_DISCONNECT_EVT:
-        OBD_LOGW("BLE-OBD2-Adapter getrennt - suche erneut");
+        OBD_LOGW("BLE-OBD2-Adapter getrennt (Grund 0x%X) - suche erneut", (unsigned)param->disconnect.reason);
         s_connected = false;
         s_notify_ready = false;
         s_online = false;
@@ -426,6 +521,8 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         if (s_service_count < MAX_BLE_OBD_SERVICES) {
             s_services[s_service_count].start_handle = param->search_res.start_handle;
             s_services[s_service_count].end_handle = param->search_res.end_handle;
+            s_services[s_service_count].uuid16 =
+                (param->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16) ? param->search_res.srvc_id.uuid.uuid.uuid16 : 0;
             s_service_count++;
         }
         break;
@@ -435,6 +532,8 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         break;
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT:
+        OBD_LOGI("GATTC REG_FOR_NOTIFY status=%d handle=0x%04X", (int)param->reg_for_notify.status,
+                 (unsigned)param->reg_for_notify.handle);
         ble_obd_enable_notify_cccd(gattc_if);
         break;
 
@@ -452,9 +551,18 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         xSemaphoreGive(s_session_ready);
         break;
 
-    case ESP_GATTC_NOTIFY_EVT:
+    case ESP_GATTC_WRITE_CHAR_EVT:
+        OBD_LOGI("GATTC WRITE_CHAR handle=0x%04X status=%d", (unsigned)param->write.handle, (int)param->write.status);
+        break;
+
+    case ESP_GATTC_NOTIFY_EVT: {
+        char fb[200];
+        fmt_bytes(param->notify.value, param->notify.value_len, fb, sizeof(fb));
+        OBD_LOGI("RX notify handle=0x%04X len=%d: %s", (unsigned)param->notify.handle,
+                 (int)param->notify.value_len, fb);
         ble_obd_handle_notify(param);
         break;
+    }
 
     default:
         break;
@@ -476,10 +584,17 @@ static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, T
     esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_tx_handle,
                                               (uint16_t)len, (uint8_t *)buf,
                                               s_tx_write_type, ESP_GATT_AUTH_REQ_NONE);
+    if (!s_online || err != ESP_OK)
+        OBD_LOGI("TX '%s' handle=0x%04X mode=%s -> %s", cmd, (unsigned)s_tx_handle,
+                 s_tx_write_type == ESP_GATT_WRITE_TYPE_RSP ? "WRITE" : "WRITE_NR", esp_err_to_name(err));
     if (err != ESP_OK) return false;
     s_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
-    if (xSemaphoreTake(s_resp_ready, timeout) != pdTRUE) return false;
+    if (xSemaphoreTake(s_resp_ready, timeout) != pdTRUE) {
+        if (!s_online) OBD_LOGI("  '%s': Timeout ohne Antwort (Puffer: %d Byte)", cmd, s_notify_acc_len);
+        return false;
+    }
+    if (!s_online) OBD_LOGI("  '%s' -> '%s'", cmd, s_resp_buf);
     if (resp_out) {
         strncpy(resp_out, s_resp_buf, resp_out_size - 1);
         resp_out[resp_out_size - 1] = '\0';
@@ -491,14 +606,18 @@ static bool elm_init_sequence(char *resp, size_t resp_size)
 {
     set_status("ELM Init");
     bool elm_ok = false;
-    for (int attempt = 0; attempt < 3 && !elm_ok; attempt++) {
-        elm_ok = send_at_cmd("ATZ", resp, resp_size, pdMS_TO_TICKS(3000));
-        OBD_LOGI("ATZ Versuch %d -> %s: %s", attempt + 1, elm_ok ? "ok" : "KEINE ANTWORT", resp);
-        if (!elm_ok) {
-            // Alternativ: anderen Schreibmodus probieren
-            s_tx_write_type = (s_tx_write_type == ESP_GATT_WRITE_TYPE_NO_RSP) ?
-                              ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP;
+    int tries = s_tx_seq_n < 3 ? 3 : (s_tx_seq_n > 6 ? 6 : s_tx_seq_n);
+    for (int attempt = 0; attempt < tries && !elm_ok; attempt++) {
+        if (s_tx_seq_n > 0) {
+            s_tx_handle = s_tx_seq[attempt % s_tx_seq_n].handle;
+            s_tx_write_type = s_tx_seq[attempt % s_tx_seq_n].type;
         }
+        OBD_LOGI("ATZ Versuch %d/%d: TX handle=0x%04X mode=%s RX handle=0x%04X", attempt + 1, tries,
+                 (unsigned)s_tx_handle, s_tx_write_type == ESP_GATT_WRITE_TYPE_RSP ? "WRITE" : "WRITE_NR",
+                 (unsigned)s_rx_handle);
+        resp[0] = '\0';
+        elm_ok = send_at_cmd("ATZ", resp, resp_size, pdMS_TO_TICKS(2500));
+        OBD_LOGI("ATZ Versuch %d -> %s: %s", attempt + 1, elm_ok ? "ok" : "KEINE ANTWORT", resp);
     }
     send_at_cmd("ATE0", resp, resp_size, pdMS_TO_TICKS(1000));
     send_at_cmd("ATH0", resp, resp_size, pdMS_TO_TICKS(1000));
@@ -662,6 +781,8 @@ static void ble_obd_start_task(void *arg)
 
 void BLE_OBD_Init(void)
 {
+    OBD_LOGI("BLE_OBD Firmware-Build %s %s (kombinierte Notify/Write-Char, TX-Fallback, async SD-Log)",
+             __DATE__, __TIME__);
     xTaskCreatePinnedToCore(ble_obd_start_task, "ble_obd_start", 4096, NULL, 3, NULL, 0);
 }
 
