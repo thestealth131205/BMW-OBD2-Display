@@ -4,10 +4,12 @@
 #include "BAT_Driver.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
+#include "service_funcs.h"
 #include "PCF85063.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 
 // --- Farbpalette fuer die Einstellungen (Primaer-/Sekundaerfarbe, wie im
 // C6-Projekt inkl. Neongelb) ---
@@ -79,6 +81,8 @@ static lv_obj_t *scr_multi;
 static lv_obj_t *scr_demo;
 static lv_obj_t *scr_settings;
 static lv_obj_t *scr_dtc;
+static lv_obj_t *scr_service;
+static lv_obj_t *service_status_label;
 
 static lv_obj_t *multi_meter;
 static lv_meter_indicator_t *multi_needle;
@@ -383,6 +387,10 @@ static void swipe_gesture_cb(lv_event_t *e)
         lv_scr_load_anim(scr_dtc, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     } else if (scr == scr_dtc && dir == LV_DIR_RIGHT) {
         lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    } else if (scr == scr_multi && dir == LV_DIR_RIGHT) {
+        lv_scr_load_anim(scr_service, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    } else if (scr == scr_service && dir == LV_DIR_LEFT) {
+        lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     }
 }
 
@@ -457,6 +465,49 @@ static void create_dtc_screen(void)
     lv_obj_center(service_lbl);
 
     lv_obj_add_event_cb(scr_dtc, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+
+// --- Service-Screen: erreichbar per Wisch nach rechts auf der Multi-Ansicht,
+// Wisch nach links geht zurueck. Ein Button je Eintrag in SERVICE_FUNCS[].
+static void service_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    bool ok = (g_data_source == DATA_SRC_BLE_OBD) ? BLE_OBD_service_func(idx)
+                                                  : CAN_OBD2_service_func(idx);
+    lv_label_set_text_fmt(service_status_label, ok ? "Gesendet: %s" : "Nicht hinterlegt: %s",
+                          SERVICE_FUNCS[idx].label);
+}
+
+static void create_service_screen(void)
+{
+    scr_service = lv_obj_create(NULL);
+    set_dark_bg(scr_service);
+    lv_obj_clear_flag(scr_service, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(scr_service);
+    lv_label_set_text(title, "SERVICE");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 25);
+
+    lv_obj_t *ver = lv_label_create(scr_service);
+    lv_label_set_text_fmt(ver, "v%s", esp_app_get_description()->version);
+    lv_obj_set_style_text_color(ver, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 48);
+
+    for (int i = 0; i < SERVICE_FUNC_COUNT; i++) {
+        lv_obj_t *btn = lv_btn_create(scr_service);
+        lv_obj_set_size(btn, 300, 60);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 75 + i * 75);
+        lv_obj_add_event_cb(btn, service_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, SERVICE_FUNCS[i].label);
+        lv_obj_center(lbl);
+    }
+
+    service_status_label = lv_label_create(scr_service);
+    lv_label_set_text(service_status_label, "");
+    lv_obj_align(service_status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+    lv_obj_add_event_cb(scr_service, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
 // Rampe fuer die Start-Testanimation: 0 -> max (ANIM_UP_MS) -> 0 (ANIM_DOWN_MS),
@@ -652,6 +703,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
 
     create_settings_screen();
     create_dtc_screen();
+    create_service_screen();
 
     anim_start_tick = lv_tick_get();
     anim_done = false;

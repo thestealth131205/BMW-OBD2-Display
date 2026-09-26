@@ -18,6 +18,7 @@
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
 #include "sd_log.h"
+#include "service_funcs.h"
 
 static const char *TAG = "BLE_OBD";
 
@@ -47,6 +48,7 @@ typedef enum {
     BLE_OBD_REQ_READ_DTC,
     BLE_OBD_REQ_CLEAR_DTC,
     BLE_OBD_REQ_SERVICE_RESET,
+    BLE_OBD_REQ_SERVICE_FUNC_BASE, // + Index in SERVICE_FUNCS[]
 } ble_obd_request_t;
 
 typedef struct {
@@ -652,7 +654,22 @@ static void ble_obd_task(void *arg)
         if (xQueueReceive(s_request_queue, &req, 0) == pdTRUE) {
             uint8_t bytes[32];
             int n;
+            if (req >= BLE_OBD_REQ_SERVICE_FUNC_BASE) {
+                int idx = (int)req - BLE_OBD_REQ_SERVICE_FUNC_BASE;
+                const service_func_t *f = &SERVICE_FUNCS[idx];
+                char cmd[24];
+                snprintf(cmd, sizeof(cmd), "ATSH%03X", f->can_id);
+                send_at_cmd(cmd, resp, sizeof(resp), pdMS_TO_TICKS(1000));
+                int p = 0;
+                for (int i = 0; i < f->len; i++) p += snprintf(cmd + p, sizeof(cmd) - p, "%02X", f->data[i]);
+                send_at_cmd(cmd, resp, sizeof(resp), pdMS_TO_TICKS(2000));
+                OBD_LOGI("Service '%s' -> %s", f->label, resp);
+                send_at_cmd("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000));
+                continue;
+            }
             switch (req) {
+            case BLE_OBD_REQ_SERVICE_FUNC_BASE:
+                break;
             case BLE_OBD_REQ_READ_DTC:
                 if (send_at_cmd("03", resp, sizeof(resp), pdMS_TO_TICKS(2000))) {
                     n = hex_tokenize(resp, bytes, sizeof(bytes));
@@ -815,6 +832,13 @@ void BLE_OBD_reset_service_oil(void)
 {
     ble_obd_request_t req = BLE_OBD_REQ_SERVICE_RESET;
     if (s_request_queue) xQueueSend(s_request_queue, &req, 0);
+}
+
+bool BLE_OBD_service_func(int idx)
+{
+    if (idx < 0 || idx >= SERVICE_FUNC_COUNT || SERVICE_FUNCS[idx].len == 0) return false;
+    ble_obd_request_t req = (ble_obd_request_t)(BLE_OBD_REQ_SERVICE_FUNC_BASE + idx);
+    return s_request_queue && xQueueSend(s_request_queue, &req, 0) == pdTRUE;
 }
 
 int BLE_OBD_dtc_count(void) { return s_dtc_count; }

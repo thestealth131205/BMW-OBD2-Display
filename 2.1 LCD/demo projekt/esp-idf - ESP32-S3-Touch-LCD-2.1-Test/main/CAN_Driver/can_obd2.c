@@ -4,6 +4,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include <stdio.h>
+#include <string.h>
+#include "service_funcs.h"
 
 static const char *TAG = "CAN_OBD2";
 
@@ -159,6 +161,16 @@ void CAN_OBD2_reset_service_oil(void)
     // UDS Routine Control (0x31) an Kombiinstrument, Service-Typ 0x01 = Motoroel
     uint8_t req[8] = {0x04, 0x31, 0x01, 0xFF, 0x01, 0x00, 0x00, 0x00};
     mcp2515_send(ID_KOMBI, req, 8);
+}
+
+bool CAN_OBD2_service_func(int idx)
+{
+    if (idx < 0 || idx >= SERVICE_FUNC_COUNT || SERVICE_FUNCS[idx].len == 0) return false;
+    const service_func_t *f = &SERVICE_FUNCS[idx];
+    uint8_t req[8] = {0};
+    req[0] = f->len; // ISO-TP Single Frame
+    memcpy(&req[1], f->data, f->len);
+    return mcp2515_send(f->can_id, req, 8) == ESP_OK;
 }
 
 int CAN_OBD2_dtc_count(void) { return s_dtc_count; }

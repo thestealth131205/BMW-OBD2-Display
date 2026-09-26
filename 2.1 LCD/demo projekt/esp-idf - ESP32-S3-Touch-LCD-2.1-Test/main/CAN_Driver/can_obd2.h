@@ -28,6 +28,9 @@ float CAN_OBD2_gforce_y(void);
 void CAN_OBD2_read_dtc(void);
 void CAN_OBD2_clear_dtc(void);
 void CAN_OBD2_reset_service_oil(void);
+// Fuehrt Eintrag idx aus SERVICE_FUNCS[] (service_funcs.h) aus.
+// Liefert false bei ungueltigem Index oder nicht hinterlegter Payload.
+bool CAN_OBD2_service_func(int idx);
 
 // Anzahl der zuletzt ausgelesenen Fehlercodes. -1 = noch nicht ausgelesen
 // (seit Boot bzw. seit dem letzten CAN_OBD2_read_dtc()-Aufruf noch keine

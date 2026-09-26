@@ -42,6 +42,16 @@ jobs:
             0x8000  "$BUILD_DIR/partition_table/partition-table.bin" \
             0x10000 "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin"
 
+      - name: Read firmware version
+        id: ver
+        run: |
+          VER=$(tr -d ' \r\n' < "$PROJECT_DIR/VERSION")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          mkdir -p s3-versioned
+          for f in firmware-s3.bin firmware-s3.elf firmware-s3-merged.bin; do
+            cp "s3-artifacts/$f" "s3-versioned/${f/firmware-s3/firmware-s3-v$VER}"
+          done
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +70,17 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           printf '%s\n\nCommit: %s\n' "$COMMIT_MSG" "$GITHUB_SHA" > release-notes.md
+
+      - name: Create/Update versioned Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: S3 v${{ steps.ver.outputs.version }}
+          body_path: release-notes.md
+          make_latest: false
+          files: |
+            s3-versioned/*
 
       - name: Create/Update Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/test_waveshare'

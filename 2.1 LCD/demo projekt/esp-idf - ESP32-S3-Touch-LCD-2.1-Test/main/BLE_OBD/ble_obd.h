@@ -51,6 +51,9 @@ void BLE_OBD_clear_dtc(void);
 // BMW-CBS-Oel-Service-Reset ueber UDS Routine Control (0x31) an das
 // Kombiinstrument (0x611), per ELM327-Header-Umschaltung ("ATSH611").
 void BLE_OBD_reset_service_oil(void);
+// Fuehrt Eintrag idx aus SERVICE_FUNCS[] (service_funcs.h) aus.
+// Liefert false bei ungueltigem Index oder nicht hinterlegter Payload.
+bool BLE_OBD_service_func(int idx);
 
 // Anzahl der zuletzt ausgelesenen Fehlercodes. -1 = noch nicht ausgelesen.
 int BLE_OBD_dtc_count(void);
