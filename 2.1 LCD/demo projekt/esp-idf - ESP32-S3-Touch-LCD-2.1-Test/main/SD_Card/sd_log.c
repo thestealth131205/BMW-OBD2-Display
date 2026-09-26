@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 
 #include "SD_MMC.h"
 #include "PCF85063/PCF85063.h"
@@ -61,12 +62,13 @@ void SD_Log_Init(void)
 
     datetime_t now;
     PCF85063_Read_Time(&now);
-    fprintf(s_file, "\r\n=== Start %04d-%02d-%02d %02d:%02d:%02d ===\r\n",
-            now.year, now.month, now.day, now.hour, now.minute, now.second);
+    // Reset-Grund (1=Power-on 3=SW 4=Panic 5=IntWDT 6=TaskWDT 7=WDT 9=Brownout) zur Analyse von Neustarts
+    fprintf(s_file, "\r\n=== Start %04d-%02d-%02d %02d:%02d:%02d reset_reason=%d ===\r\n",
+            now.year, now.month, now.day, now.hour, now.minute, now.second, (int)esp_reset_reason());
     fflush(s_file);
     fsync(fileno(s_file));
 
-    xTaskCreatePinnedToCore(sd_log_task, "sd_log", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(sd_log_task, "sd_log", 8192, NULL, 2, NULL, 1);
 }
 
 void SD_Log(const char *fmt, ...)

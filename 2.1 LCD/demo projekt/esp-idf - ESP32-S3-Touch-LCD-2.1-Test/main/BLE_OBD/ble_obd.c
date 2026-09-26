@@ -341,13 +341,27 @@ static void ble_obd_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t 
 // WRITE_NR-Property (TX, Display -> ELM327). Generischer Ansatz statt
 // fester UUIDs, da die UUIDs bei ELM327-BLE-Klonen je nach Firmware
 // variieren (haeufig FFE0/FFE1 oder FFF0/FFF1/FFF2, aber nicht garantiert).
+// ISSC-BLE-Module (auch im Veepeak) haben neben dem Datenservice einen
+// Konfigurationsservice mit ...-6DAA-...-69FE (Verbindungsparameter) und
+// ...-ACA3-...-0318 (Air Patch). Beide haben Write/Notify, sind aber NICHT der
+// ELM327-Datenkanal und werden zuerst uebersprungen.
+static bool is_issc_config_char(const esp_bt_uuid_t *u)
+{
+    if (u->len != ESP_UUID_LEN_128) return false;
+    const uint8_t *b = u->uuid.uuid128;
+    return (b[0] == 0xFE && b[1] == 0x69) || (b[0] == 0x18 && b[1] == 0x03);
+}
+
 static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
 {
     OBD_LOGI("Service-Suche fertig: %d Services", s_service_count);
+    // Durchlauf 0 ueberspringt ISSC-Konfigurations-Chars, Durchlauf 1 ist der Notnagel.
+    for (int pass = 0; pass < 2; pass++)
     for (int i = 0; i < s_service_count; i++) {
         uint16_t count = 0;
-        OBD_LOGI("Service %d: uuid16=0x%04X handles 0x%04X-0x%04X", i, s_services[i].uuid16,
-                 s_services[i].start_handle, s_services[i].end_handle);
+        if (pass == 0)
+            OBD_LOGI("Service %d: uuid16=0x%04X handles 0x%04X-0x%04X", i, s_services[i].uuid16,
+                     s_services[i].start_handle, s_services[i].end_handle);
         esp_ble_gattc_get_attr_count(gattc_if, conn_id, ESP_GATT_DB_CHARACTERISTIC,
                                       s_services[i].start_handle, s_services[i].end_handle,
                                       0, &count);
@@ -366,8 +380,13 @@ static void ble_obd_find_rx_tx_char(esp_gatt_if_t gattc_if, uint16_t conn_id)
                 char us[24], ps[48];
                 fmt_uuid(&chars[c].uuid, us, sizeof(us));
                 fmt_props(chars[c].properties, ps, sizeof(ps));
-                OBD_LOGI("  Char handle=0x%04X uuid=%s props=0x%02X [%s]", chars[c].char_handle, us,
-                         chars[c].properties, ps);
+                if (pass == 0)
+                    OBD_LOGI("  Char handle=0x%04X uuid=%s props=0x%02X [%s]", chars[c].char_handle, us,
+                             chars[c].properties, ps);
+                if (pass == 0 && is_issc_config_char(&chars[c].uuid)) {
+                    chars[c].properties = 0;   // Konfig-Char: nicht als Datenkanal verwenden
+                    continue;
+                }
                 if (!rx && (chars[c].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY)) {
                     rx = chars[c].char_handle;
                 }
