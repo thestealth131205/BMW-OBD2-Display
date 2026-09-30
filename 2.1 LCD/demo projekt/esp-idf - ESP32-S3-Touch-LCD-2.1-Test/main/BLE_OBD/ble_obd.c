@@ -604,9 +604,17 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
 // Sendet ein AT-/OBD2-Kommando (ohne CR) und wartet synchron auf die
 // ELM327-Antwort (bis zum '>'-Prompt oder Timeout). Nur aus dem
 // ble_obd_task-Kontext aufrufen (nicht threadsicher fuer parallele Aufrufe).
-static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, TickType_t timeout)
+// "verbose": TX/RX werden auch dann geloggt, wenn die Verbindung schon
+// online ist (fuer die seltenen, per Button ausgeloesten Kommandos wie
+// DTC lesen/loeschen/Service-Reset - der normale 20-ms-Polling-Hotpath
+// bleibt im Online-Zustand weiterhin unprotokolliert).
+static bool send_at_cmd_v(const char *cmd, char *resp_out, size_t resp_out_size, TickType_t timeout, bool verbose)
 {
-    if (!s_notify_ready || s_tx_handle == 0) return false;
+    if (!s_notify_ready || s_tx_handle == 0) {
+        if (verbose) OBD_LOGW("TX '%s' verworfen: nicht verbunden (notify_ready=%d tx_handle=0x%04X)",
+                               cmd, (int)s_notify_ready, (unsigned)s_tx_handle);
+        return false;
+    }
 
     char buf[24];
     int len = snprintf(buf, sizeof(buf), "%s\r", cmd);
@@ -616,22 +624,27 @@ static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, T
     esp_err_t err = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_tx_handle,
                                               (uint16_t)len, (uint8_t *)buf,
                                               s_tx_write_type, ESP_GATT_AUTH_REQ_NONE);
-    if (!s_online || err != ESP_OK)
+    if (verbose || !s_online || err != ESP_OK)
         OBD_LOGI("TX '%s' handle=0x%04X mode=%s -> %s", cmd, (unsigned)s_tx_handle,
                  s_tx_write_type == ESP_GATT_WRITE_TYPE_RSP ? "WRITE" : "WRITE_NR", esp_err_to_name(err));
     if (err != ESP_OK) return false;
     s_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
     if (xSemaphoreTake(s_resp_ready, timeout) != pdTRUE) {
-        if (!s_online) OBD_LOGI("  '%s': Timeout ohne Antwort (Puffer: %d Byte)", cmd, s_notify_acc_len);
+        if (verbose || !s_online) OBD_LOGI("  '%s': Timeout ohne Antwort (Puffer: %d Byte)", cmd, s_notify_acc_len);
         return false;
     }
-    if (!s_online) OBD_LOGI("  '%s' -> '%s'", cmd, s_resp_buf);
+    if (verbose || !s_online) OBD_LOGI("  '%s' -> '%s'", cmd, s_resp_buf);
     if (resp_out) {
         strncpy(resp_out, s_resp_buf, resp_out_size - 1);
         resp_out[resp_out_size - 1] = '\0';
     }
     return true;
+}
+
+static bool send_at_cmd(const char *cmd, char *resp_out, size_t resp_out_size, TickType_t timeout)
+{
+    return send_at_cmd_v(cmd, resp_out, resp_out_size, timeout, false);
 }
 
 static bool elm_init_sequence(char *resp, size_t resp_size)
@@ -689,19 +702,19 @@ static void ble_obd_task(void *arg)
                 const service_func_t *f = &SERVICE_FUNCS[idx];
                 char cmd[24];
                 snprintf(cmd, sizeof(cmd), "ATSH%03X", f->can_id);
-                send_at_cmd(cmd, resp, sizeof(resp), pdMS_TO_TICKS(1000));
+                send_at_cmd_v(cmd, resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
                 int p = 0;
                 for (int i = 0; i < f->len; i++) p += snprintf(cmd + p, sizeof(cmd) - p, "%02X", f->data[i]);
-                send_at_cmd(cmd, resp, sizeof(resp), pdMS_TO_TICKS(2000));
+                send_at_cmd_v(cmd, resp, sizeof(resp), pdMS_TO_TICKS(2000), true);
                 OBD_LOGI("Service '%s' -> %s", f->label, resp);
-                send_at_cmd("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000));
+                send_at_cmd_v("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
                 continue;
             }
             switch (req) {
             case BLE_OBD_REQ_SERVICE_FUNC_BASE:
                 break;
             case BLE_OBD_REQ_READ_DTC:
-                if (send_at_cmd("03", resp, sizeof(resp), pdMS_TO_TICKS(2000))) {
+                if (send_at_cmd_v("03", resp, sizeof(resp), pdMS_TO_TICKS(2000), true)) {
                     n = hex_tokenize(resp, bytes, sizeof(bytes));
                     if (n >= 1 && bytes[0] == 0x43) {
                         int dtc_n = 0;
@@ -709,17 +722,26 @@ static void ble_obd_task(void *arg)
                             if (decode_dtc_bytes(bytes[i], bytes[i + 1], s_dtc_codes[dtc_n])) dtc_n++;
                         }
                         s_dtc_count = dtc_n;
+                        OBD_LOGI("DTC-Anfrage: %d Code(s) erkannt", dtc_n);
+                    } else {
+                        OBD_LOGW("DTC-Anfrage: Antwort ohne 0x43-Praefix, nicht ausgewertet: '%s'", resp);
                     }
+                } else {
+                    OBD_LOGW("DTC-Anfrage '03': keine Antwort vom Adapter");
                 }
                 break;
             case BLE_OBD_REQ_CLEAR_DTC:
-                send_at_cmd("04", resp, sizeof(resp), pdMS_TO_TICKS(2000));
+                if (!send_at_cmd_v("04", resp, sizeof(resp), pdMS_TO_TICKS(2000), true))
+                    OBD_LOGW("DTC-Loeschen '04': keine Antwort vom Adapter");
                 s_dtc_count = 0;
                 break;
             case BLE_OBD_REQ_SERVICE_RESET:
-                send_at_cmd("ATSH611", resp, sizeof(resp), pdMS_TO_TICKS(1000));
-                send_at_cmd("3101FF01", resp, sizeof(resp), pdMS_TO_TICKS(2000));
-                send_at_cmd("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000));
+                send_at_cmd_v("ATSH611", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
+                if (!send_at_cmd_v("3101FF01", resp, sizeof(resp), pdMS_TO_TICKS(2000), true))
+                    OBD_LOGW("Service-Reset '3101FF01': keine Antwort vom Adapter");
+                else
+                    OBD_LOGI("Service-Reset -> %s", resp);
+                send_at_cmd_v("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
                 break;
             }
             continue;

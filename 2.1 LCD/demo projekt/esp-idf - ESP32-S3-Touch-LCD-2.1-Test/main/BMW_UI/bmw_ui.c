@@ -104,6 +104,7 @@ static lv_obj_t *multi_tx_dot;
 
 // --- Fehlercode-Screen (per Wisch-Geste erreichbar) ---
 static lv_obj_t *dtc_list_label;
+static lv_obj_t *dtc_status_label;
 
 // --- Schaltanzeige (6 Fuell-Kaestchen ueber den im Hintergrundbild
 // gezeichneten Kaesten): fuellen sich mit steigender Drehzahl (je Kaestchen
@@ -397,6 +398,7 @@ static void swipe_gesture_cb(lv_event_t *e)
 static void dtc_read_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    lv_label_set_text(dtc_status_label, "Frage Fehlercodes an...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_read_dtc();
     else CAN_OBD2_read_dtc();
 }
@@ -404,6 +406,7 @@ static void dtc_read_btn_cb(lv_event_t *e)
 static void dtc_clear_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    lv_label_set_text(dtc_status_label, "Loesche Fehlercodes...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_clear_dtc();
     else CAN_OBD2_clear_dtc();
 }
@@ -411,6 +414,7 @@ static void dtc_clear_btn_cb(lv_event_t *e)
 static void dtc_service_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    lv_label_set_text(dtc_status_label, "Sende Service-Reset...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_reset_service_oil();
     else CAN_OBD2_reset_service_oil();
 }
@@ -463,6 +467,10 @@ static void create_dtc_screen(void)
     lv_obj_t *service_lbl = lv_label_create(btn_service);
     lv_label_set_text(service_lbl, "Service Reset");
     lv_obj_center(service_lbl);
+
+    dtc_status_label = lv_label_create(scr_dtc);
+    lv_label_set_text(dtc_status_label, "");
+    lv_obj_align(dtc_status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
 
     lv_obj_add_event_cb(scr_dtc, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
