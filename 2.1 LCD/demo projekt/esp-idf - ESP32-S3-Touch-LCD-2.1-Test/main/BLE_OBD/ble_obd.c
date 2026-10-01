@@ -584,7 +584,16 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         break;
 
     case ESP_GATTC_WRITE_CHAR_EVT:
-        OBD_LOGI("GATTC WRITE_CHAR handle=0x%04X status=%d", (unsigned)param->write.handle, (int)param->write.status);
+        // Wie bei ESP_GATTC_NOTIFY_EVT: nur solange offline loggen. Dieser
+        // Fall lief bisher IMMER mit, also bei jedem einzelnen Poll-Write
+        // (alle ~20ms, WRITE_TYPE_RSP erzeugt pro Schreibvorgang dieses
+        // Event) - ueber eine ganze Fahrt mehrere tausend Log-/SD-Writes aus
+        // dem Bluedroid-BTC-Callback-Kontext. Vermutlich der groesste noch
+        // verbliebene Beitrag zu den sporadischen reset_reason=4/7-Resets,
+        // die trotz der BTC/BTU-Stack-Vergroesserung weiter auftraten.
+        if (!s_online) {
+            OBD_LOGI("GATTC WRITE_CHAR handle=0x%04X status=%d", (unsigned)param->write.handle, (int)param->write.status);
+        }
         break;
 
     case ESP_GATTC_NOTIFY_EVT: {

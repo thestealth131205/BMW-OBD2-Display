@@ -6,6 +6,7 @@
 #include "ble_obd.h"
 #include "service_funcs.h"
 #include "PCF85063.h"
+#include "sd_log.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_timer.h"
@@ -395,9 +396,17 @@ static void swipe_gesture_cb(lv_event_t *e)
     }
 }
 
+// Jeder Tastendruck wird sofort und unabhaengig vom BLE-/MCP-Zustand ins
+// SD-Log geschrieben - bisherige Logs zeigten in mehreren langen Testfahrten
+// keinen einzigen Hinweis auf einen DTC-/Service-Befehl, obwohl die Buttons
+// laut Nutzer gedrueckt wurden. Damit laesst sich erstmals unterscheiden, ob
+// der Touch ueberhaupt ankommt (diese Zeile fehlt) oder ob er ankommt, aber
+// die BLE-/MCP-Seite danach stumm bleibt (diese Zeile steht da, aber keine
+// TX-/Service-Zeile aus ble_obd.c/can_obd2.c folgt).
 static void dtc_read_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    SD_Log("UI: Button 'Auslesen' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
     lv_label_set_text(dtc_status_label, "Frage Fehlercodes an...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_read_dtc();
     else CAN_OBD2_read_dtc();
@@ -406,6 +415,7 @@ static void dtc_read_btn_cb(lv_event_t *e)
 static void dtc_clear_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    SD_Log("UI: Button 'Loeschen' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
     lv_label_set_text(dtc_status_label, "Loesche Fehlercodes...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_clear_dtc();
     else CAN_OBD2_clear_dtc();
@@ -414,6 +424,7 @@ static void dtc_clear_btn_cb(lv_event_t *e)
 static void dtc_service_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
+    SD_Log("UI: Button 'Service Reset' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
     lv_label_set_text(dtc_status_label, "Sende Service-Reset...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_reset_service_oil();
     else CAN_OBD2_reset_service_oil();
@@ -480,6 +491,8 @@ static void create_dtc_screen(void)
 static void service_btn_cb(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    SD_Log("UI: Service-Button '%s' gedrueckt (Quelle=%s)", SERVICE_FUNCS[idx].label,
+           g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
     bool ok = (g_data_source == DATA_SRC_BLE_OBD) ? BLE_OBD_service_func(idx)
                                                   : CAN_OBD2_service_func(idx);
     lv_label_set_text_fmt(service_status_label, ok ? "Gesendet: %s" : "Nicht hinterlegt: %s",
@@ -630,7 +643,8 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
         lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
         lv_label_set_text(fields[i], "-");
     }
-    // Gaspedal-, Drehzahl- und Wasser-Feld doppelt so gross (Font 28 statt Standard 14)
+    // Batterie-, Gaspedal-, Drehzahl- und Wasser-Feld doppelt so gross (Font 28 statt Standard 14)
+    lv_obj_set_style_text_font(multi_bat_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_throttle_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_rpm_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_water_label, &lv_font_montserrat_28, 0);
@@ -758,7 +772,15 @@ void BMW_UI_Update(void)
 
     lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_water_temp);
     lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
-    lv_label_set_text_fmt(multi_bat_label, "%.1fV", current_bat_voltage);
+    {
+        // lv_label_set_text_fmt nutzt LVGLs eigenen (v)snprintf, der ohne
+        // CONFIG_LV_SPRINTF_USE_FLOAT kein "%f" versteht und dann nur die
+        // literalen Format-Reste ("fV") ausgibt - deshalb hier echtes
+        // snprintf (newlib, mit Float-Unterstuetzung) in einen Puffer.
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1fV", current_bat_voltage);
+        lv_label_set_text(multi_bat_label, buf);
+    }
     lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
     lv_label_set_text_fmt(multi_rpm_label, "%d", (int)current_rpm);
     lv_label_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
@@ -773,7 +795,9 @@ void BMW_UI_Update(void)
     bool use_ble_src = (g_data_source == DATA_SRC_BLE_OBD);
     float obd2_bat = use_ble_src ? BLE_OBD_bat_voltage() : CAN_OBD2_bat_voltage();
     if (obd2_bat > 0.0f) {
-        lv_label_set_text_fmt(multi_obd2_bat_label, "%.1fV", obd2_bat);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1fV", obd2_bat);
+        lv_label_set_text(multi_obd2_bat_label, buf);
     } else if (use_ble_src) {
         lv_label_set_text_fmt(multi_obd2_bat_label, "BLE: %s", BLE_OBD_status());
     }

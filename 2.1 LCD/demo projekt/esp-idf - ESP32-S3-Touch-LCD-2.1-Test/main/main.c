@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <inttypes.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,6 +17,39 @@
 #include "bmw_ui.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
+#include "esp_core_dump.h"
+
+// Die Boot-Loops/Abstuerze waehrend der Fahrt liessen sich bisher nicht
+// diagnostizieren, weil der echte Panic-Grund/Backtrace nur auf der seriellen
+// USB-Konsole ausgegeben wird - im Auto ist kein Rechner angeschlossen. Mit
+// CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH landet ein Crash-Dump stattdessen auf
+// der eigenen "coredump"-Partition (partitions.csv) und bleibt bis zum
+// naechsten Boot erhalten. Hier wird er beim Start geprueft, die wichtigsten
+// Angaben (Absturzursache, Programmzaehler, Backtrace-Adressen) gehen ins
+// SD-Log, danach wird der Dump geloescht, damit er nicht erneut gemeldet wird.
+static void log_and_clear_coredump(void)
+{
+    if (esp_core_dump_image_check() != ESP_OK) {
+        return; // kein Dump vorhanden
+    }
+
+    esp_core_dump_summary_t summary;
+    if (esp_core_dump_get_summary(&summary) == ESP_OK) {
+        SD_Log("=== COREDUMP gefunden: Task '%s', PC=0x%08" PRIx32 ", exc_cause=%" PRIu32 ", exc_vaddr=0x%08" PRIx32,
+               summary.exc_task, summary.exc_pc, summary.ex_info.exc_cause, summary.ex_info.exc_vaddr);
+        char bt[256];
+        int p = 0;
+        for (uint32_t i = 0; i < summary.exc_bt_info.depth && i < 16; i++) {
+            p += snprintf(bt + p, sizeof(bt) - p, "0x%08" PRIx32 " ", summary.exc_bt_info.bt[i]);
+            if (p >= (int)sizeof(bt) - 12) break;
+        }
+        SD_Log("COREDUMP Backtrace (corrupted=%d): %s", (int)summary.exc_bt_info.corrupted, bt);
+    } else {
+        SD_Log("=== COREDUMP vorhanden, aber Zusammenfassung konnte nicht gelesen werden ===");
+    }
+
+    esp_core_dump_image_erase();
+}
 
 void Driver_Loop(void *parameter)
 {
@@ -54,6 +88,7 @@ void app_main(void)
     Touch_Init();
     SD_Init();
     SD_Log_Init();
+    log_and_clear_coredump();
     LVGL_Init();
 
     // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
