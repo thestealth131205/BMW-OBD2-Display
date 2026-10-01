@@ -588,10 +588,17 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         break;
 
     case ESP_GATTC_NOTIFY_EVT: {
-        char fb[200];
-        fmt_bytes(param->notify.value, param->notify.value_len, fb, sizeof(fb));
-        OBD_LOGI("RX notify handle=0x%04X len=%d: %s", (unsigned)param->notify.handle,
-                 (int)param->notify.value_len, fb);
+        // Nur loggen, solange die Verbindung noch nicht online ist (wie beim
+        // TX-Pfad in send_at_cmd_v) - im Normalbetrieb kommt bei jedem Poll
+        // eine Notify, und das Formatieren/Loggen hier laeuft im Bluedroid-
+        // BTC-Task-Kontext mit begrenztem Stack. Dauerndes Loggen jeder
+        // Notify war vermutlich Mitursache fuer sporadische Boot-Loops.
+        if (!s_online) {
+            char fb[200];
+            fmt_bytes(param->notify.value, param->notify.value_len, fb, sizeof(fb));
+            OBD_LOGI("RX notify handle=0x%04X len=%d: %s", (unsigned)param->notify.handle,
+                     (int)param->notify.value_len, fb);
+        }
         ble_obd_handle_notify(param);
         break;
     }
@@ -839,7 +846,7 @@ static void ble_obd_start_task(void *arg)
     esp_ble_gattc_register_callback(ble_obd_gattc_cb);
     esp_ble_gattc_app_register(BLE_OBD_APP_ID);
 
-    xTaskCreatePinnedToCore(ble_obd_task, "ble_obd", 4096, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(ble_obd_task, "ble_obd", 6144, NULL, 4, NULL, 0);
 
     vTaskDelete(NULL);
 }
