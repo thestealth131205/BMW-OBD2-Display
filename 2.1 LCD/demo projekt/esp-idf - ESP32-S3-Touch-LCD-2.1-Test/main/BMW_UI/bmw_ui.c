@@ -1,7 +1,6 @@
 #include "bmw_ui.h"
 #include "multi_bg_img.h"
 #include "needle_imgs.h"
-#include "BAT_Driver.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
 #include "service_funcs.h"
@@ -96,9 +95,6 @@ static lv_obj_t *multi_water_label;
 // weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
 static lv_obj_t *multi_water_outline[8];
 
-// Live OBD2-Batteriespannung (Mode 01 PID 0x42), mittig zwischen Gaspedal-
-// und Drehzahlfeld, tiefer als die Feldreihe positioniert.
-static lv_obj_t *multi_obd2_bat_label;
 static lv_obj_t *multi_rx_dot;
 static lv_obj_t *multi_tx_dot;
 #define ACT_DOT_FLASH_MS 120
@@ -130,6 +126,15 @@ static void set_dark_bg(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(obj, lv_color_white(), 0);
     lv_obj_set_style_border_width(obj, 0, 0);
+}
+
+// Dunkleres Blau statt des hellen LVGL-Standard-Theme-Blaus, damit weisse
+// Beschriftung auf den Buttons besser lesbar ist (betrifft auch den
+// gedrueckten Zustand, sonst blitzt beim Antippen wieder das helle Blau auf)
+static void set_dark_blue_btn(lv_obj_t *btn)
+{
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 3), 0);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 2), LV_STATE_PRESSED);
 }
 
 // Bild-Nadel um den Meter-Mittelpunkt rotieren (in Ruhestellung nach 6 Uhr).
@@ -370,6 +375,7 @@ static void create_settings_screen(void)
     create_color_picker_column(scr_settings, "Sekundaer", 115, false, secondary_color_ctx);
 
     lv_obj_t *btn_back = lv_btn_create(scr_settings);
+    set_dark_blue_btn(btn_back);
     lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_add_event_cb(btn_back, back_from_settings_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *back_lbl = lv_label_create(btn_back);
@@ -455,6 +461,7 @@ static void create_dtc_screen(void)
 
     // Auslesen / Loeschen nebeneinander
     lv_obj_t *btn_read = lv_btn_create(scr_dtc);
+    set_dark_blue_btn(btn_read);
     lv_obj_set_size(btn_read, 200, 60);
     lv_obj_align(btn_read, LV_ALIGN_TOP_MID, -105, 270);
     lv_obj_add_event_cb(btn_read, dtc_read_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -463,6 +470,7 @@ static void create_dtc_screen(void)
     lv_obj_center(read_lbl);
 
     lv_obj_t *btn_clear = lv_btn_create(scr_dtc);
+    set_dark_blue_btn(btn_clear);
     lv_obj_set_size(btn_clear, 200, 60);
     lv_obj_align(btn_clear, LV_ALIGN_TOP_MID, 105, 270);
     lv_obj_add_event_cb(btn_clear, dtc_clear_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -472,6 +480,7 @@ static void create_dtc_screen(void)
 
     // Service-Reset darunter
     lv_obj_t *btn_service = lv_btn_create(scr_dtc);
+    set_dark_blue_btn(btn_service);
     lv_obj_set_size(btn_service, 300, 60);
     lv_obj_align(btn_service, LV_ALIGN_TOP_MID, 0, 345);
     lv_obj_add_event_cb(btn_service, dtc_service_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -516,6 +525,7 @@ static void create_service_screen(void)
 
     for (int i = 0; i < SERVICE_FUNC_COUNT; i++) {
         lv_obj_t *btn = lv_btn_create(scr_service);
+        set_dark_blue_btn(btn);
         lv_obj_set_size(btn, 300, 60);
         lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 75 + i * 75);
         lv_obj_add_event_cb(btn, service_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -649,13 +659,6 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_text_font(multi_rpm_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(multi_water_label, &lv_font_montserrat_28, 0);
 
-    // OBD2-Batteriespannung (live per CAN, Mode 01 PID 0x42) - mittig zwischen
-    // Gaspedal- (field_x[1]) und Drehzahlfeld (field_x[2]), tiefer als die Feldreihe
-    multi_obd2_bat_label = lv_label_create(scr_multi);
-    lv_obj_set_style_text_color(multi_obd2_bat_label, lv_color_white(), 0);
-    lv_obj_align(multi_obd2_bat_label, LV_ALIGN_CENTER, (field_x[1] + field_x[2]) / 2, 110);
-    lv_label_set_text(multi_obd2_bat_label, "-");
-
     // Schaltanzeige-Kaestchen (initial leer/transparent, ueber den
     // Hintergrund-Kaesten positioniert)
     for (int i = 0; i < 6; i++) {
@@ -754,20 +757,24 @@ void BMW_UI_Update(void)
         }
     }
 
-    if (anim_done) {
-        // Batteriespannung live vom Sensor
-        current_bat_voltage = BAT_analogVolts;
+    // Datenquelle (BLE-OBD2 oder MCP2515-CAN) fuer Motordaten UND
+    // Batteriespannung - beide kommen live vom Fahrzeug, nicht vom
+    // Board-ADC (der misst nur die interne Versorgungsspannung des
+    // Displays, nicht die Bordnetzspannung des Autos).
+    bool use_ble_src = (g_data_source == DATA_SRC_BLE_OBD);
+    float obd2_bat = use_ble_src ? BLE_OBD_bat_voltage() : CAN_OBD2_bat_voltage();
 
-        // Motordaten live von der eingestellten Datenquelle (BLE-OBD2 oder
-        // MCP2515-CAN), falls online - sonst bleiben die Platzhalter stehen
-        bool use_ble = (g_data_source == DATA_SRC_BLE_OBD);
-        bool source_online = use_ble ? BLE_OBD_online() : CAN_OBD2_online();
+    if (anim_done) {
+        // Motordaten live von der eingestellten Datenquelle, falls online -
+        // sonst bleiben die Platzhalter stehen
+        bool source_online = use_ble_src ? BLE_OBD_online() : CAN_OBD2_online();
         if (source_online) {
-            current_speed_kmh    = use_ble ? BLE_OBD_speed_kmh()    : CAN_OBD2_speed_kmh();
-            current_rpm          = use_ble ? BLE_OBD_rpm()          : CAN_OBD2_rpm();
-            current_water_temp   = use_ble ? BLE_OBD_water_temp()   : CAN_OBD2_water_temp();
-            current_throttle_pct = use_ble ? BLE_OBD_throttle_pct() : CAN_OBD2_throttle_pct();
+            current_speed_kmh    = use_ble_src ? BLE_OBD_speed_kmh()    : CAN_OBD2_speed_kmh();
+            current_rpm          = use_ble_src ? BLE_OBD_rpm()          : CAN_OBD2_rpm();
+            current_water_temp   = use_ble_src ? BLE_OBD_water_temp()   : CAN_OBD2_water_temp();
+            current_throttle_pct = use_ble_src ? BLE_OBD_throttle_pct() : CAN_OBD2_throttle_pct();
         }
+        if (obd2_bat > 0.0f) current_bat_voltage = obd2_bat;
     }
 
     lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_water_temp);
@@ -777,9 +784,18 @@ void BMW_UI_Update(void)
         // CONFIG_LV_SPRINTF_USE_FLOAT kein "%f" versteht und dann nur die
         // literalen Format-Reste ("fV") ausgibt - deshalb hier echtes
         // snprintf (newlib, mit Float-Unterstuetzung) in einen Puffer.
+        // Solange noch keine OBD2-Antwort da war (und die Startanimation
+        // vorbei ist), zeigt das Feld den BLE-Verbindungsstatus statt einer
+        // erfundenen Spannung.
         char buf[16];
-        snprintf(buf, sizeof(buf), "%.1fV", current_bat_voltage);
-        lv_label_set_text(multi_bat_label, buf);
+        if (!anim_done || obd2_bat > 0.0f) {
+            snprintf(buf, sizeof(buf), "%.1fV", current_bat_voltage);
+            lv_label_set_text(multi_bat_label, buf);
+        } else if (use_ble_src) {
+            lv_label_set_text_fmt(multi_bat_label, "BLE: %s", BLE_OBD_status());
+        } else {
+            lv_label_set_text(multi_bat_label, "-");
+        }
     }
     lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
     lv_label_set_text_fmt(multi_rpm_label, "%d", (int)current_rpm);
@@ -788,18 +804,6 @@ void BMW_UI_Update(void)
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
     for (int i = 0; i < 8; i++) {
         lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
-    }
-
-    // Live OBD2-Batteriespannung, solange noch keine Antwort da war bleibt
-    // der Platzhalter stehen
-    bool use_ble_src = (g_data_source == DATA_SRC_BLE_OBD);
-    float obd2_bat = use_ble_src ? BLE_OBD_bat_voltage() : CAN_OBD2_bat_voltage();
-    if (obd2_bat > 0.0f) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%.1fV", obd2_bat);
-        lv_label_set_text(multi_obd2_bat_label, buf);
-    } else if (use_ble_src) {
-        lv_label_set_text_fmt(multi_obd2_bat_label, "BLE: %s", BLE_OBD_status());
     }
 
     // RX/TX-Punkte: erscheinen nach dem ersten empfangenen Datum, leuchten

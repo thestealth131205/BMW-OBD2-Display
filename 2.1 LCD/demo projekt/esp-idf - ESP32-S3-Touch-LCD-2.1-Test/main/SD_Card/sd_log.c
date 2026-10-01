@@ -16,7 +16,11 @@
 
 #define SD_LOG_PATH   "/sdcard/obd_log.txt"
 #define SD_LOG_BUF    16384   // RAM-Puffer, wird vom Schreib-Task geleert
-#define SD_LOG_LINE   200     // max. Laenge einer Zeile inkl. Zeitstempel/CRLF
+#define SD_LOG_LINE   320     // max. Laenge einer Zeile inkl. Zeitstempel/CRLF -
+                               // muss die laengste COREDUMP-Backtrace-Zeile aus
+                               // main.c (bis zu 16 Adressen) vollstaendig fassen,
+                               // sonst wird der fuer die Fehlersuche wichtigste
+                               // Teil (das Ende der Adressliste) abgeschnitten
 #define SD_LOG_FLUSH_MS 300
 
 static FILE *s_file = NULL;

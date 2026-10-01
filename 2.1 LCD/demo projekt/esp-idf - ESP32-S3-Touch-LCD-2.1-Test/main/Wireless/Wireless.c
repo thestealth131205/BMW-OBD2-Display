@@ -161,6 +161,11 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
 void BLE_Init(void *arg)
 {
+    // Kurze Verzoegerung, damit die restliche Peripherie-Initialisierung in
+    // app_main (Display/QSPI, I2C, SD) nicht zeitgleich mit dem schweren
+    // BT-Controller-/Bluedroid-Start um Bus-/CPU-Zeit konkurriert.
+    vTaskDelay(pdMS_TO_TICKS(700));
+
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t ret = esp_bt_controller_init(&bt_cfg);                                            
