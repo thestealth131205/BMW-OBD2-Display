@@ -28,15 +28,8 @@ CONFIG_BT_BTU_TASK_STACK_SIZE=6144
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
-# Verdacht auf verzerrtes/verschobenes Bild (RGB-Panel-Framebuffer liegt in
-# PSRAM, .flags.fb_in_psram=true in ST7701S.c): Wenn der Flash-Cache kurz
-# deaktiviert wird (z.B. waehrend eines NVS-/Flash-Schreibvorgangs durch
-# Bluetooth oder das SD-Log), kann die vsync-/frame-done-ISR des RGB-Panels
-# aussetzen und den DMA-Scan-Zaehler gegenueber dem Panel-Timing versetzen -
-# das Bild bleibt dann dauerhaft verschoben/zerrissen stehen, auch nach
-# vollstaendigem Neuzeichnen (full_refresh=true wechselt nur den Inhalt,
-# nicht die Panel-Synchronisation). Haelt die ISR und das zugehoerige GDMA
-# auch bei deaktiviertem Cache lauffaehig. Mangels Reproduktion am
-# Schreibtisch nicht bestaetigt.
-CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
-CONFIG_GDMA_ISR_IRAM_SAFE=y
+# CONFIG_LCD_RGB_ISR_IRAM_SAFE / CONFIG_GDMA_ISR_IRAM_SAFE wurden in v1.0.9
+# versuchsweise gegen ein verzerrtes Bild ergaenzt, haben aber den Framebuffer-
+# in-PSRAM-Aufbau (fb_in_psram=true in ST7701S.c, kein Bounce-Buffer) komplett
+# unbrauchbar gemacht - Display blieb dauerhaft schwarz. In v1.0.10 wieder
+# entfernt.
