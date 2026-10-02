@@ -6,6 +6,11 @@
 
 static const char *LCD_TAG = "LCD";
 
+#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+extern SemaphoreHandle_t sem_vsync_end;
+extern SemaphoreHandle_t sem_gui_ready;
+#endif
+
 void ioexpander_init(){};
 void ioexpander_write_cmd(){};
 void ioexpander_write_data(){};

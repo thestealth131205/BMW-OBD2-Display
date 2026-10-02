@@ -133,8 +133,8 @@ static void set_dark_bg(lv_obj_t *obj)
 // gedrueckten Zustand, sonst blitzt beim Antippen wieder das helle Blau auf)
 static void set_dark_blue_btn(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 3), 0);
-    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 2), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 4), 0);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_BLUE, 3), LV_STATE_PRESSED);
 }
 
 // Bild-Nadel um den Meter-Mittelpunkt rotieren (in Ruhestellung nach 6 Uhr).
