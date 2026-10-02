@@ -33,3 +33,27 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # in-PSRAM-Aufbau (fb_in_psram=true in ST7701S.c, kein Bounce-Buffer) komplett
 # unbrauchbar gemacht - Display blieb dauerhaft schwarz. In v1.0.10 wieder
 # entfernt.
+
+# Bildverzerrung (vertauschte/verschobene Multi-Kachel-Felder nach der
+# Startanimation) ist KEIN Logikfehler in bmw_ui.c, sondern das bekannte
+# Tearing der RGB-Panel-Doppel-Framebuffer-Betriebsart: Der Waveshare-
+# Beispielcode (main/Kconfig.projbuild) setzt standardmaessig
+# EXAMPLE_DOUBLE_FB=y - zwei volle 480x480-Framebuffer direkt in PSRAM,
+# LVGL zeichnet mit full_refresh=true komplett in den jeweils anderen Puffer,
+# ohne dass ein Vsync-Semaphor das Scannen der RGB-DMA mit dem Fertigwerden
+# des Zeichnens synchronisiert (CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+# haengt an "depends on !EXAMPLE_DOUBLE_FB" und war nie aktiv). Dieser Zustand
+# bestand schon vor v1.0.7 unveraendert, v1.0.7 hat nur Logging/Coredump
+# geaendert, keinen Display-Code.
+# Fix: zurueck auf die vom esp_lcd-RGB-Treiber vorgesehene Tearing-freie
+# Betriebsart - ein Framebuffer in PSRAM + kleiner interner Bounce-Buffer
+# (DMA liest nur aus dem Bounce-Buffer, nie direkt aus PSRAM) + Vsync-Semaphor-
+# Sync (Code dafuer existiert bereits in ST7701S.c/LVGL_Driver.c, war nur per
+# Kconfig deaktiviert). Anders als der v1.0.9-Versuch oben wird hier zusaetzlich
+# auch tatsaechlich auf Single-Framebuffer+Bounce-Buffer umgeschaltet, nicht
+# nur die IRAM-Safe-Flags auf der (dafuer nicht vorgesehenen) Doppel-FB-PSRAM-
+# Variante draufgesetzt - das war die eigentliche invalide Kombination, die in
+# v1.0.9 zum Schwarzbild fuehrte.
+CONFIG_EXAMPLE_DOUBLE_FB=n
+CONFIG_EXAMPLE_USE_BOUNCE_BUFFER=y
+CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM=y
