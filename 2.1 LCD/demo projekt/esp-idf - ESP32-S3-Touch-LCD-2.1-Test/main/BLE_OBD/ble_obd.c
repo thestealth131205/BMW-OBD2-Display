@@ -23,6 +23,10 @@
 
 static const char *TAG = "BLE_OBD";
 
+// Der per ATRV abgefragte Wert lag im Vergleich mit einem Referenzgeraet
+// (Carly) durchgehend 0.31V zu niedrig - Korrektur per Nutzermessung.
+#define BAT_VOLTAGE_CORRECTION 0.31f
+
 // Log auf Konsole UND (falls Karte vorhanden) fortlaufend auf die SD-Karte
 #define OBD_LOGI(fmt, ...) do { ESP_LOGI(TAG, fmt, ##__VA_ARGS__); SD_Log("I " fmt, ##__VA_ARGS__); } while (0)
 #define OBD_LOGW(fmt, ...) do { ESP_LOGW(TAG, fmt, ##__VA_ARGS__); SD_Log("W " fmt, ##__VA_ARGS__); } while (0)
@@ -811,7 +815,7 @@ static void ble_obd_task(void *arg)
             last_bat_poll = now;
             if (send_at_cmd("ATRV", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 float v = strtof(resp, NULL);
-                if (v > 0.0f) s_bat_voltage = v;
+                if (v > 0.0f) s_bat_voltage = v + BAT_VOLTAGE_CORRECTION;
             }
         }
 
