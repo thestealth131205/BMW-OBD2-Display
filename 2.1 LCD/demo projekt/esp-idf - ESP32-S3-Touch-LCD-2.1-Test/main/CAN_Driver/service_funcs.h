@@ -21,10 +21,10 @@ typedef struct {
 static const service_func_t SERVICE_FUNCS[] = {
     // Kombiinstrument (0x611), CBS-Routine 0x31 01 FF <Typ>; Typ 0x01 = Motoroel
     // (wie bisheriger Service-Reset), 0x02 = Bremsbelaege - Typ geraten
-    { "Oel Service Reset",       0x611, 4, {0x31, 0x01, 0xFF, 0x01} },
-    { "Bremsen Verschleiss",     0x611, 4, {0x31, 0x01, 0xFF, 0x02} },
+    { "Oil reset",                0x611, 4, {0x31, 0x01, 0xFF, 0x01} },
+    { "Brake reset",              0x611, 4, {0x31, 0x01, 0xFF, 0x02} },
     // DSC-Steuergeraet bzw. DME: Routine-ID unbekannt
-    { "Bremsen entlueften",      0x000, 0, {0} },
-    { "NOx Regeneration",        0x000, 0, {0} },
+    { "Brake Bleed",              0x000, 0, {0} },
+    { "NOx Regen",                0x000, 0, {0} },
 };
 #define SERVICE_FUNC_COUNT ((int)(sizeof(SERVICE_FUNCS) / sizeof(SERVICE_FUNCS[0])))

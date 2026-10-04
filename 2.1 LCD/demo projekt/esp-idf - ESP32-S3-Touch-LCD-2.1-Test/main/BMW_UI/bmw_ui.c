@@ -442,55 +442,65 @@ static void create_dtc_screen(void)
     set_dark_bg(scr_dtc);
     lv_obj_clear_flag(scr_dtc, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Titel weiter von der oberen Rundung des Panels weggerueckt (y 15 -> 35):
+    // bei y=15 faellt ein Teil des Textes in die abgeschnittene Kante des
+    // runden Displays und verschwindet dort.
     lv_obj_t *title = lv_label_create(scr_dtc);
     lv_label_set_text(title, "FEHLERCODES");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
-    // Obere Haelfte: scrollbare Liste der ausgelesenen Fehlercodes
+    // Liste der ausgelesenen Fehlercodes: deutlich mehr Platz (Hoehe 190 -> 225)
     lv_obj_t *list_box = lv_obj_create(scr_dtc);
     set_dark_bg(list_box);
-    lv_obj_set_size(list_box, 440, 190);
-    lv_obj_align(list_box, LV_ALIGN_TOP_MID, 0, 55);
+    lv_obj_set_size(list_box, 420, 225);
+    lv_obj_align(list_box, LV_ALIGN_TOP_MID, 0, 65);
     lv_obj_set_scroll_dir(list_box, LV_DIR_VER);
 
     dtc_list_label = lv_label_create(list_box);
     lv_label_set_long_mode(dtc_list_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(dtc_list_label, 410);
+    lv_obj_set_style_text_font(dtc_list_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_width(dtc_list_label, 390);
     lv_obj_align(dtc_list_label, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
 
-    // Auslesen / Loeschen nebeneinander
+    dtc_status_label = lv_label_create(scr_dtc);
+    lv_obj_set_style_text_font(dtc_status_label, &lv_font_montserrat_28, 0);
+    lv_label_set_text(dtc_status_label, "");
+    lv_obj_align(dtc_status_label, LV_ALIGN_TOP_MID, 0, 300);
+
+    // Auslesen / Loeschen nebeneinander, schmaler als vorher (200 -> 170),
+    // dadurch rutschen alle drei Buttons weiter nach unten (325 statt 270)
+    // und die Schrift (28pt statt Standard) hat trotzdem genug Platz.
     lv_obj_t *btn_read = lv_btn_create(scr_dtc);
     set_dark_blue_btn(btn_read);
-    lv_obj_set_size(btn_read, 200, 60);
-    lv_obj_align(btn_read, LV_ALIGN_TOP_MID, -105, 270);
+    lv_obj_set_size(btn_read, 170, 64);
+    lv_obj_align(btn_read, LV_ALIGN_TOP_MID, -90, 325);
     lv_obj_add_event_cb(btn_read, dtc_read_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *read_lbl = lv_label_create(btn_read);
+    lv_obj_set_style_text_font(read_lbl, &lv_font_montserrat_28, 0);
     lv_label_set_text(read_lbl, "Auslesen");
     lv_obj_center(read_lbl);
 
     lv_obj_t *btn_clear = lv_btn_create(scr_dtc);
     set_dark_blue_btn(btn_clear);
-    lv_obj_set_size(btn_clear, 200, 60);
-    lv_obj_align(btn_clear, LV_ALIGN_TOP_MID, 105, 270);
+    lv_obj_set_size(btn_clear, 170, 64);
+    lv_obj_align(btn_clear, LV_ALIGN_TOP_MID, 90, 325);
     lv_obj_add_event_cb(btn_clear, dtc_clear_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *clear_lbl = lv_label_create(btn_clear);
+    lv_obj_set_style_text_font(clear_lbl, &lv_font_montserrat_28, 0);
     lv_label_set_text(clear_lbl, "Loeschen");
     lv_obj_center(clear_lbl);
 
     // Service-Reset darunter
     lv_obj_t *btn_service = lv_btn_create(scr_dtc);
     set_dark_blue_btn(btn_service);
-    lv_obj_set_size(btn_service, 300, 60);
-    lv_obj_align(btn_service, LV_ALIGN_TOP_MID, 0, 345);
+    lv_obj_set_size(btn_service, 260, 64);
+    lv_obj_align(btn_service, LV_ALIGN_TOP_MID, 0, 400);
     lv_obj_add_event_cb(btn_service, dtc_service_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *service_lbl = lv_label_create(btn_service);
+    lv_obj_set_style_text_font(service_lbl, &lv_font_montserrat_28, 0);
     lv_label_set_text(service_lbl, "Service Reset");
     lv_obj_center(service_lbl);
-
-    dtc_status_label = lv_label_create(scr_dtc);
-    lv_label_set_text(dtc_status_label, "");
-    lv_obj_align(dtc_status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
 
     lv_obj_add_event_cb(scr_dtc, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
@@ -526,10 +536,11 @@ static void create_service_screen(void)
     for (int i = 0; i < SERVICE_FUNC_COUNT; i++) {
         lv_obj_t *btn = lv_btn_create(scr_service);
         set_dark_blue_btn(btn);
-        lv_obj_set_size(btn, 300, 60);
-        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 75 + i * 75);
+        lv_obj_set_size(btn, 420, 70);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 80 + i * 80);
         lv_obj_add_event_cb(btn, service_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_48, 0);
         lv_label_set_text(lbl, SERVICE_FUNCS[i].label);
         lv_obj_center(lbl);
     }
