@@ -17,6 +17,7 @@ typedef enum {
 static void Onboard_create(lv_obj_t * parent);
 
 static void ta_event_cb(lv_event_t * e);
+static void wifi_update_switch_cb(lv_event_t * e);
 void example1_increase_lvgl_tick(lv_timer_t * t);
 /**********************
  *  STATIC VARIABLES
