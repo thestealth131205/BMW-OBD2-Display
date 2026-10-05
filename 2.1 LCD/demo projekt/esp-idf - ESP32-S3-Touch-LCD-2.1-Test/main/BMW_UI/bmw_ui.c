@@ -748,15 +748,15 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // - mit rotation=45 lag der Ring deshalb um 90 Grad gegenueber der Nadel
     // verschoben. Eigene Skala mit rotation=135 (=45+90) kompensiert das, der
     // Ring beginnt jetzt exakt dort, wo die Nadel bei ihrem Minimalwert steht.
-    // r_mod=24 schiebt den Ring nach aussen (ueber die Breite von 8px hinaus
-    // nochmal um eine volle Ringbreite weiter als zuvor), damit er nicht die
-    // Skalenteilstriche ueberlappt und deutlich sichtbar aussen liegt.
+    // r_mod schiebt den Ring nach aussen. War zuletzt auf 24 (volle Ringbreite
+    // von 8px plus Puffer), das lag zu weit aussen - um die halbe Ringbreite
+    // (4px) wieder nach innen auf 20 korrigiert.
     multi_ring_scale = lv_meter_add_scale(multi_meter);
     lv_meter_set_scale_range(multi_meter, multi_ring_scale,
                               MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
-    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 24);
-    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 24);
-    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 24);
+    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 20);
+    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 20);
+    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 20);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
