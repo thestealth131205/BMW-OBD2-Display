@@ -73,6 +73,18 @@ static float current_water_temp      = 105.0f;
 #define MULTI_WATER_SCALE_MIN   40
 #define MULTI_WATER_SCALE_MAX  119
 
+// Farbring (3 Bogen-Indikatoren auf derselben Hilfsskala wie die Nadel, siehe
+// multi_needle_scale): waechst mit der Temperatur mit, Neongelb bis 100 Grad,
+// ab 100 Grad Orange (erst von dieser Stelle an, kein Verblassen davor), ab
+// 115 Grad Rot.
+#define MULTI_WATER_RING_ORANGE_AT 100
+#define MULTI_WATER_RING_RED_AT    115
+
+// Derselbe Farbring im Drehzahl-Modus der grossen Anzeige: Neongelb bis
+// 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min).
+#define MULTI_RPM_RING_ORANGE_AT  6500
+#define MULTI_RPM_RING_RED_AT     6900
+
 static uint32_t anim_start_tick;
 static bool anim_done = false;
 
@@ -85,14 +97,29 @@ static lv_obj_t *scr_service;
 static lv_obj_t *service_status_label;
 
 static lv_obj_t *multi_meter;
+static lv_meter_scale_t *multi_needle_scale;
 static lv_meter_indicator_t *multi_needle;
+static lv_meter_indicator_t *multi_ring_yellow;
+static lv_meter_indicator_t *multi_ring_orange;
+static lv_meter_indicator_t *multi_ring_red;
+
+// Grosse Anzeige (Ring+Nadel) in der Multi-Kachel: per Einstellungs-Screen
+// umschaltbar zwischen Kuehlmitteltemperatur (Standard) und Drehzahl.
+typedef enum {
+    MULTI_GAUGE_WATER,
+    MULTI_GAUGE_RPM,
+} multi_gauge_mode_t;
+static multi_gauge_mode_t g_multi_gauge_mode = MULTI_GAUGE_WATER;
 static lv_obj_t *multi_speed_label;
 static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
 static lv_obj_t *multi_rpm_label;
 static lv_obj_t *multi_water_label;
-// Schwarze Umrandung (8 versetzte Kopien) hinter dem Wasser-Feld, damit die
-// weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
+// Schwarze Umrandung (8 versetzte Kopien) hinter jedem der 4 Zusatzfelder,
+// damit die weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
+static lv_obj_t *multi_bat_outline[8];
+static lv_obj_t *multi_throttle_outline[8];
+static lv_obj_t *multi_rpm_outline[8];
 static lv_obj_t *multi_water_outline[8];
 
 static lv_obj_t *multi_rx_dot;
@@ -142,10 +169,12 @@ static void set_dark_blue_btn(lv_obj_t *btn)
 // 45 rotation), damit die 6-Uhr-Ruhestellung mit der Skalenluecke uebereinstimmt
 // (identische Logik wie im C6-Projekt, addImageNeedle()).
 static lv_meter_indicator_t *add_image_needle(lv_obj_t *meter, int32_t min_val, int32_t max_val,
-                                              const lv_img_dsc_t *img, lv_coord_t pivot_x, lv_coord_t pivot_y)
+                                              const lv_img_dsc_t *img, lv_coord_t pivot_x, lv_coord_t pivot_y,
+                                              lv_meter_scale_t **out_scale)
 {
     lv_meter_scale_t *needle_scale = lv_meter_add_scale(meter);
     lv_meter_set_scale_range(meter, needle_scale, min_val, max_val, 270, 45);
+    if (out_scale) *out_scale = needle_scale;
     return lv_meter_add_needle_img(meter, needle_scale, img, pivot_x, pivot_y);
 }
 
@@ -347,6 +376,25 @@ static void log_switch_cb(lv_event_t *e)
     }
 }
 
+static lv_obj_t *gauge_mode_label;
+
+// Umschalter fuer die grosse Ring+Nadel-Anzeige der Multi-Kachel: Wasser-
+// temperatur (Standard, Skala 40-119 Grad) oder Drehzahl (Skala 0-8000 U/min).
+// Der Farbring ist nur im Wasser-Modus relevant, siehe BMW_UI_Update().
+static void gauge_mode_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool rpm_mode = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    g_multi_gauge_mode = rpm_mode ? MULTI_GAUGE_RPM : MULTI_GAUGE_WATER;
+    lv_label_set_text(gauge_mode_label, rpm_mode ? "Anzeige: Drehzahl" : "Anzeige: Wasser");
+    if (rpm_mode) {
+        lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
+    } else {
+        lv_meter_set_scale_range(multi_meter, multi_needle_scale,
+                                  MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 45);
+    }
+}
+
 // Einstellungs-Screen mit Primaer-/Sekundaerfarb-Auswahl, erreichbar per
 // Doppeltipp in der Bildschirmmitte der Multi-Ansicht.
 static void create_settings_screen(void)
@@ -370,6 +418,14 @@ static void create_settings_screen(void)
     log_status_label = lv_label_create(scr_settings);
     lv_label_set_text(log_status_label, "");
     lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
+
+    gauge_mode_label = lv_label_create(scr_settings);
+    lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
+    lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_RIGHT, -15, 12);
+
+    lv_obj_t *gauge_mode_switch = lv_switch_create(scr_settings);
+    lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_RIGHT, -15, 34);
+    lv_obj_add_event_cb(gauge_mode_switch, gauge_mode_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     create_color_picker_column(scr_settings, "Primaer", -115, true, primary_color_ctx);
     create_color_picker_column(scr_settings, "Sekundaer", 115, false, secondary_color_ctx);
@@ -599,7 +655,14 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_coord_t init_pivot_x, init_pivot_y;
     get_base_needle_img(&init_needle_img, &init_pivot_x, &init_pivot_y);
     multi_needle = add_image_needle(multi_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
-                                     init_needle_img, init_pivot_x, init_pivot_y);
+                                     init_needle_img, init_pivot_x, init_pivot_y, &multi_needle_scale);
+
+    // Farbring auf derselben Hilfsskala wie die Nadel (gleiche Ausrichtung/
+    // Winkel), 3 Bogen-Indikatoren uebereinander - je nach Temperatur ist
+    // immer nur einer davon ein nicht-leeres Segment (siehe BMW_UI_Update()).
+    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, LV_COLOR_MAKE(224, 255, 0), 0);
+    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_RED), 0);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
@@ -639,24 +702,31 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
 
     // 4 Zusatzfelder (Batterie/Gaspedal/Drehzahl/Wasser)
     const int field_x[4] = {-165, -55, 55, 165};
-    multi_bat_label      = lv_label_create(scr_multi);
-    multi_throttle_label = lv_label_create(scr_multi);
-    multi_rpm_label      = lv_label_create(scr_multi);
 
-    // Schwarze Umrandungs-Kopien VOR dem eigentlichen Wasser-Label erzeugen,
-    // damit sie im Z-Order dahinter liegen (2px-Versatz in 8 Richtungen)
+    // Schwarze Umrandungs-Kopien VOR den eigentlichen Labels erzeugen, damit
+    // sie im Z-Order dahinter liegen (2px-Versatz in 8 Richtungen) - fuer
+    // alle 4 Zusatzfelder (Batterie/Gaspedal/Drehzahl/Wasser)
     static const lv_coord_t outline_off[8][2] = {
         {-2, 0}, {2, 0}, {0, -2}, {0, 2}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2},
     };
-    for (int i = 0; i < 8; i++) {
-        multi_water_outline[i] = lv_label_create(scr_multi);
-        lv_obj_set_style_text_font(multi_water_outline[i], &lv_font_montserrat_28, 0);
-        lv_obj_set_style_text_color(multi_water_outline[i], lv_color_black(), 0);
-        lv_obj_align(multi_water_outline[i], LV_ALIGN_CENTER,
-                     field_x[3] + outline_off[i][0], 60 + outline_off[i][1]);
-        lv_label_set_text(multi_water_outline[i], "-");
+    lv_obj_t **outline_fields[4] = {
+        multi_bat_outline, multi_throttle_outline, multi_rpm_outline, multi_water_outline,
+    };
+    for (int f = 0; f < 4; f++) {
+        for (int i = 0; i < 8; i++) {
+            lv_obj_t *lbl = lv_label_create(scr_multi);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
+            lv_obj_align(lbl, LV_ALIGN_CENTER,
+                         field_x[f] + outline_off[i][0], 60 + outline_off[i][1]);
+            lv_label_set_text(lbl, "-");
+            outline_fields[f][i] = lbl;
+        }
     }
 
+    multi_bat_label      = lv_label_create(scr_multi);
+    multi_throttle_label = lv_label_create(scr_multi);
+    multi_rpm_label      = lv_label_create(scr_multi);
     multi_water_label    = lv_label_create(scr_multi);
     lv_obj_t *fields[4] = {multi_bat_label, multi_throttle_label, multi_rpm_label, multi_water_label};
     for (int i = 0; i < 4; i++) {
@@ -788,7 +858,10 @@ void BMW_UI_Update(void)
         if (obd2_bat > 0.0f) current_bat_voltage = obd2_bat;
     }
 
-    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)current_water_temp);
+    // Grosse Ring+Nadel-Anzeige: je nach Einstellungs-Umschalter Wasser-
+    // temperatur (Standard) oder Drehzahl
+    float big_gauge_val = (g_multi_gauge_mode == MULTI_GAUGE_RPM) ? current_rpm : current_water_temp;
+    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)big_gauge_val);
     lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
     {
         // lv_label_set_text_fmt nutzt LVGLs eigenen (v)snprintf, der ohne
@@ -802,10 +875,15 @@ void BMW_UI_Update(void)
         if (!anim_done || obd2_bat > 0.0f) {
             snprintf(buf, sizeof(buf), "%.1fV", current_bat_voltage);
             lv_label_set_text(multi_bat_label, buf);
+            for (int i = 0; i < 8; i++) lv_label_set_text(multi_bat_outline[i], buf);
         } else if (use_ble_src) {
             lv_label_set_text_fmt(multi_bat_label, "BLE: %s", BLE_OBD_status());
+            for (int i = 0; i < 8; i++) {
+                lv_label_set_text_fmt(multi_bat_outline[i], "BLE: %s", BLE_OBD_status());
+            }
         } else {
             lv_label_set_text(multi_bat_label, "-");
+            for (int i = 0; i < 8; i++) lv_label_set_text(multi_bat_outline[i], "-");
         }
     }
     lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
@@ -814,6 +892,8 @@ void BMW_UI_Update(void)
     lv_obj_set_style_text_color(multi_water_label,
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
     for (int i = 0; i < 8; i++) {
+        lv_label_set_text_fmt(multi_throttle_outline[i], "%d%%", (int)current_throttle_pct);
+        lv_label_set_text_fmt(multi_rpm_outline[i], "%d", (int)current_rpm);
         lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
     }
 
@@ -887,8 +967,10 @@ void BMW_UI_Update(void)
         lv_obj_set_style_bg_opa(rpm_boxes[i], opa, 0);
     }
 
-    // Nadelfarbe: Basis = eingestellte Sekundaerfarbe (Standard Rot) bis
-    // 95 Grad, ab 95 Grad neongelb, ab 106 Grad blinkt die Nadel (250ms-Takt,
+    // Nadelfarbe + Farbring: nur relevant im Wasser-Modus der grossen Anzeige
+    // (Schwellen sind auf Kuehlmitteltemperatur zugeschnitten, nicht auf
+    // Drehzahl). Basis = eingestellte Sekundaerfarbe (Standard Rot) bis
+    // 95 Grad, ab 95 Grad neongelb, ab 112 Grad blinkt die Nadel (250ms-Takt,
     // wie das Schaltpunkt-Blinken der Drehzahl-LEDs im C6-Projekt)
     const lv_img_dsc_t *base_needle_img;
     lv_coord_t base_pivot_x, base_pivot_y;
@@ -897,9 +979,9 @@ void BMW_UI_Update(void)
     LV_UNUSED(base_pivot_y);
     const void *needle_src = base_needle_img;
     lv_opa_t needle_opa = LV_OPA_COVER;
-    if (current_water_temp >= 95.0f) {
+    if (g_multi_gauge_mode == MULTI_GAUGE_WATER && current_water_temp >= 95.0f) {
         needle_src = &multi_needle_yellow_img;
-        if (current_water_temp >= 106.0f) {
+        if (current_water_temp >= 112.0f) {
             static bool blink_state = false;
             static uint32_t last_blink = 0;
             if (lv_tick_elaps(last_blink) > 250) {
@@ -913,5 +995,51 @@ void BMW_UI_Update(void)
         multi_needle->type_data.needle_img.src = needle_src;
         multi_needle->opa = needle_opa;
         lv_obj_invalidate(multi_meter);
+    }
+
+    // Farbring: waechst von aussen entlang der Skalenteilstriche mit.
+    // Wasser-Modus: Neongelb bis 100 Grad, ab 100 Grad Orange (das
+    // Orange-Segment beginnt erst genau an dieser Stelle, kein Verblassen
+    // davor), ab 115 Grad Rot. Drehzahl-Modus: dieselbe Logik auf die
+    // 0-8000 U/min-Skala uebertragen, Orange ab 6500, Rot ab 6900 U/min.
+    if (g_multi_gauge_mode == MULTI_GAUGE_WATER) {
+        float t = current_water_temp;
+        float yellow_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
+        if (yellow_end < MULTI_WATER_SCALE_MIN) yellow_end = MULTI_WATER_SCALE_MIN;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+
+        float orange_end = t < (float)MULTI_WATER_RING_RED_AT ? t : (float)MULTI_WATER_RING_RED_AT;
+        if (orange_end < (float)MULTI_WATER_RING_ORANGE_AT) orange_end = (float)MULTI_WATER_RING_ORANGE_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, (int32_t)orange_end);
+
+        float red_end = t > MULTI_WATER_SCALE_MAX ? MULTI_WATER_SCALE_MAX : t;
+        if (red_end < (float)MULTI_WATER_RING_RED_AT) red_end = (float)MULTI_WATER_RING_RED_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
+    } else if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
+        float t = current_rpm;
+        float yellow_end = t < (float)MULTI_RPM_RING_ORANGE_AT ? t : (float)MULTI_RPM_RING_ORANGE_AT;
+        if (yellow_end < 0.0f) yellow_end = 0.0f;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+
+        float orange_end = t < (float)MULTI_RPM_RING_RED_AT ? t : (float)MULTI_RPM_RING_RED_AT;
+        if (orange_end < (float)MULTI_RPM_RING_ORANGE_AT) orange_end = (float)MULTI_RPM_RING_ORANGE_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, (int32_t)orange_end);
+
+        float red_end = t > 8000.0f ? 8000.0f : t;
+        if (red_end < (float)MULTI_RPM_RING_RED_AT) red_end = (float)MULTI_RPM_RING_RED_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
+    } else {
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
+        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
     }
 }

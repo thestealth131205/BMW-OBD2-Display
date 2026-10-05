@@ -24,8 +24,11 @@
 static const char *TAG = "BLE_OBD";
 
 // Der per ATRV abgefragte Wert lag im Vergleich mit einem Referenzgeraet
-// (Carly) durchgehend 0.31V zu niedrig - Korrektur per Nutzermessung.
-#define BAT_VOLTAGE_CORRECTION 0.31f
+// (Carly) durchgehend zu niedrig. Bei Zuendung an zeigte das Display 11.1V
+// -- das war bereits der rohe, unkorrigierte Wert (die vorherige +0.31V-
+// Korrektur war zu diesem Zeitpunkt noch nicht aktiv). Ein Multimeter direkt
+// an der Batterie zeigte gleichzeitig 12.12V - Differenz 1.02V.
+#define BAT_VOLTAGE_CORRECTION 1.02f
 
 // Log auf Konsole UND (falls Karte vorhanden) fortlaufend auf die SD-Karte
 #define OBD_LOGI(fmt, ...) do { ESP_LOGI(TAG, fmt, ##__VA_ARGS__); SD_Log("I " fmt, ##__VA_ARGS__); } while (0)
