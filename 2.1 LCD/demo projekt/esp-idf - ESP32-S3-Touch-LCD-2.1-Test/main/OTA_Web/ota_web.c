@@ -39,6 +39,7 @@ static volatile bool s_upload_active = false;
 static volatile bool s_upload_done = false;
 static volatile bool s_upload_ok = false;
 static volatile bool s_reboot_pending = false;
+static volatile bool s_ap_busy = false;
 
 // Einfache Upload-Seite: Dateiauswahl + XHR-Upload (rohe Bytes als Body,
 // kein multipart/form-data noetig) mit Fortschrittsanzeige im Browser.
@@ -260,6 +261,33 @@ static void stop_ap_and_server(void)
     esp_wifi_start();
 }
 
+// start_ap_and_server()/stop_ap_and_server() rufen esp_wifi_stop/set_mode/
+// set_config/start und httpd_start/httpd_stop auf - alles blockierend und in
+// Kombination mit dem parallel laufenden BLE-Stack spuerbar langsam. Der
+// Schalter wird aber direkt aus dem LVGL-Event-Callback ausgeloest, der
+// innerhalb von app_mains lv_timer_handler()-Schleife laeuft - also im
+// einzigen Task auf Core 0 neben dem Idle-Task. Blockierte dieser Task lange
+// genug, kam der Idle-Task nicht mehr zum Zug und die Task-Watchdog loeste
+// einen Reset aus, sobald man den Schalter antippte (genau das beobachtete
+// Verhalten: Neustart statt eines laufenden Access Points). Deshalb laufen
+// beide Funktionen jetzt in einem eigenen Hintergrund-Task auf Core 1, der
+// LVGL-Haupttask auf Core 0 bleibt dabei frei fuer lv_timer_handler().
+static void ota_ap_start_task(void *arg)
+{
+    LV_UNUSED(arg);
+    start_ap_and_server();
+    s_ap_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void ota_ap_stop_task(void *arg)
+{
+    LV_UNUSED(arg);
+    stop_ap_and_server();
+    s_ap_busy = false;
+    vTaskDelete(NULL);
+}
+
 static void close_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
@@ -344,10 +372,11 @@ bool OTA_Web_IsEnabled(void)
 
 void OTA_Web_SetEnabled(bool enable)
 {
-    if (enable == s_enabled) {
+    if (enable == s_enabled || s_ap_busy) {
         return;
     }
     s_enabled = enable;
+    s_ap_busy = true;
 
     if (enable) {
         build_ota_screen();
@@ -355,22 +384,22 @@ void OTA_Web_SetEnabled(bool enable)
         s_progress_percent = 0;
         s_upload_active = false;
         s_upload_done = false;
-        lv_label_set_text(s_status_label, "Warte auf Upload...");
+        lv_label_set_text(s_status_label, "WLAN wird gestartet...");
         lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
         lv_scr_load(s_scr_ota);
 
-        start_ap_and_server();
         s_ui_timer = lv_timer_create(ota_ui_timer_cb, 200, NULL);
+        xTaskCreatePinnedToCore(ota_ap_start_task, "ota_ap_start", 4096, NULL, 3, NULL, 1);
         SD_Log("OTA_WEB: aktiviert (SSID=%s)", OTA_WEB_SSID);
     } else {
         if (s_ui_timer) {
             lv_timer_del(s_ui_timer);
             s_ui_timer = NULL;
         }
-        stop_ap_and_server();
         if (s_prev_screen) {
             lv_scr_load(s_prev_screen);
         }
+        xTaskCreatePinnedToCore(ota_ap_stop_task, "ota_ap_stop", 4096, NULL, 3, NULL, 1);
         SD_Log("OTA_WEB: deaktiviert");
     }
 }

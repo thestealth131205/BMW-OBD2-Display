@@ -475,12 +475,15 @@ static void create_settings_func_screen(void)
     lv_label_set_text(title, "FUNKTIONEN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
+    // TOP_MID mit Offset statt TOP_LEFT/TOP_RIGHT an der Kante: Bei diesem
+    // y-Abstand von oben liegt die Kante auf dem runden Panel innerhalb der
+    // sichtbaren Kreisflaeche zu weit aussen und wird abgeschnitten.
     lv_obj_t *log_label = lv_label_create(scr_settings_func);
     lv_label_set_text(log_label, "Datenlogging");
-    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 15, 75);
+    lv_obj_align(log_label, LV_ALIGN_TOP_MID, -85, 75);
 
     lv_obj_t *log_switch = lv_switch_create(scr_settings_func);
-    lv_obj_align(log_switch, LV_ALIGN_TOP_LEFT, 15, 97);
+    lv_obj_align(log_switch, LV_ALIGN_TOP_MID, -85, 97);
     lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     log_status_label = lv_label_create(scr_settings_func);
@@ -489,10 +492,10 @@ static void create_settings_func_screen(void)
 
     gauge_mode_label = lv_label_create(scr_settings_func);
     lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
-    lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_RIGHT, -15, 75);
+    lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_MID, 85, 75);
 
     lv_obj_t *gauge_mode_switch = lv_switch_create(scr_settings_func);
-    lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_RIGHT, -15, 97);
+    lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_MID, 85, 97);
     lv_obj_add_event_cb(gauge_mode_switch, gauge_mode_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *buzzer_label = lv_label_create(scr_settings_func);
@@ -745,14 +748,15 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // - mit rotation=45 lag der Ring deshalb um 90 Grad gegenueber der Nadel
     // verschoben. Eigene Skala mit rotation=135 (=45+90) kompensiert das, der
     // Ring beginnt jetzt exakt dort, wo die Nadel bei ihrem Minimalwert steht.
-    // r_mod=8 (= Ringbreite) schiebt den Ring zusaetzlich um seine eigene
-    // Breite nach aussen, damit er nicht die Skalenteilstriche ueberlappt.
+    // r_mod=24 schiebt den Ring nach aussen (ueber die Breite von 8px hinaus
+    // nochmal um eine volle Ringbreite weiter als zuvor), damit er nicht die
+    // Skalenteilstriche ueberlappt und deutlich sichtbar aussen liegt.
     multi_ring_scale = lv_meter_add_scale(multi_meter);
     lv_meter_set_scale_range(multi_meter, multi_ring_scale,
                               MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
-    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 8);
-    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 8);
-    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 8);
+    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 24);
+    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 24);
+    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 24);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
