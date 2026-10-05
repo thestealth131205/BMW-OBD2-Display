@@ -6,6 +6,7 @@
 #include "service_funcs.h"
 #include "PCF85063.h"
 #include "sd_log.h"
+#include "Buzzer.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_timer.h"
@@ -92,6 +93,7 @@ static bool anim_done = false;
 static lv_obj_t *scr_multi;
 static lv_obj_t *scr_demo;
 static lv_obj_t *scr_settings;
+static lv_obj_t *scr_settings_func;
 static lv_obj_t *scr_dtc;
 static lv_obj_t *scr_service;
 static lv_obj_t *service_status_label;
@@ -110,6 +112,14 @@ typedef enum {
     MULTI_GAUGE_RPM,
 } multi_gauge_mode_t;
 static multi_gauge_mode_t g_multi_gauge_mode = MULTI_GAUGE_WATER;
+
+// Warnsummer bei Kuehlmitteltemperatur >= 120 Grad, im Einstellungs-Screen
+// "Funktionen" ein-/ausschaltbar (Standard: an). g_buzzer_active haelt den
+// tatsaechlichen physischen Zustand nach, damit Buzzer_On()/_Off() (I2C-
+// Schreibzugriff auf den TCA9554-IO-Expander) nicht bei jedem 100-ms-Tick
+// erneut ausgeloest wird, sondern nur bei einem Zustandswechsel.
+static bool g_buzzer_enabled = true;
+static bool g_buzzer_active  = false;
 static lv_obj_t *multi_speed_label;
 static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
@@ -378,6 +388,12 @@ static void log_switch_cb(lv_event_t *e)
 
 static lv_obj_t *gauge_mode_label;
 
+// Vorwaerts-Deklaration: Definition folgt weiter unten (dort zusammen mit
+// den anderen Wisch-Zielen scr_dtc/scr_service dokumentiert), wird aber
+// bereits in create_settings_screen()/create_settings_func_screen() fuer
+// scr_settings/scr_settings_func gebraucht.
+static void swipe_gesture_cb(lv_event_t *e);
+
 // Umschalter fuer die grosse Ring+Nadel-Anzeige der Multi-Kachel: Wasser-
 // temperatur (Standard, Skala 40-119 Grad) oder Drehzahl (Skala 0-8000 U/min).
 // Der Farbring ist nur im Wasser-Modus relevant, siehe BMW_UI_Update().
@@ -395,8 +411,22 @@ static void gauge_mode_switch_cb(lv_event_t *e)
     }
 }
 
+// Warnsummer bei Kuehlmitteltemperatur >= 120 Grad (siehe BMW_UI_Update()),
+// hier nur ein-/ausschaltbar.
+static void buzzer_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    g_buzzer_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (!g_buzzer_enabled && g_buzzer_active) {
+        Buzzer_Off();
+        g_buzzer_active = false;
+    }
+}
+
 // Einstellungs-Screen mit Primaer-/Sekundaerfarb-Auswahl, erreichbar per
-// Doppeltipp in der Bildschirmmitte der Multi-Ansicht.
+// Doppeltipp in der Bildschirmmitte der Multi-Ansicht. Wisch nach rechts
+// fuehrt zum zweiten Einstellungs-Screen "FUNKTIONEN" (Datenlogging,
+// Anzeige-Umschalter, Warnsummer), Wisch nach links geht von dort zurueck.
 static void create_settings_screen(void)
 {
     scr_settings = lv_obj_create(NULL);
@@ -407,28 +437,13 @@ static void create_settings_screen(void)
     lv_label_set_text(title, "FARBEN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
-    lv_obj_t *log_label = lv_label_create(scr_settings);
-    lv_label_set_text(log_label, "Datenlogging");
-    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 15, 12);
-
-    lv_obj_t *log_switch = lv_switch_create(scr_settings);
-    lv_obj_align(log_switch, LV_ALIGN_TOP_LEFT, 15, 34);
-    lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-    log_status_label = lv_label_create(scr_settings);
-    lv_label_set_text(log_status_label, "");
-    lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
-
-    gauge_mode_label = lv_label_create(scr_settings);
-    lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
-    lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_RIGHT, -15, 12);
-
-    lv_obj_t *gauge_mode_switch = lv_switch_create(scr_settings);
-    lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_RIGHT, -15, 34);
-    lv_obj_add_event_cb(gauge_mode_switch, gauge_mode_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
     create_color_picker_column(scr_settings, "Primaer", -115, true, primary_color_ctx);
     create_color_picker_column(scr_settings, "Sekundaer", 115, false, secondary_color_ctx);
+
+    lv_obj_t *hint = lv_label_create(scr_settings);
+    lv_label_set_text(hint, "Wisch -> Funktionen");
+    lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -58);
 
     lv_obj_t *btn_back = lv_btn_create(scr_settings);
     set_dark_blue_btn(btn_back);
@@ -437,6 +452,60 @@ static void create_settings_screen(void)
     lv_obj_t *back_lbl = lv_label_create(btn_back);
     lv_label_set_text(back_lbl, "Zurueck");
     lv_obj_center(back_lbl);
+
+    lv_obj_add_event_cb(scr_settings, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+
+// Zweiter Einstellungs-Screen "FUNKTIONEN": Datenlogging, Umschalter
+// Wasser-/Drehzahlanzeige (beide aus dem Farben-Screen hierher verschoben,
+// da sie keine Farbeinstellungen sind) sowie neu der Warnsummer-Schalter.
+// Erreichbar per Wisch nach rechts vom Farben-Screen, Wisch nach links geht
+// zurueck.
+static void create_settings_func_screen(void)
+{
+    scr_settings_func = lv_obj_create(NULL);
+    set_dark_bg(scr_settings_func);
+    lv_obj_clear_flag(scr_settings_func, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(scr_settings_func);
+    lv_label_set_text(title, "FUNKTIONEN");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
+
+    lv_obj_t *log_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(log_label, "Datenlogging");
+    lv_obj_align(log_label, LV_ALIGN_TOP_LEFT, 15, 75);
+
+    lv_obj_t *log_switch = lv_switch_create(scr_settings_func);
+    lv_obj_align(log_switch, LV_ALIGN_TOP_LEFT, 15, 97);
+    lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    log_status_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(log_status_label, "");
+    lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
+
+    gauge_mode_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
+    lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_RIGHT, -15, 75);
+
+    lv_obj_t *gauge_mode_switch = lv_switch_create(scr_settings_func);
+    lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_RIGHT, -15, 97);
+    lv_obj_add_event_cb(gauge_mode_switch, gauge_mode_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *buzzer_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(buzzer_label, "Warnsummer ab 120\xC2\xB0""C");
+    lv_obj_align(buzzer_label, LV_ALIGN_TOP_MID, 0, 190);
+
+    lv_obj_t *buzzer_switch = lv_switch_create(scr_settings_func);
+    lv_obj_align(buzzer_switch, LV_ALIGN_TOP_MID, 0, 212);
+    lv_obj_add_state(buzzer_switch, LV_STATE_CHECKED); // Standard: an, wie g_buzzer_enabled
+    lv_obj_add_event_cb(buzzer_switch, buzzer_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *hint = lv_label_create(scr_settings_func);
+    lv_label_set_text(hint, "<- Wisch: Farben");
+    lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    lv_obj_add_event_cb(scr_settings_func, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
 // --- Fehlercode-Screen: erreichbar per Wisch nach links auf der Multi-
@@ -455,6 +524,10 @@ static void swipe_gesture_cb(lv_event_t *e)
         lv_scr_load_anim(scr_service, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     } else if (scr == scr_service && dir == LV_DIR_LEFT) {
         lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    } else if (scr == scr_settings && dir == LV_DIR_RIGHT) {
+        lv_scr_load_anim(scr_settings_func, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    } else if (scr == scr_settings_func && dir == LV_DIR_LEFT) {
+        lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     }
 }
 
@@ -755,9 +828,10 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     }
 
     // Unsichtbares Center-Overlay: 3-Sekunden-Halten -> Demo-Seite,
-    // Doppeltipp -> Einstellungs-Screen (Farben)
+    // Doppeltipp -> Einstellungs-Screen (Farben). Vergroessert (160 -> 260),
+    // da der Treffbereich dem Nutzer zu klein war.
     lv_obj_t *center_hold = lv_obj_create(scr_multi);
-    lv_obj_set_size(center_hold, 160, 160);
+    lv_obj_set_size(center_hold, 260, 260);
     lv_obj_center(center_hold);
     lv_obj_set_style_bg_opa(center_hold, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(center_hold, 0, 0);
@@ -774,9 +848,16 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // als zuvor, damit sie nicht mit der Tab-Leiste des Waveshare-Demos
     // ueberlappen. Kraeftige rote Einfaerbung beim Zurueck-Button, damit er
     // sich sichtbar von der Tab-Leiste abhebt.
+    // Alle drei Buttons mittig (statt rechtsbuendig) ueber der Tab-Leiste
+    // platziert: Bei TOP_RIGHT-Ausrichtung nahe der oberen rechten Ecke
+    // wurden sie von der runden Displayabdeckung angeschnitten (Foto des
+    // Nutzers: "BLE OBD" halb, "Zurueck" fast komplett abgeschnitten). Bei
+    // y=55 betraegt die sichtbare Breite innerhalb der runden Aussparung nur
+    // noch ca. 300px um die Bildschirmmitte (x=240) - die Gruppe (70+70+78
+    // plus 2x8px Abstand = 234px) passt dort zentriert bequem hinein.
     lv_obj_t *back_btn = lv_btn_create(scr_demo);
     lv_obj_set_size(back_btn, 78, 30);
-    lv_obj_align(back_btn, LV_ALIGN_TOP_RIGHT, -10, 55);
+    lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 279, 55);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0xCC2222), 0);
     lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(back_btn, back_to_multi_cb, LV_EVENT_CLICKED, NULL);
@@ -787,7 +868,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
 
     btn_src_mcp = lv_btn_create(scr_demo);
     lv_obj_set_size(btn_src_mcp, 70, 30);
-    lv_obj_align(btn_src_mcp, LV_ALIGN_TOP_RIGHT, -94, 55);
+    lv_obj_align(btn_src_mcp, LV_ALIGN_TOP_LEFT, 201, 55);
     lv_obj_set_style_bg_opa(btn_src_mcp, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(btn_src_mcp, src_mcp_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *src_mcp_lbl = lv_label_create(btn_src_mcp);
@@ -797,7 +878,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
 
     btn_src_ble = lv_btn_create(scr_demo);
     lv_obj_set_size(btn_src_ble, 70, 30);
-    lv_obj_align(btn_src_ble, LV_ALIGN_TOP_RIGHT, -170, 55);
+    lv_obj_align(btn_src_ble, LV_ALIGN_TOP_LEFT, 123, 55);
     lv_obj_set_style_bg_opa(btn_src_ble, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(btn_src_ble, src_ble_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *src_ble_lbl = lv_label_create(btn_src_ble);
@@ -808,6 +889,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     update_source_btn_styles(); // Standard: BLE OBD (gruen) aktiv markieren
 
     create_settings_screen();
+    create_settings_func_screen();
     create_dtc_screen();
     create_service_screen();
 
@@ -891,6 +973,20 @@ void BMW_UI_Update(void)
     lv_label_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
     lv_obj_set_style_text_color(multi_water_label,
         current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
+
+    // Warnsummer ab 120 Grad Kuehlmitteltemperatur, im Einstellungs-Screen
+    // "Funktionen" ein-/ausschaltbar. g_buzzer_active verhindert wiederholte
+    // Buzzer_On()/_Off()-Aufrufe (I2C-Schreibzugriff auf den TCA9554-IO-
+    // Expander) bei jedem 100-ms-Update-Tick, solange der Zustand gleich bleibt.
+    bool want_buzzer = g_buzzer_enabled && current_water_temp >= 120.0f;
+    if (want_buzzer && !g_buzzer_active) {
+        Buzzer_On();
+        g_buzzer_active = true;
+    } else if (!want_buzzer && g_buzzer_active) {
+        Buzzer_Off();
+        g_buzzer_active = false;
+    }
+
     for (int i = 0; i < 8; i++) {
         lv_label_set_text_fmt(multi_throttle_outline[i], "%d%%", (int)current_throttle_pct);
         lv_label_set_text_fmt(multi_rpm_outline[i], "%d", (int)current_rpm);
