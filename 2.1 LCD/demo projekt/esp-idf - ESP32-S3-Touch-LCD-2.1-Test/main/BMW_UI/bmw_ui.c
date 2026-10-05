@@ -100,6 +100,7 @@ static lv_obj_t *service_status_label;
 
 static lv_obj_t *multi_meter;
 static lv_meter_scale_t *multi_needle_scale;
+static lv_meter_scale_t *multi_ring_scale;
 static lv_meter_indicator_t *multi_needle;
 static lv_meter_indicator_t *multi_ring_yellow;
 static lv_meter_indicator_t *multi_ring_orange;
@@ -405,9 +406,12 @@ static void gauge_mode_switch_cb(lv_event_t *e)
     lv_label_set_text(gauge_mode_label, rpm_mode ? "Anzeige: Drehzahl" : "Anzeige: Wasser");
     if (rpm_mode) {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
+        lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
     } else {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 45);
+        lv_meter_set_scale_range(multi_meter, multi_ring_scale,
+                                  MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
     }
 }
 
@@ -730,12 +734,25 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     multi_needle = add_image_needle(multi_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                      init_needle_img, init_pivot_x, init_pivot_y, &multi_needle_scale);
 
-    // Farbring auf derselben Hilfsskala wie die Nadel (gleiche Ausrichtung/
-    // Winkel), 3 Bogen-Indikatoren uebereinander - je nach Temperatur ist
-    // immer nur einer davon ein nicht-leeres Segment (siehe BMW_UI_Update()).
-    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_color_make(224, 255, 0), 0);
-    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 0);
-    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_RED), 0);
+    // Farbring: eigene Skala statt der Nadel-Hilfsskala. Die Nadel ist ein
+    // Bild (LV_METER_INDICATOR_TYPE_NEEDLE_IMG): LVGL nutzt den Skalenwinkel
+    // direkt als Bild-Rotationswinkel, und das Bild ruht bei Rotation 0 nach
+    // 6 Uhr (90 Grad in der "0=rechts"-Skalenkonvention) ausgerichtet - die
+    // sichtbare Nadelrichtung ist also Skalenwinkel+90. Die Nadel-Hilfsskala
+    // gleicht das mit rotation=45 (statt 135) aus, damit ihre Ruhestellung
+    // zur Skalenluecke im Hintergrundbild passt. Bogen-Indikatoren (Arcs)
+    // bekommen diese +90-Korrektur nicht, sie nutzen den Skalenwinkel direkt
+    // - mit rotation=45 lag der Ring deshalb um 90 Grad gegenueber der Nadel
+    // verschoben. Eigene Skala mit rotation=135 (=45+90) kompensiert das, der
+    // Ring beginnt jetzt exakt dort, wo die Nadel bei ihrem Minimalwert steht.
+    // r_mod=8 (= Ringbreite) schiebt den Ring zusaetzlich um seine eigene
+    // Breite nach aussen, damit er nicht die Skalenteilstriche ueberlappt.
+    multi_ring_scale = lv_meter_add_scale(multi_meter);
+    lv_meter_set_scale_range(multi_meter, multi_ring_scale,
+                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
+    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 8);
+    multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 8);
+    multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 8);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
