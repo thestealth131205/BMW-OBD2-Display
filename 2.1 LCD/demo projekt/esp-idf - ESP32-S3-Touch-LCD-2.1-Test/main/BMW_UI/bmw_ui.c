@@ -660,7 +660,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // Farbring auf derselben Hilfsskala wie die Nadel (gleiche Ausrichtung/
     // Winkel), 3 Bogen-Indikatoren uebereinander - je nach Temperatur ist
     // immer nur einer davon ein nicht-leeres Segment (siehe BMW_UI_Update()).
-    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, LV_COLOR_MAKE(224, 255, 0), 0);
+    multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_color_make(224, 255, 0), 0);
     multi_ring_orange = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 0);
     multi_ring_red     = lv_meter_add_arc(multi_meter, multi_needle_scale, 8, lv_palette_main(LV_PALETTE_RED), 0);
 
