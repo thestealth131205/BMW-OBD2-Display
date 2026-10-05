@@ -9,6 +9,8 @@ Schaltpunktanzeige (6 LEDs) sowie G-Kraft als Polar-Raster-Grafik auf einem
 480×480 RGB-Touchdisplay an, inkl. Diagnose (DTCs lesen/löschen) und BMW
 CBS-Service-Reset.
 
+![Multi-Ansicht](docs/multi_view_photo.jpg)
+
 ## Hardware
 
 | Komponente | Modell |
@@ -149,10 +151,11 @@ Bildschirmmitte → dort wo auch Helligkeit/SD-Größe/RTC stehen) gibt es einen
 Schalter **„WLAN-Update“**. Aktiviert er:
 
 1. Das Display baut einen eigenen WLAN-Access-Point auf
-   (SSID `BMW-E90-OTA`, Passwort `bmw320i2010`) und zeigt SSID/Passwort/IP
-   sowie einen Fortschrittsbalken an.
-2. Handy/PC verbindet sich mit diesem WLAN und ruft `http://192.168.4.1` im
-   Browser auf.
+   (SSID `BMW-E90-OTA`, Passwort `bmw320i2010`) und zeigt einen **QR-Code**
+   zum direkten Verbinden an (iOS-Kamera/Android-Scanner), dazu SSID/Passwort/
+   IP als Text sowie einen Fortschrittsbalken.
+2. Handy/PC verbindet sich mit diesem WLAN (per QR-Code-Scan oder manuell)
+   und ruft `http://192.168.4.1` im Browser auf.
 3. Dort **nur die Datei `firmware-s3-update.bin`** auswählen und hochladen –
    **nicht** die `-merged.bin`, die ist ausschließlich fürs USB-Flashen.
 4. Nach erfolgreichem Upload schreibt das Display `esp_ota_set_boot_partition`
@@ -239,25 +242,37 @@ Service-Reset und das CSV-Logging.
   1,8 Sekunden lang ein Vollbild-Logo auf schwarzem Grund
   (`main/BMW_UI/boot_logo_img.c/.h`, 480×480 RGB565), bevor die eigentliche
   UI (Demo-Screen + BMW-Multi-Ansicht) aufgebaut wird.
-- **Multi-Kachel**: Geschwindigkeit zentral, Ring zeigt Kühlmitteltemperatur
-  (Skala 40–119 °C, ab 95 °C Farbwechsel der Nadel), Drehzahl zusätzlich
-  digital sichtbar (großer Font). Zusatzfelder: Board-Akku-Spannung (ADC),
-  Gaspedal, Drehzahl, Wasser-Temperatur – dazwischen mittig, tiefer versetzt,
-  die live per OBD2 (Mode 01 PID 0x42) ausgelesene Fahrzeug-Batteriespannung.
+- **Multi-Kachel**: Geschwindigkeit zentral, Ring zeigt wahlweise
+  Kühlmitteltemperatur (Skala 40–119 °C) oder Drehzahl (0–8000 U/min) –
+  umschaltbar im Funktionen-Screen (siehe unten). Um die Nadel herum wächst
+  ein Farbring mit: Neongelb bis zur Warnschwelle (Wasser 100 °C / Drehzahl
+  6500 U/min), danach Orange, ab der Alarmschwelle (Wasser 115 °C / Drehzahl
+  6900 U/min) Rot. Im Wasser-Modus blinkt die Nadel zusätzlich ab 112 °C.
+  Drehzahl ist außerdem immer digital sichtbar (großer Font). Zusatzfelder:
+  Board-Akku-Spannung (ADC), Gaspedal, Drehzahl, Wasser-Temperatur – alle mit
+  schmaler schwarzer Umrandung für bessere Lesbarkeit – dazwischen mittig,
+  tiefer versetzt, die live per OBD2 ausgelesene Fahrzeug-Batteriespannung.
 - **Schaltpunkt-Kästchen** (6 Stück, Drehzahl-Kachel): füllen sich einzeln je
   nach Drehzahl (Schwellen 1500/2500/3500/4500/5500/6500 U/min), ab
   6800 U/min blinken alle gemeinsam wie eine digitale Schaltanzeige.
-- **Gaspedal-/Drehzahl-/Wasser-Temperatur-Felder** in großem Font mit
-  schmaler schwarzer Umrandung für bessere Lesbarkeit.
 - **Wisch nach links** auf der Multi-Ansicht öffnet den Fehlercode-Screen:
   oben eine scrollbare Liste der ausgelesenen DTCs (Klartext, z. B. „P0301“),
   darunter „Auslesen“/„Löschen“ nebeneinander sowie „Service Reset“ (CBS-
   Öl-Service). **Wisch nach rechts** führt zurück zur Multi-Ansicht.
-- **3 Sekunden Touch in der Bildschirmmitte** zeigt den Waveshare-Demo-Screen,
-  ein „Zurück“-Button führt zur BMW-Ansicht zurück.
-- **Doppeltipp** in der Mitte öffnet den Farb-Einstellungsbildschirm
+- **Wisch nach rechts** auf der Multi-Ansicht öffnet den Screen „SERVICE“ mit
+  Buttons für weitere OBD2-Routinen (Oil reset, Brake reset, Brake Bleed,
+  NOx Regen – die letzten beiden sind mangels bestätigter BMW-Diagnosebefehle
+  aktuell nicht hinterlegt). **Wisch nach links** führt zurück.
+- **3 Sekunden Touch in der Bildschirmmitte** zeigt den Waveshare-Demo-Screen
+  (dort auch der Schalter für das **WLAN-Firmware-Update**, siehe oben), ein
+  „Zurück“-Button führt zur BMW-Ansicht zurück.
+- **Doppeltipp** in der Mitte öffnet den Einstellungs-Screen
   (Primär-/Sekundärfarbe, wirkt sich auf alle Anzeigen und die Nadelfarbe
-  aus).
+  aus). **Wisch nach rechts** auf diesem Screen öffnet „FUNKTIONEN“: Schalter
+  für SD-Karten-Datenlogging (CSV, Excel-kompatibel), Umschalter
+  Wasser/Drehzahl für die große Multi-Kachel-Anzeige sowie ein Warnsummer
+  (Buzzer), der bei Kühlmitteltemperatur ≥ 120 °C auslöst (ein-/ausschaltbar).
+  **Wisch nach links** führt zurück zu den Farben.
 
 Details zur BMW-Multi-Ansicht siehe `CLAUDE.md` im Repo-Root sowie die
 projektspezifischen Notizen unter `2.1 LCD/demo projekt/esp-idf -
