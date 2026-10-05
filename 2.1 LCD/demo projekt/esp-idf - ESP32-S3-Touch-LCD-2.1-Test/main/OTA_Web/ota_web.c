@@ -1,15 +1,23 @@
 #include "ota_web.h"
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
+#include "esp_app_desc.h"
 #include "esp_system.h"
 #include "lvgl.h"
 #include "sd_log.h"
+
+// Mindestanzahl Bytes, bevor wir den App-Beschreibungsblock (esp_app_desc_t)
+// zuverlaessig aus der Partition zurücklesen koennen - der Block beginnt kurz
+// nach dem Bild-/Segment-Header (ueblicherweise bei Offset 32) und ist selbst
+// rund 256 Byte gross.
+#define OTA_WEB_DESC_CHECK_MIN_BYTES 512
 
 // Eigener SoftAP, damit das Update auch unterwegs ohne vorhandenes WLAN
 // funktioniert - Handy/PC verbindet sich direkt mit dem Display.
@@ -42,7 +50,8 @@ static const char OTA_WEB_PAGE[] =
 "button{font-size:18px;padding:10px 24px;margin-top:16px;background:#2962ff;color:#fff;border:none;border-radius:6px}"
 "progress{width:90%;height:22px;margin-top:20px}</style></head><body>"
 "<h2>BMW E90 Display &ndash; Firmware-Update</h2>"
-"<p>Firmware-Datei (.bin) auswaehlen und hochladen.</p>"
+"<p>Nur die Datei <b>*_update.bin</b> auswaehlen und hochladen "
+"(nicht die -merged.bin, die ist nur fuer das initiale USB-Flashen).</p>"
 "<input type='file' id='f'><br>"
 "<button onclick='up()'>Hochladen</button>"
 "<p id='s'></p>"
@@ -94,6 +103,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     int remaining = req->content_len;
     int total = remaining > 0 ? remaining : 1;
     int received_total = 0;
+    bool desc_checked = false;
     static char buf[4096];
 
     while (remaining > 0) {
@@ -124,6 +134,49 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         remaining -= recv_len;
         received_total += recv_len;
         s_progress_percent = (received_total * 100) / total;
+
+        // Sobald genug Bytes geschrieben sind, den App-Beschreibungsblock aus
+        // der Partition zurücklesen - das erkennt zuverlaessig, ob eine echte
+        // App-Firmware (*_update.bin) oder faelschlich die -merged.bin
+        // (Bootloader+Partitionstabelle+App ab Offset 0x0) hochgeladen wurde:
+        // bei der merged.bin steht an dieser Stelle der Bootloader, nicht der
+        // App-Header, der Beschreibungsblock fehlt also an der erwarteten
+        // Stelle.
+        if (!desc_checked && received_total >= OTA_WEB_DESC_CHECK_MIN_BYTES) {
+            desc_checked = true;
+            esp_app_desc_t app_desc = {0};
+            esp_err_t desc_err = esp_ota_get_partition_description(update_partition, &app_desc);
+            if (desc_err != ESP_OK || app_desc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
+                esp_ota_abort(ota_handle);
+                s_upload_active = false;
+                s_upload_done = true;
+                s_upload_ok = false;
+                SD_Log("OTA_WEB: falsches Image erkannt (kein gueltiger App-Header, magic=0x%08" PRIx32 ")",
+                       (uint32_t)app_desc.magic_word);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                    "Falsches Image: Das ist nicht die App-Firmware. "
+                    "Bitte die Datei *_update.bin hochladen, nicht die -merged.bin.");
+                return ESP_FAIL;
+            }
+        }
+    }
+
+    // Fallback fuer sehr kleine Uploads (z.B. versehentlich eine falsche,
+    // winzige Datei), bei denen die Schleife nie OTA_WEB_DESC_CHECK_MIN_BYTES
+    // erreicht hat.
+    if (!desc_checked) {
+        esp_app_desc_t app_desc;
+        esp_err_t desc_err = esp_ota_get_partition_description(update_partition, &app_desc);
+        if (desc_err != ESP_OK || app_desc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
+            esp_ota_abort(ota_handle);
+            s_upload_active = false;
+            s_upload_done = true;
+            s_upload_ok = false;
+            SD_Log("OTA_WEB: falsches/zu kleines Image erkannt (%d Bytes)", received_total);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                "Falsches Image: Das ist keine gueltige App-Firmware.");
+            return ESP_FAIL;
+        }
     }
 
     err = esp_ota_end(ota_handle);

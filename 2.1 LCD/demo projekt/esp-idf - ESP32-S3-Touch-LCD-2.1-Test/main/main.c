@@ -18,6 +18,37 @@
 #include "can_obd2.h"
 #include "ble_obd.h"
 #include "esp_core_dump.h"
+#include "boot_logo_img.h"
+
+// Boot-Start-Logo: kurz auf schwarzem Grund anzeigen, bevor die eigentliche
+// UI (Demo-Screen + BMW-Multi-Ansicht) aufgebaut wird. LVGL braucht dafuer
+// bereits einen laufenden Tick-Timer (siehe LVGL_Init()); der eigentliche
+// Refresh passiert erst durch die manuellen lv_timer_handler()-Aufrufe in
+// dieser Funktion, da die Haupt-while(1)-Schleife erst danach startet.
+#define BOOT_LOGO_HOLD_MS 1800
+
+static lv_obj_t *show_boot_logo(void)
+{
+    lv_obj_t *scr_boot = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_boot, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr_boot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(scr_boot, 0, 0);
+
+    lv_obj_t *logo = lv_img_create(scr_boot);
+    lv_img_set_src(logo, &boot_logo_img);
+    lv_obj_center(logo);
+
+    lv_scr_load(scr_boot);
+
+    uint32_t waited = 0;
+    while (waited < BOOT_LOGO_HOLD_MS) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited += 10;
+    }
+
+    return scr_boot;
+}
 
 // Die Boot-Loops/Abstuerze waehrend der Fahrt liessen sich bisher nicht
 // diagnostizieren, weil der echte Panic-Grund/Backtrace nur auf der seriellen
@@ -91,6 +122,8 @@ void app_main(void)
     log_and_clear_coredump();
     LVGL_Init();
 
+    lv_obj_t *scr_boot = show_boot_logo();
+
     // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
     CAN_OBD2_Init();
 
@@ -102,6 +135,7 @@ void app_main(void)
     // (erscheint beim 3-Sekunden-Halten in der Bildschirmmitte).
     lv_obj_t *scr_demo = lv_obj_create(NULL);
     lv_scr_load(scr_demo);
+    lv_obj_del(scr_boot);       // Boot-Logo-Screen wird nicht mehr gebraucht
     Lvgl_Example1();            // baut auf dem aktiven Screen = scr_demo auf
 
     // BMW-Multi-Ansicht als Standard-Screen laden.

@@ -104,12 +104,51 @@ idf.py -p PORT flash monitor
 - **LVGL** wird per Component-Manager (`main/idf_component.yml`) geladen,
   Version 8.2. Der vendorte Ordner `components/lvgl__lvgl/` wird von CI/Build
   automatisch nachgezogen und ist per `.gitignore` vom Repo ausgeschlossen.
-- **Flash-Layout**: 16 MB, eigene `partitions.csv` (kein OTA).
+- **Flash-Layout**: 16 MB, Zwei-Slot-OTA-Partitionstabelle (`ota_0`/`ota_1` à
+  3 MB + `otadata`, siehe `partitions.csv`) – ein WLAN-Update schreibt immer
+  in den gerade nicht laufenden Slot, ein fehlgeschlagener Upload überschreibt
+  also nie die aktuell laufende Firmware.
 - **CI**: `.github/workflows/build-s3.yml` baut das Projekt per
   `espressif/esp-idf-ci-action` (ESP-IDF v5.3.1, Target `esp32s3`) und lädt
-  bei Push auf `test_waveshare` `firmware-s3.bin`/`.elf`/`-merged.bin` in das
-  GitHub-Release **`s3-latest`**. Merge-Offsets: Bootloader `0x0`,
-  Partitionstabelle `0x8000`, App `0x10000`.
+  bei Push auf `test_waveshare` drei Dateien in das GitHub-Release
+  **`s3-latest`** sowie zusätzlich versioniert in **`v<Version>`**
+  (Version aus `VERSION`):
+  - **`firmware-s3-update.bin`** – reines App-Image, für das **WLAN-Update**
+    (siehe unten). Name bewusst mit `_update`-Suffix, damit er sich nicht mit
+    der `-merged.bin` verwechseln lässt.
+  - **`firmware-s3.elf`** – fürs Debugging (Backtrace-Symbole).
+  - **`firmware-s3-merged.bin`** – Bootloader + Partitionstabelle + App,
+    gemerged an den Offsets `0x0`/`0x8000`/`0x20000`, nur fürs **initiale
+    USB-Flashen** gedacht (`esptool write-flash 0x0 firmware-s3-merged.bin`).
+
+## WLAN-Firmware-Update (OTA)
+
+Im originalen Waveshare-Onboard-Panel (3 Sekunden Touch in der
+Bildschirmmitte → dort wo auch Helligkeit/SD-Größe/RTC stehen) gibt es einen
+Schalter **„WLAN-Update“**. Aktiviert er:
+
+1. Das Display baut einen eigenen WLAN-Access-Point auf
+   (SSID `BMW-E90-OTA`, Passwort `bmw320i2010`) und zeigt SSID/Passwort/IP
+   sowie einen Fortschrittsbalken an.
+2. Handy/PC verbindet sich mit diesem WLAN und ruft `http://192.168.4.1` im
+   Browser auf.
+3. Dort **nur die Datei `firmware-s3-update.bin`** auswählen und hochladen –
+   **nicht** die `-merged.bin`, die ist ausschließlich fürs USB-Flashen.
+4. Nach erfolgreichem Upload schreibt das Display `esp_ota_set_boot_partition`
+   und startet automatisch in die neue Firmware neu.
+
+**Schutz vor der falschen Datei:** `main/OTA_Web/ota_web.c` liest nach den
+ersten paar hundert empfangenen Bytes den App-Beschreibungsblock
+(`esp_app_desc_t`) aus der gerade beschriebenen Partition zurück
+(`esp_ota_get_partition_description`). Fehlt dort das erwartete
+`ESP_APP_DESC_MAGIC_WORD` – z. B. weil versehentlich die `-merged.bin`
+hochgeladen wurde, bei der an dieser Stelle der Bootloader statt des
+App-Headers steht – bricht der Upload sofort mit einer Fehlermeldung ab,
+statt eine ungültige Firmware zu flashen.
+
+**Wichtig:** Da `partitions.csv` ein Zwei-Slot-OTA-Layout ist, muss nach
+einer Änderung der Partitionstabelle selbst einmal regulär per USB geflasht
+werden – danach funktioniert das WLAN-Update für alle folgenden Versionen.
 
 ## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
@@ -171,6 +210,11 @@ Service-Reset und das CSV-Logging.
   reiner BLE-Nutzung frei (MCP2515 dann nicht anschließen).
 
 ## UI-Logik (Kurzfassung)
+
+- **Boot-Logo**: Direkt nach der LVGL-Initialisierung zeigt das Display
+  1,8 Sekunden lang ein Vollbild-Logo auf schwarzem Grund
+  (`main/BMW_UI/boot_logo_img.c/.h`, 480×480 RGB565), bevor die eigentliche
+  UI (Demo-Screen + BMW-Multi-Ansicht) aufgebaut wird.
 
 Details zur BMW-Multi-Ansicht (Anzeigen, Farbzonen, Schwellenwerte, Nadeln,
 Einstellungs-Screen) siehe Haupt-`CLAUDE.md` im Repo-Root – die Logik ist

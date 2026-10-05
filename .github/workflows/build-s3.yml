@@ -27,7 +27,7 @@ jobs:
         run: |
           BUILD_DIR="$PROJECT_DIR/build"
           mkdir -p s3-artifacts
-          cp "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin" s3-artifacts/firmware-s3.bin
+          cp "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin" s3-artifacts/firmware-s3-update.bin
           cp "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.elf" s3-artifacts/firmware-s3.elf
           cp "$BUILD_DIR/bootloader/bootloader.bin"   s3-artifacts/bootloader.bin
           cp "$BUILD_DIR/partition_table/partition-table.bin" s3-artifacts/partition-table.bin
@@ -48,7 +48,7 @@ jobs:
           VER=$(tr -d ' \r\n' < "$PROJECT_DIR/VERSION")
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           mkdir -p s3-versioned
-          for f in firmware-s3.bin firmware-s3.elf firmware-s3-merged.bin; do
+          for f in firmware-s3-update.bin firmware-s3.elf firmware-s3-merged.bin; do
             cp "s3-artifacts/$f" "s3-versioned/${f/firmware-s3/firmware-s3-v$VER}"
           done
 
@@ -91,6 +91,6 @@ jobs:
           body_path: release-notes.md
           make_latest: false
           files: |
-            s3-artifacts/firmware-s3.bin
+            s3-artifacts/firmware-s3-update.bin
             s3-artifacts/firmware-s3.elf
             s3-artifacts/firmware-s3-merged.bin
