@@ -1,0 +1,323 @@
+#include "ota_web.h"
+#include <string.h>
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_http_server.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
+#include "lvgl.h"
+#include "sd_log.h"
+
+// Eigener SoftAP, damit das Update auch unterwegs ohne vorhandenes WLAN
+// funktioniert - Handy/PC verbindet sich direkt mit dem Display.
+#define OTA_WEB_SSID "BMW-E90-OTA"
+#define OTA_WEB_PASS "bmw320i2010"
+
+static httpd_handle_t s_server = NULL;
+static esp_netif_t *s_ap_netif = NULL;
+static bool s_enabled = false;
+
+static lv_obj_t *s_scr_ota = NULL;
+static lv_obj_t *s_status_label = NULL;
+static lv_obj_t *s_progress_bar = NULL;
+static lv_obj_t *s_prev_screen = NULL;
+static lv_timer_t *s_ui_timer = NULL;
+
+static volatile int  s_progress_percent = 0;
+static volatile bool s_upload_active = false;
+static volatile bool s_upload_done = false;
+static volatile bool s_upload_ok = false;
+static volatile bool s_reboot_pending = false;
+
+// Einfache Upload-Seite: Dateiauswahl + XHR-Upload (rohe Bytes als Body,
+// kein multipart/form-data noetig) mit Fortschrittsanzeige im Browser.
+static const char OTA_WEB_PAGE[] =
+"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+"<title>BMW Display Update</title>"
+"<style>body{font-family:sans-serif;background:#111;color:#eee;text-align:center;padding:30px}"
+"button{font-size:18px;padding:10px 24px;margin-top:16px;background:#2962ff;color:#fff;border:none;border-radius:6px}"
+"progress{width:90%;height:22px;margin-top:20px}</style></head><body>"
+"<h2>BMW E90 Display &ndash; Firmware-Update</h2>"
+"<p>Firmware-Datei (.bin) auswaehlen und hochladen.</p>"
+"<input type='file' id='f'><br>"
+"<button onclick='up()'>Hochladen</button>"
+"<p id='s'></p>"
+"<progress id='p' value='0' max='100' style='display:none'></progress>"
+"<script>"
+"function up(){"
+"var f=document.getElementById('f').files[0];"
+"if(!f){document.getElementById('s').innerText='Keine Datei gewaehlt';return;}"
+"var p=document.getElementById('p');p.style.display='block';"
+"var x=new XMLHttpRequest();"
+"x.open('POST','/update',true);"
+"x.upload.onprogress=function(e){if(e.lengthComputable){p.value=(e.loaded/e.total)*100;}};"
+"x.onload=function(){document.getElementById('s').innerText=x.responseText;};"
+"x.onerror=function(){document.getElementById('s').innerText='Uebertragungsfehler';};"
+"x.send(f);"
+"document.getElementById('s').innerText='Wird hochgeladen...';"
+"}"
+"</script></body></html>";
+
+static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, OTA_WEB_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t update_post_handler(httpd_req_t *req)
+{
+    s_upload_active = true;
+    s_upload_done = false;
+    s_progress_percent = 0;
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        s_upload_active = false;
+        SD_Log("OTA_WEB: keine freie OTA-Partition gefunden");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Keine OTA-Partition gefunden");
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+        s_upload_active = false;
+        SD_Log("OTA_WEB: esp_ota_begin fehlgeschlagen: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA-Start fehlgeschlagen");
+        return ESP_FAIL;
+    }
+
+    int remaining = req->content_len;
+    int total = remaining > 0 ? remaining : 1;
+    int received_total = 0;
+    static char buf[4096];
+
+    while (remaining > 0) {
+        int to_read = remaining < (int)sizeof(buf) ? remaining : (int)sizeof(buf);
+        int recv_len = httpd_req_recv(req, buf, to_read);
+        if (recv_len <= 0) {
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            esp_ota_abort(ota_handle);
+            s_upload_active = false;
+            s_upload_done = true;
+            s_upload_ok = false;
+            SD_Log("OTA_WEB: Empfang abgebrochen (recv_len=%d)", recv_len);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Empfang fehlgeschlagen");
+            return ESP_FAIL;
+        }
+        err = esp_ota_write(ota_handle, buf, recv_len);
+        if (err != ESP_OK) {
+            esp_ota_abort(ota_handle);
+            s_upload_active = false;
+            s_upload_done = true;
+            s_upload_ok = false;
+            SD_Log("OTA_WEB: esp_ota_write fehlgeschlagen: %s", esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Schreiben fehlgeschlagen");
+            return ESP_FAIL;
+        }
+        remaining -= recv_len;
+        received_total += recv_len;
+        s_progress_percent = (received_total * 100) / total;
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        s_upload_active = false;
+        s_upload_done = true;
+        s_upload_ok = false;
+        SD_Log("OTA_WEB: esp_ota_end fehlgeschlagen (ungueltiges Image?): %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Firmware-Image ungueltig");
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        s_upload_active = false;
+        s_upload_done = true;
+        s_upload_ok = false;
+        SD_Log("OTA_WEB: esp_ota_set_boot_partition fehlgeschlagen: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Boot-Partition konnte nicht gesetzt werden");
+        return ESP_FAIL;
+    }
+
+    SD_Log("OTA_WEB: Update erfolgreich (%d Bytes), Neustart folgt", received_total);
+    httpd_resp_sendstr(req, "OK - Update erfolgreich, Display startet neu...");
+    s_upload_active = false;
+    s_upload_done = true;
+    s_upload_ok = true;
+    s_reboot_pending = true;
+    return ESP_OK;
+}
+
+static void start_ap_and_server(void)
+{
+    esp_wifi_stop();
+
+    if (!s_ap_netif) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+    }
+
+    wifi_config_t ap_config = {0};
+    strlcpy((char *)ap_config.ap.ssid, OTA_WEB_SSID, sizeof(ap_config.ap.ssid));
+    ap_config.ap.ssid_len = strlen(OTA_WEB_SSID);
+    strlcpy((char *)ap_config.ap.password, OTA_WEB_PASS, sizeof(ap_config.ap.password));
+    ap_config.ap.channel = 1;
+    ap_config.ap.max_connection = 2;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    esp_wifi_start();
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
+    config.max_uri_handlers = 4;
+    config.lru_purge_enable = true;
+
+    if (httpd_start(&s_server, &config) == ESP_OK) {
+        httpd_uri_t root_uri = {
+            .uri = "/", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &root_uri);
+
+        httpd_uri_t update_uri = {
+            .uri = "/update", .method = HTTP_POST, .handler = update_post_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(s_server, &update_uri);
+    } else {
+        SD_Log("OTA_WEB: httpd_start fehlgeschlagen");
+    }
+}
+
+static void stop_ap_and_server(void)
+{
+    if (s_server) {
+        httpd_stop(s_server);
+        s_server = NULL;
+    }
+    // Zurueck in den Ausgangszustand (reiner STA-Modus wie nach dem Boot-Scan).
+    esp_wifi_stop();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+}
+
+static void close_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    OTA_Web_SetEnabled(false);
+}
+
+static void ota_ui_timer_cb(lv_timer_t *t)
+{
+    LV_UNUSED(t);
+    if (s_upload_active) {
+        lv_label_set_text_fmt(s_status_label, "Upload laeuft: %d%%", s_progress_percent);
+        lv_bar_set_value(s_progress_bar, s_progress_percent, LV_ANIM_OFF);
+    } else if (s_upload_done) {
+        lv_label_set_text(s_status_label, s_upload_ok
+                           ? "Update erfolgreich - Neustart..."
+                           : "Update fehlgeschlagen - erneut versuchen");
+    }
+
+    if (s_reboot_pending) {
+        s_reboot_pending = false;
+        lv_timer_del(s_ui_timer);
+        s_ui_timer = NULL;
+        // Kurze Pause, damit die HTTP-Antwort sicher beim Client ankommt und
+        // die Erfolgsmeldung auf dem Display noch sichtbar ist, bevor der
+        // Neustart greift.
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
+}
+
+static void build_ota_screen(void)
+{
+    if (s_scr_ota) {
+        return;
+    }
+    s_scr_ota = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_scr_ota, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_scr_ota, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_scr_ota, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(s_scr_ota);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_label_set_text(title, "WiFi-Update");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
+
+    lv_obj_t *info = lv_label_create(s_scr_ota);
+    lv_obj_set_style_text_color(info, lv_color_white(), 0);
+    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(info, 360);
+    lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(info,
+        "WLAN verbinden:\nSSID: %s\nPasswort: %s\n\nBrowser oeffnen:\nhttp://192.168.4.1",
+        OTA_WEB_SSID, OTA_WEB_PASS);
+    lv_obj_align(info, LV_ALIGN_CENTER, 0, -50);
+
+    s_progress_bar = lv_bar_create(s_scr_ota);
+    lv_obj_set_size(s_progress_bar, 300, 20);
+    lv_obj_align(s_progress_bar, LV_ALIGN_CENTER, 0, 95);
+    lv_bar_set_range(s_progress_bar, 0, 100);
+    lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+
+    s_status_label = lv_label_create(s_scr_ota);
+    lv_obj_set_style_text_color(s_status_label, lv_color_white(), 0);
+    lv_label_set_text(s_status_label, "Warte auf Upload...");
+    lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 125);
+
+    lv_obj_t *btn_close = lv_btn_create(s_scr_ota);
+    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0xCC2222), 0);
+    lv_obj_set_size(btn_close, 160, 50);
+    lv_obj_align(btn_close, LV_ALIGN_BOTTOM_MID, 0, -25);
+    lv_obj_add_event_cb(btn_close, close_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *close_lbl = lv_label_create(btn_close);
+    lv_label_set_text(close_lbl, "Beenden");
+    lv_obj_center(close_lbl);
+}
+
+bool OTA_Web_IsEnabled(void)
+{
+    return s_enabled;
+}
+
+void OTA_Web_SetEnabled(bool enable)
+{
+    if (enable == s_enabled) {
+        return;
+    }
+    s_enabled = enable;
+
+    if (enable) {
+        build_ota_screen();
+        s_prev_screen = lv_scr_act();
+        s_progress_percent = 0;
+        s_upload_active = false;
+        s_upload_done = false;
+        lv_label_set_text(s_status_label, "Warte auf Upload...");
+        lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+        lv_scr_load(s_scr_ota);
+
+        start_ap_and_server();
+        s_ui_timer = lv_timer_create(ota_ui_timer_cb, 200, NULL);
+        SD_Log("OTA_WEB: aktiviert (SSID=%s)", OTA_WEB_SSID);
+    } else {
+        if (s_ui_timer) {
+            lv_timer_del(s_ui_timer);
+            s_ui_timer = NULL;
+        }
+        stop_ap_and_server();
+        if (s_prev_screen) {
+            lv_scr_load(s_prev_screen);
+        }
+        SD_Log("OTA_WEB: deaktiviert");
+    }
+}

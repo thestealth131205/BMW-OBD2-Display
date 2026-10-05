@@ -1,4 +1,5 @@
 #include "LVGL_Example.h"
+#include "ota_web.h"
 
 
 /**********************
@@ -43,6 +44,7 @@ lv_obj_t * Board_angle;
 lv_obj_t * RTC_Time;
 lv_obj_t * Wireless_Scan;
 lv_obj_t * Backlight_slider;
+static lv_obj_t * WiFiUpdate_switch;
 
 
 void Lvgl_Example1(void){
@@ -275,8 +277,15 @@ static void Onboard_create(lv_obj_t * parent)
   lv_obj_set_style_outline_width(Backlight_slider, 2, LV_PART_INDICATOR);  
   lv_obj_set_style_outline_color(Backlight_slider, lv_color_hex(0xD3D3D3), LV_PART_INDICATOR);      
   lv_slider_set_range(Backlight_slider, 5, Backlight_MAX);              
-  lv_slider_set_value(Backlight_slider, LCD_Backlight, LV_ANIM_ON);  
+  lv_slider_set_value(Backlight_slider, LCD_Backlight, LV_ANIM_ON);
   lv_obj_add_event_cb(Backlight_slider, Backlight_adjustment_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  lv_obj_t * WiFiUpdate_label = lv_label_create(panel1);
+  lv_label_set_text(WiFiUpdate_label, "WLAN-Update");
+  lv_obj_add_style(WiFiUpdate_label, &style_text_muted, 0);
+
+  WiFiUpdate_switch = lv_switch_create(panel1);
+  lv_obj_add_event_cb(WiFiUpdate_switch, wifi_update_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
 
   lv_obj_t * panel2 = lv_obj_create(parent);
@@ -331,6 +340,8 @@ static void Onboard_create(lv_obj_t * parent)
     40,               /*Box*/
     LV_GRID_CONTENT,  /*Box title*/
     40,               /*Box*/
+    LV_GRID_CONTENT,  /*Box title*/
+    40,               /*Box*/
     LV_GRID_TEMPLATE_LAST
   };
 
@@ -354,6 +365,8 @@ static void Onboard_create(lv_obj_t * parent)
   lv_obj_set_grid_cell(Wireless_Scan, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_CENTER, 13, 1);
   lv_obj_set_grid_cell(Backlight_label, LV_GRID_ALIGN_START, 1, 1, LV_GRID_ALIGN_START, 14, 1);
   lv_obj_set_grid_cell(Backlight_slider, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_CENTER, 15, 1);
+  lv_obj_set_grid_cell(WiFiUpdate_label, LV_GRID_ALIGN_START, 1, 1, LV_GRID_ALIGN_START, 16, 1);
+  lv_obj_set_grid_cell(WiFiUpdate_switch, LV_GRID_ALIGN_START, 1, 1, LV_GRID_ALIGN_CENTER, 17, 1);
 
   lv_obj_set_grid_cell(panel2, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
   lv_obj_set_grid_dsc_array(panel2, grid_1_col_dsc, grid_1_row_dsc);
@@ -384,8 +397,17 @@ void example1_increase_lvgl_tick(lv_timer_t * t)
   else
     snprintf(buf, sizeof(buf), "WIFI: %d    BLE: %d\r\n",WIFI_NUM,BLE_NUM);
   lv_textarea_set_placeholder_text(Wireless_Scan, buf);
-  lv_slider_set_value(Backlight_slider, LCD_Backlight, LV_ANIM_ON); 
+  lv_slider_set_value(Backlight_slider, LCD_Backlight, LV_ANIM_ON);
   LVGL_Backlight_adjustment(LCD_Backlight);
+
+  // Haelt den Schalter synchron, auch wenn das Update ueber den "Beenden"-
+  // Button auf der Upload-Seite (ota_web.c) beendet wurde statt ueber diesen
+  // Schalter selbst.
+  if (OTA_Web_IsEnabled()) {
+    lv_obj_add_state(WiFiUpdate_switch, LV_STATE_CHECKED);
+  } else {
+    lv_obj_clear_state(WiFiUpdate_switch, LV_STATE_CHECKED);
+  }
 }
 
 
@@ -394,6 +416,16 @@ void example1_increase_lvgl_tick(lv_timer_t * t)
 
 static void ta_event_cb(lv_event_t * e)
 {
+}
+
+// Schalter "WLAN-Update" im Onboard-Panel: baut bei "ein" einen eigenen
+// WLAN-Access-Point mit Upload-Seite auf (ota_web.c), ueber die sich die
+// Firmware per Smartphone/PC-Browser aktualisieren laesst.
+static void wifi_update_switch_cb(lv_event_t * e)
+{
+  lv_obj_t * sw = lv_event_get_target(e);
+  bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+  OTA_Web_SetEnabled(on);
 }
 
 

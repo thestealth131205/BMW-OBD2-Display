@@ -1,6 +1,18 @@
-# Name,     Type, SubType, Offset,   Size, Flags
+# Name,     Type, SubType,  Offset,    Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap,,,,
-nvs,        data, nvs,      0x9000,  0x6000,
-factory,0,0,        0x10000, 3M,
-flash_test, data, fat,      ,        528K,
-coredump,   data, coredump, ,        64K,
+#
+# Zwei-Slot-OTA-Layout (ota_0/ota_1 + otadata) statt einem einzelnen
+# "factory"-Slot: Das WLAN-Firmware-Update (OTA_Web/ota_web.c) schreibt immer
+# in den gerade NICHT laufenden Slot (esp_ota_get_next_update_partition()),
+# damit ein fehlgeschlagener Upload nicht die aktuell laufende Firmware
+# ueberschreibt. Mit leerem/ungueltigem otadata (z.B. nach dem ersten
+# USB-Flash dieser Partitionstabelle) bootet der Bootloader automatisch
+# ota_0 - die erste USB-Flash bleibt also unveraendert einfach (Merge-Offset
+# fuer die App in build-s3.yml entsprechend von 0x10000 auf 0x20000
+# angepasst).
+nvs,        data, nvs,      0x9000,   0x6000,
+otadata,    data, ota,      0xf000,   0x2000,
+ota_0,      app,  ota_0,    0x20000,  3M,
+ota_1,      app,  ota_1,    0x320000, 3M,
+flash_test, data, fat,      0x620000, 528K,
+coredump,   data, coredump, 0x6A4000, 64K,

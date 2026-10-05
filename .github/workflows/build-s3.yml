@@ -40,7 +40,7 @@ jobs:
             --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0     "$BUILD_DIR/bootloader/bootloader.bin" \
             0x8000  "$BUILD_DIR/partition_table/partition-table.bin" \
-            0x10000 "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin"
+            0x20000 "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin"
 
       - name: Read firmware version
         id: ver
