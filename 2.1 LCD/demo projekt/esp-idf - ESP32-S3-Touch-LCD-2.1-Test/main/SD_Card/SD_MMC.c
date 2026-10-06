@@ -63,9 +63,16 @@ void SD_Init(void)
     esp_err_t ret;
 
     // Options for mounting the filesystem.
-    // If format_if_mount_failed is set to true, SD card will be partitioned and formatted in case when mounting fails.  false true
+    // format_if_mount_failed bewusst aus: Ein voller Formatierungsversuch einer
+    // mehrere-GB-Karte blockiert app_main() teils ueber eine Minute - laeuft das
+    // waehrend dieser Zeit erneut in den (noch ungeklaerten) BLE-Reset, bleibt die
+    // Karte dauerhaft halb formatiert und der naechste Boot versucht sofort wieder
+    // zu formatieren -> Dauerbootloop, noch vor SD_Log_Init()/dem Boot-Logo. Bei
+    // fehlgeschlagenem Mount jetzt stattdessen SD-Karte ueberspringen (SDCard_Size
+    // bleibt 0, SD_Log_Init() tut dann nichts) und mit dem Rest des Bootvorgangs
+    // fortfahren - Karte muss am PC manuell neu formatiert werden.
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,           
+        .format_if_mount_failed = false,
         .max_files = 5,
         .allocation_unit_size = 16 * 1024
     };
