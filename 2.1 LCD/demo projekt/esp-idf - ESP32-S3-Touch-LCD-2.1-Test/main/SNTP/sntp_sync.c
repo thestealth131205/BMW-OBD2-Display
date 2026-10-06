@@ -12,6 +12,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "sd_log.h"
 #include "SD_MMC.h"
 #include "PCF85063.h"
@@ -188,6 +189,17 @@ static void sntp_sync_task(void *arg)
 {
     (void)arg;
 
+    // Letzter Testlauf: "Hotspot verbinden" blieb ueber mehrere Minuten bei
+    // "Starte..." stehen, OHNE dass auch nur die erste SNTP-Log-Zeile
+    // (SD_EnsureMounted) je erschien - obwohl die Karte zu diesem Zeitpunkt
+    // bereits erfolgreich gemountet war (sonst gaebe es gar kein Log). Das
+    // deutet darauf hin, dass dieser Task-Body nie lief, nicht dass er darin
+    // haengen blieb. Deshalb hier die allererste Zeile, noch vor jedem
+    // anderen Aufruf, plus Heap-Zahlen - zeigt beim naechsten Versuch, ob der
+    // Task ueberhaupt gestartet ist.
+    SD_Log("SNTP: Task gestartet (freier Heap=%u, groesster 8-Bit-Block=%u)",
+           (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     char ssid[33];
     char pass[65];
     wifi_cfg_result_t cfg_result = load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
@@ -300,5 +312,18 @@ void SNTP_Sync_Start(void)
     // Stack bewusst grosszuegig (FatFS-Mount/fopen/fprintf brauchen zusammen
     // mehr als die vorher genutzten 4096 Byte - siehe aehnliche, durch
     // Stack-Druck ausgeloeste stille Abstuerze bei ble_obd_task/BTU_TASK).
-    xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 6144, NULL, 2, NULL, 0);
+    //
+    // Rueckgabewert bisher ungeprueft: Schlaegt die Allokation des 6144-Byte-
+    // Stacks mangels Heap fehl, haette der Schalter bisher fuer immer bei
+    // "Starte..." stehen bleiben und keinen weiteren Versuch mehr zulassen
+    // (s_busy bliebe dauerhaft true) - passt zum beobachteten "haengt
+    // minutenlang, keine einzige SNTP-Logzeile". Jetzt mit klarer
+    // Fehlermeldung und s_busy-Reset, statt stillschweigend zu haengen.
+    BaseType_t ok = xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 6144, NULL, 2, NULL, 0);
+    if (ok != pdPASS) {
+        SD_Log("SNTP: xTaskCreatePinnedToCore fehlgeschlagen (freier Heap=%u, groesster 8-Bit-Block=%u)",
+               (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        strlcpy(s_status, "Fehler: zu wenig Speicher", sizeof(s_status));
+        s_busy = false;
+    }
 }

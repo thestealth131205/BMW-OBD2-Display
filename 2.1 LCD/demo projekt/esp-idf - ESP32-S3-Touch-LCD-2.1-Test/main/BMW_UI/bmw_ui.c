@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 
@@ -261,8 +262,10 @@ static void bmw_settings_save(void)
 // Aufbau den zuletzt gespeicherten Stand zeigen statt der Standardwerte.
 static void bmw_settings_load(void)
 {
+    // READWRITE statt READONLY: der Bootloop-Schutz fuer "log_try" (siehe
+    // unten) muss bei Bedarf noch in dieser Funktion zuruecksetzen/erhoehen.
     nvs_handle_t h;
-    if (nvs_open(BMW_SETTINGS_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+    if (nvs_open(BMW_SETTINGS_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         return; // noch nie gespeichert (frischer Flash) - Standardwerte bleiben
     }
 
@@ -285,11 +288,57 @@ static void bmw_settings_load(void)
     if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
         g_buzzer_enabled = (v != 0);
     }
+
+    // Bootloop-Schutz fuer das wiederhergestellte Datenlogging: In v1.0.39
+    // ist bestaetigt (per ELF-Symbolaufloesung des Coredumps), dass
+    // deferred_start_datalogging_cb() -> start_datalogging() -> fopen() per
+    // newlib abort() abstuerzen kann (__retarget_lock_init_recursive ->
+    // lock_init_generic -> abort, vermutlich Heap-Druck kurz nach dem Boot).
+    // Da bmw_settings_save() das "an"-Flag unabhaengig vom Erfolg von
+    // start_datalogging() speichert, wuerde ein solcher Absturz ohne diesen
+    // Schutz bei JEDEM Neustart erneut ausgeloest -> Dauerbootloop, aus dem
+    // man ohne Nochmal-Flashen nicht mehr herauskommt. "log_try" zaehlt
+    // Boot-Versuche mit aktivem Logging, die NICHT bis zum erfolgreichen
+    // fopen() in start_datalogging() ueberlebt haben (das loescht den
+    // Zaehler wieder, siehe dort). Nach 2 gescheiterten Versuchen in Folge
+    // wird Logging fuer diesen Boot automatisch deaktiviert und dauerhaft
+    // ausgeschaltet, statt es erneut zu versuchen.
+    uint8_t log_try = 0;
+    nvs_get_u8(h, "log_try", &log_try);
+    if (g_datalog_enabled) {
+        if (log_try >= 2) {
+            g_datalog_enabled = false;
+            nvs_set_u8(h, "log_en", 0);
+            nvs_set_u8(h, "log_try", 0);
+            nvs_commit(h);
+            SD_Log("WARNUNG: Datenlogging nach %d gescheiterten Boot-Versuchen automatisch "
+                   "deaktiviert (Bootloop-Schutz)", (int)log_try);
+        } else {
+            nvs_set_u8(h, "log_try", (uint8_t)(log_try + 1));
+            nvs_commit(h);
+        }
+    }
     nvs_close(h);
 
-    SD_Log("Einstellungen aus NVS geladen: Quelle=%s Logging=%d Anzeige=%s Summer=%d",
+    SD_Log("Einstellungen aus NVS geladen: Quelle=%s Logging=%d Anzeige=%s Summer=%d "
+           "(freier Heap=%u, groesster 8-Bit-Block=%u)",
            g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP", (int)g_datalog_enabled,
-           g_multi_gauge_mode == MULTI_GAUGE_RPM ? "Drehzahl" : "Wasser", (int)g_buzzer_enabled);
+           g_multi_gauge_mode == MULTI_GAUGE_RPM ? "Drehzahl" : "Wasser", (int)g_buzzer_enabled,
+           (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+// Loescht den Bootloop-Schutz-Zaehler ("log_try"), nachdem start_datalogging()
+// tatsaechlich bis zum erfolgreichen fopen() durchgelaufen ist - erst dann
+// gilt dieser Boot-Versuch als ueberlebt.
+static void clear_datalog_boot_counter(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(BMW_SETTINGS_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    nvs_set_u8(h, "log_try", 0);
+    nvs_commit(h);
+    nvs_close(h);
 }
 
 // 3-Sekunden-Halten in der Bildschirmmitte -> Demo-Seite anzeigen,
@@ -449,6 +498,15 @@ static void start_datalogging(void)
     snprintf(path, sizeof(path), "/sdcard/log_%04d%02d%02d_%02d%02d%02d.csv",
              now.year, now.month, now.day, now.hour, now.minute, now.second);
 
+    // Heap-Stand unmittelbar vor dem fopen() protokollieren: Genau dieser
+    // Aufruf ist in v1.0.39 per Coredump/ELF-Symbolaufloesung als Absturzstelle
+    // bestaetigt (fopen -> __sfp -> __retarget_lock_init_recursive ->
+    // lock_init_generic -> abort). Ob das an knappem/fragmentiertem Heap
+    // liegt, zeigt sich erst mit echten Zahlen aus dem Feld statt zu raten.
+    SD_Log("Datenlogging: oeffne %s (freier Heap=%u, groesster 8-Bit-Block=%u)",
+           path, (unsigned)esp_get_free_heap_size(),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     log_file = fopen(path, "w");
     if (!log_file) {
         lv_label_set_text(log_status_label, "SD-Fehler!");
@@ -460,6 +518,10 @@ static void start_datalogging(void)
     fflush(log_file);
     log_last_tick = lv_tick_get();
     lv_label_set_text(log_status_label, "Aktiv");
+
+    // fopen() hat den abschuzgefaehrdeten Punkt diesmal ueberlebt - Bootloop-
+    // Schutz-Zaehler fuer den naechsten Boot wieder auf 0 setzen.
+    clear_datalog_boot_counter();
 }
 
 static void stop_datalogging(void)
@@ -474,11 +536,12 @@ static void stop_datalogging(void)
 // Einmaliger, verzoegerter Start fuer das beim Boot aus NVS wiederhergestellte
 // Datenlogging: fopen() kann intern einen neuen FreeRTOS-Mutex fuer die
 // FILE-Struktur allokieren (__retarget_lock_init_recursive); schlaegt das
-// waehrend des noch laufenden LVGL-UI-Aufbaus (viele Screens/Meter/Styles
-// werden gerade erst angelegt, Heap ist an dieser Stelle im Boot-Ablauf
-// deterministisch knapp) fehl, ruft newlib abort() -> Bootloop. Der Timer
-// verschiebt den fopen()-Aufruf auf einen Zeitpunkt nach Abschluss des
-// UI-Aufbaus, wenn der Heap sich wieder beruhigt hat.
+// fehl, ruft newlib abort() -> Bootloop. 1,5s Verzoegerung (v1.0.35/36) hat
+// den Absturz in v1.0.39 NICHT verhindert, nur verschoben (per Coredump
+// bestaetigt: crasht weiterhin genau hier). Deshalb jetzt zusaetzlich zur
+// laengeren Verzoegerung der Bootloop-Schutz in bmw_settings_load()/
+// clear_datalog_boot_counter() - der verhindert zumindest, dass ein
+// erneuter Absturz an dieser Stelle das Geraet dauerhaft unbrauchbar macht.
 static void deferred_start_datalogging_cb(lv_timer_t *timer)
 {
     lv_timer_del(timer);
@@ -628,7 +691,7 @@ static void create_settings_func_screen(void)
     // hier mitten im UI-Aufbau, das fuehrte deterministisch zum Bootloop.
     if (g_datalog_enabled) {
         lv_obj_add_state(log_switch, LV_STATE_CHECKED);
-        lv_timer_create(deferred_start_datalogging_cb, 1500, NULL);
+        lv_timer_create(deferred_start_datalogging_cb, 4000, NULL);
     }
 
     gauge_mode_label = lv_label_create(scr_settings_func);
