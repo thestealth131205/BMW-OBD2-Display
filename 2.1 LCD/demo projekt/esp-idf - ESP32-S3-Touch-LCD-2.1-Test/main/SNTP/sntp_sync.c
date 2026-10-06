@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,10 +44,19 @@ void SNTP_Sync_Cancel(void)
     }
 }
 
+// Ergebnis von load_or_create_wifi_config() - unterscheidet bewusst, WARUM
+// keine SSID vorliegt, damit die Statusanzeige nicht fuer "Karte fehlt" und
+// "Datei ist noch leer" denselben Text zeigt.
+typedef enum {
+    WIFI_CFG_OK,            // SSID gefunden, kann verbinden
+    WIFI_CFG_NO_SD,         // Karte nicht eingelegt/nicht mountbar
+    WIFI_CFG_NEEDS_INPUT,   // Datei (neu angelegt oder vorhanden) hat keine SSID
+    WIFI_CFG_IO_ERROR,      // Karte gemountet, aber fopen/fprintf schlug fehl
+} wifi_cfg_result_t;
+
 // Legt die Vorlage an, falls die Datei noch nicht existiert, und liest
-// andernfalls SSID=/PASSWORT= daraus aus. Gibt true zurueck, wenn eine
-// nicht-leere SSID gefunden wurde.
-static bool load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
+// andernfalls SSID=/PASSWORT= daraus aus.
+static wifi_cfg_result_t load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
 {
     ssid[0] = '\0';
     pass[0] = '\0';
@@ -55,43 +65,54 @@ static bool load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, 
     // erneut versuchen, statt die Vorlage nie anzulegen, obwohl die Karte
     // jetzt sichtbar im Schacht steckt (siehe gleiche Logik in bmw_ui.c
     // start_datalogging()).
-    if (!SD_EnsureMounted()) {
-        return false; // keine Karte gemountet - nichts zu lesen/anzulegen
+    bool mounted = SD_EnsureMounted();
+    SD_Log("SNTP: SD_EnsureMounted() -> %s (SDCard_Size=%lu MB)",
+           mounted ? "ok" : "FEHLGESCHLAGEN", (unsigned long)SDCard_Size);
+    if (!mounted) {
+        return WIFI_CFG_NO_SD; // keine Karte gemountet - nichts zu lesen/anzulegen
     }
     SD_Log_Init(); // no-op, falls schon beim Boot initialisiert
 
     FILE *f = fopen(WIFI_CONFIG_PATH, "r");
     if (!f) {
-        // Datei existiert noch nicht - Vorlage mit Erklaerung/Beispiel anlegen,
-        // damit am PC klar ist, wie SSID/Passwort eingetragen werden muessen.
+        // Datei existiert noch nicht (oder ist aus einem anderen Grund nicht
+        // lesbar, z.B. errno) - Vorlage mit Erklaerung/Beispiel anlegen, damit
+        // am PC klar ist, wie SSID/Passwort eingetragen werden muessen.
+        SD_Log("SNTP: fopen('%s', \"r\") fehlgeschlagen (errno=%d: %s), lege Vorlage an",
+               WIFI_CONFIG_PATH, errno, strerror(errno));
         f = fopen(WIFI_CONFIG_PATH, "w");
-        if (f) {
-            fprintf(f,
-                "# WLAN-Zugangsdaten fuer den manuellen Zeitabgleich (SNTP)\r\n"
-                "#\r\n"
-                "# Im Funktionen-Screen des Displays gibt es den Schalter 'Hotspot\r\n"
-                "# verbinden'. Wird er eingeschaltet, verbindet sich das Display\r\n"
-                "# EINMALIG kurz mit dem hier hinterlegten WLAN (z.B. Handy-Hotspot\r\n"
-                "# oder Heim-WLAN), holt sich die Uhrzeit von einem Zeitserver im\r\n"
-                "# Internet und schreibt sie in die eingebaute RTC. Mit einer RTC-\r\n"
-                "# Pufferbatterie haelt sie die Uhrzeit danach auch ohne Strom - ein\r\n"
-                "# einmaliger Abgleich reicht also. Ohne Schalter-Aktivierung wird\r\n"
-                "# NIE automatisch nach einem Hotspot gesucht.\r\n"
-                "#\r\n"
-                "# Zum Eintragen: Nach dem Gleichheitszeichen ohne Anfuehrungszeichen\r\n"
-                "# und ohne Leerzeichen ausfuellen, Datei speichern, Karte zurueck ins\r\n"
-                "# Display stecken. Zeilen, die mit # beginnen, werden ignoriert.\r\n"
-                "#\r\n"
-                "# Beispiel:\r\n"
-                "# SSID=MeinWLAN\r\n"
-                "# PASSWORT=MeinPasswort123\r\n"
-                "\r\n"
-                "SSID=\r\n"
-                "PASSWORT=\r\n");
-            fclose(f);
-            SD_Log("SNTP: %s nicht gefunden, Vorlage mit Beispiel angelegt", WIFI_CONFIG_PATH);
+        if (!f) {
+            SD_Log("SNTP: fopen('%s', \"w\") fehlgeschlagen (errno=%d: %s)",
+                   WIFI_CONFIG_PATH, errno, strerror(errno));
+            return WIFI_CFG_IO_ERROR;
         }
-        return false;
+        fprintf(f,
+            "# WLAN-Zugangsdaten fuer den manuellen Zeitabgleich (SNTP)\r\n"
+            "#\r\n"
+            "# Im Funktionen-Screen des Displays gibt es den Schalter 'Hotspot\r\n"
+            "# verbinden'. Wird er eingeschaltet, verbindet sich das Display\r\n"
+            "# EINMALIG kurz mit dem hier hinterlegten WLAN (z.B. Handy-Hotspot\r\n"
+            "# oder Heim-WLAN), holt sich die Uhrzeit von einem Zeitserver im\r\n"
+            "# Internet und schreibt sie in die eingebaute RTC. Mit einer RTC-\r\n"
+            "# Pufferbatterie haelt sie die Uhrzeit danach auch ohne Strom - ein\r\n"
+            "# einmaliger Abgleich reicht also. Ohne Schalter-Aktivierung wird\r\n"
+            "# NIE automatisch nach einem Hotspot gesucht.\r\n"
+            "#\r\n"
+            "# Zum Eintragen: Nach dem Gleichheitszeichen ohne Anfuehrungszeichen\r\n"
+            "# und ohne Leerzeichen ausfuellen, Datei speichern, Karte zurueck ins\r\n"
+            "# Display stecken. Zeilen, die mit # beginnen, werden ignoriert.\r\n"
+            "#\r\n"
+            "# Beispiel:\r\n"
+            "# SSID=MeinWLAN\r\n"
+            "# PASSWORT=MeinPasswort123\r\n"
+            "\r\n"
+            "SSID=\r\n"
+            "PASSWORT=\r\n");
+        fflush(f);
+        fsync(fileno(f));
+        fclose(f);
+        SD_Log("SNTP: %s nicht gefunden, Vorlage mit Beispiel angelegt", WIFI_CONFIG_PATH);
+        return WIFI_CFG_NEEDS_INPUT;
     }
 
     char line[160];
@@ -111,7 +132,8 @@ static bool load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, 
     }
     fclose(f);
 
-    return strlen(ssid) > 0;
+    SD_Log("SNTP: %s gelesen, SSID %s", WIFI_CONFIG_PATH, strlen(ssid) > 0 ? "vorhanden" : "LEER");
+    return strlen(ssid) > 0 ? WIFI_CFG_OK : WIFI_CFG_NEEDS_INPUT;
 }
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -168,10 +190,21 @@ static void sntp_sync_task(void *arg)
 
     char ssid[33];
     char pass[65];
-    bool have_config = load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
+    wifi_cfg_result_t cfg_result = load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
+    bool have_config = (cfg_result == WIFI_CFG_OK);
 
     if (!have_config) {
-        strlcpy(s_status, "Keine SSID in Datei hinterlegt", sizeof(s_status));
+        switch (cfg_result) {
+            case WIFI_CFG_NO_SD:
+                strlcpy(s_status, "SD-Karte nicht gefunden", sizeof(s_status));
+                break;
+            case WIFI_CFG_IO_ERROR:
+                strlcpy(s_status, "Fehler: SD-Karte nicht beschreibbar", sizeof(s_status));
+                break;
+            default: // WIFI_CFG_NEEDS_INPUT
+                strlcpy(s_status, "Bitte Hotspot-Daten eintragen", sizeof(s_status));
+                break;
+        }
         SD_Log("SNTP: %s", s_status);
     } else if (s_cancel_requested) {
         strlcpy(s_status, "Abgebrochen", sizeof(s_status));
@@ -264,5 +297,8 @@ void SNTP_Sync_Start(void)
     s_busy = true;
     s_cancel_requested = false;
     strlcpy(s_status, "Starte...", sizeof(s_status));
-    xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 4096, NULL, 2, NULL, 0);
+    // Stack bewusst grosszuegig (FatFS-Mount/fopen/fprintf brauchen zusammen
+    // mehr als die vorher genutzten 4096 Byte - siehe aehnliche, durch
+    // Stack-Druck ausgeloeste stille Abstuerze bei ble_obd_task/BTU_TASK).
+    xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 6144, NULL, 2, NULL, 0);
 }

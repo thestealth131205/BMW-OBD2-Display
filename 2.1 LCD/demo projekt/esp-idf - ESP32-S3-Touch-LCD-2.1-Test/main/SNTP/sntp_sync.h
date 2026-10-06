@@ -37,6 +37,6 @@ void SNTP_Sync_Cancel(void);
 // abgeschlossen).
 bool SNTP_Sync_IsBusy(void);
 
-// Kurzer Statustext fuer die Anzeige ("Inaktiv", "Verbinde...", "Zeit
-// abgeglichen", "Fehlgeschlagen: ...", ...).
+// Kurzer Statustext fuer die Anzeige ("Inaktiv", "SD-Karte nicht gefunden",
+// "Bitte Hotspot-Daten eintragen", "Verbinde...", "Zeit abgeglichen", ...).
 const char *SNTP_Sync_Status(void);
