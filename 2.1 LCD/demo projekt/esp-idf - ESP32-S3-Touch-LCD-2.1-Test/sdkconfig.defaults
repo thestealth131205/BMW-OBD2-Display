@@ -69,3 +69,14 @@ CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM=n
 # nur zur Laufzeit in ota_web.c), schaltet dieser Schalter die NVS-Nutzung
 # des WiFi-Treibers komplett ab.
 CONFIG_ESP_WIFI_NVS_ENABLED=n
+
+# "Hotspot verbinden" (SNTP) scheiterte mit "zu wenig Speicher" an
+# xTaskCreatePinnedToCore() fuer den neuen 6-KB-Task-Stack, obwohl die SD-Karte
+# laut Nutzer bereits FAT32/32GB war - also kein SD-Problem. Ursache: Task-
+# Stacks verlangen per Default internes DRAM, das sich Bluedroid (aktive
+# BLE-OBD-Verbindung) + WiFi-Puffer + LVGL bereits teilen (~300KB knapp),
+# waehrend die 8MB PSRAM (fuer die Framebuffer) reichlich frei sind. Offiziell
+# unterstuetzte ESP-IDF-Option, die Task-Stacks bei Bedarf aus PSRAM erlaubt -
+# entlastet nicht nur SNTP, sondern jede kuenftige xTaskCreate-Allokation
+# (z. B. den SD-Format-Task).
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
