@@ -107,7 +107,7 @@ static esp_ble_scan_params_t s_scan_params = {
     .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
     .scan_interval      = 0x50,
     .scan_window        = 0x30,
-    .scan_duplicate     = BLE_SCAN_DUPLICATE_DISABLE,
+    .scan_duplicate     = BLE_SCAN_DUPLICATE_ENABLE,
 };
 
 // --- Notify-Antwortpuffer: ELM327-Antworten enden immer mit dem Prompt
@@ -259,9 +259,18 @@ static void tx_seq_add(uint16_t h, esp_gatt_write_type_t t)
     }
 }
 
+static volatile bool s_suspended = false;
+
 static void ble_obd_start_scan(void)
 {
     s_connecting = false;
+    if (s_suspended) {
+        // Wird z.B. nach einem DISCONNECT_EVT erreicht, das waehrend einer
+        // BLE_OBD_Suspend()-Pause ausgeloest wurde - keine neue Suche
+        // anstossen, bis BLE_OBD_Resume() kommt.
+        set_status("Pausiert");
+        return;
+    }
     set_status("Suche");
     esp_ble_gap_start_scanning(0); // 0 = dauerhaft scannen, bis esp_ble_gap_stop_scanning()
 }
@@ -539,6 +548,14 @@ static void ble_obd_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
         OBD_LOGI("GATTC CONNECT conn_id=%d", (int)param->connect.conn_id);
         s_conn_id = param->connect.conn_id;
         memcpy(s_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+        if (s_suspended) {
+            // Verbindung kam noch rein, waehrend/kurz bevor BLE_OBD_Suspend()
+            // gerufen wurde (Scan-Ergebnis war schon unterwegs) - sofort
+            // wieder trennen, statt die Service-Suche zu starten.
+            OBD_LOGI("Verbindung durch Pause abgebrochen");
+            esp_ble_gattc_close(gattc_if, s_conn_id);
+            break;
+        }
         s_service_count = 0;
         set_status("Suche Service");
         esp_ble_gattc_search_service(gattc_if, param->connect.conn_id, NULL);
@@ -877,6 +894,29 @@ void BLE_OBD_Init(void)
     OBD_LOGI("BLE_OBD Firmware-Build %s %s (kombinierte Notify/Write-Char, TX-Fallback, async SD-Log)",
              __DATE__, __TIME__);
     xTaskCreatePinnedToCore(ble_obd_start_task, "ble_obd_start", 4096, NULL, 3, NULL, 0);
+}
+
+void BLE_OBD_Suspend(void)
+{
+    if (!s_started || s_suspended) return;
+    s_suspended = true;
+    OBD_LOGI("BLE_OBD pausiert (WLAN-Update aktiv)");
+    esp_ble_gap_stop_scanning();
+    if (s_connected) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id); // -> DISCONNECT_EVT, start_scan bleibt wegen s_suspended inaktiv
+    } else {
+        set_status("Pausiert");
+    }
+    // s_connecting (Verbindungsaufbau laeuft bereits, aber CONNECT_EVT noch
+    // nicht eingetroffen) wird direkt im CONNECT_EVT-Handler abgefangen.
+}
+
+void BLE_OBD_Resume(void)
+{
+    if (!s_started || !s_suspended) return;
+    s_suspended = false;
+    OBD_LOGI("BLE_OBD fortgesetzt, starte Suche neu");
+    ble_obd_start_scan();
 }
 
 bool BLE_OBD_online(void) { return s_online; }

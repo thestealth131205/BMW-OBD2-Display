@@ -14,6 +14,7 @@
 #include "esp_heap_caps.h"
 #include "lvgl.h"
 #include "sd_log.h"
+#include "ble_obd.h"
 
 // Mindestanzahl Bytes, bevor wir den App-Beschreibungsblock (esp_app_desc_t)
 // zuverlaessig aus der Partition zurücklesen koennen - der Block beginnt kurz
@@ -330,6 +331,16 @@ static void stop_ap_and_server(void)
 static void ota_ap_start_task(void *arg)
 {
     LV_UNUSED(arg);
+    // Die dauerhaft aktive BLE-OBD-Verbindung (alle 20ms ein Kommando) und
+    // der WiFi-AP teilen sich auf dem ESP32-S3 dieselbe 2,4-GHz-Antenne
+    // (Software-Koexistenz) - bei hoher BLE-Last kann esp_wifi_start() sonst
+    // minutenlang haengen bzw. nie zurueckkehren (beobachtet: "WLAN-Start
+    // dauert ungewoehnlich lange", Screen blieb dauerhaft stehen). BLE_OBD
+    // wird deshalb fuer die Dauer des Updates komplett pausiert, mit kurzer
+    // Verzoegerung, damit Scan-Stop/Disconnect sicher durchgelaufen sind,
+    // bevor WiFi die Antenne beansprucht.
+    BLE_OBD_Suspend();
+    vTaskDelay(pdMS_TO_TICKS(300));
     bool ok = start_ap_and_server();
     s_ap_active = ok;
     if (s_cancel_requested) {
@@ -339,6 +350,10 @@ static void ota_ap_start_task(void *arg)
         s_cancel_requested = false;
         SD_Log("OTA_WEB: Start fertig, aber zwischenzeitlich Stop angefordert - wird sofort nachgeholt");
         stop_ap_and_server();
+        BLE_OBD_Resume();
+    } else if (!ok) {
+        // WiFi-Start fehlgeschlagen - BLE_OBD nicht sinnlos pausiert lassen.
+        BLE_OBD_Resume();
     }
     s_ap_busy = false;
     vTaskDelete(NULL);
@@ -348,6 +363,7 @@ static void ota_ap_stop_task(void *arg)
 {
     LV_UNUSED(arg);
     stop_ap_and_server();
+    BLE_OBD_Resume();
     s_ap_busy = false;
     vTaskDelete(NULL);
 }

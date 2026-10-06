@@ -66,6 +66,16 @@ int BLE_OBD_dtc_count(void);
 // Fehlercode als Text (z.B. "P0301"), idx 0..BLE_OBD_dtc_count()-1.
 const char *BLE_OBD_dtc_code(int idx);
 
+// Stoppt Scan/Verbindung voruebergehend (kein automatisches Wiederverbinden,
+// bis BLE_OBD_Resume() aufgerufen wird). Gedacht fuer den WLAN-Update-Modus:
+// WiFi-AP und eine aktiv pollende BLE-Verbindung (alle 20ms ein Kommando)
+// teilen sich auf dem ESP32-S3 dieselbe 2,4-GHz-Antenne (Software-Koexistenz)
+// - bei hoher BLE-Last kann esp_wifi_start() dadurch extrem lange haengen
+// bzw. nie fertig werden. Mehrfachaufruf ist unschaedlich (no-op).
+void BLE_OBD_Suspend(void);
+// Nimmt die Suche nach dem Adapter wieder auf (nach BLE_OBD_Suspend()).
+void BLE_OBD_Resume(void);
+
 #ifdef __cplusplus
 }
 #endif
