@@ -174,6 +174,38 @@ statt eine ungültige Firmware zu flashen.
 einer Änderung der Partitionstabelle selbst einmal regulär per USB geflasht
 werden – danach funktioniert das WLAN-Update für alle folgenden Versionen.
 
+## RTC-Zeitabgleich per SNTP über Hotspot
+
+Die eingebaute PCF85063-RTC braucht einmalig eine korrekte Uhrzeit (z. B.
+für Zeitstempel im CSV-Logging und im SD-Log). Dafür gibt es im
+Funktionen-Screen (siehe UI-Logik unten) den Schalter **„Hotspot
+verbinden“**. Das ist ein eigenes, unabhängiges WLAN-Feature – **nicht** zu
+verwechseln mit dem WLAN-Update-Access-Point (`BMW-E90-OTA`) oben: Hier
+verbindet sich das Display selbst als **Client** mit einem WLAN, das
+Internetzugang hat (z. B. Handy-Hotspot oder Heim-WLAN).
+
+**Ablauf:**
+1. Zugangsdaten stehen (bewusst nicht im Code, dieses Repo ist öffentlich)
+   in der Textdatei `/sdcard/wifi-einstellungen.txt` auf der SD-Karte. Fehlt
+   sie noch, legt der erste Verbindungsversuch automatisch eine Vorlage mit
+   Erklärung/Beispiel an – Karte am PC entnehmen, `SSID=...` und
+   `PASSWORT=...` eintragen, Karte zurückstecken.
+2. Schalter **„Hotspot verbinden“** im Funktionen-Screen aktivieren.
+   **Es wird nie automatisch beim Boot gesucht** – nur nach diesem bewussten
+   Tastendruck, damit das BLE-OBD-Polling nicht unbeabsichtigt (z. B.
+   während der Fahrt) gestört wird.
+3. Das Display pausiert kurz die BLE-OBD-Verbindung (teilt sich dieselbe
+   2,4-GHz-Antenne), verbindet sich mit dem hinterlegten WLAN, synct die Zeit
+   per SNTP (`pool.ntp.org`) und schreibt sie lokal (inkl. Sommerzeit) in die
+   RTC. Darunter zeigt ein Statustext den Fortschritt
+   („Verbinde…“, „Zeit abgeglichen“, „Hotspot nicht erreichbar“, …).
+4. Der Schalter fällt nach dem (einmaligen) Versuch automatisch wieder ab –
+   er ist kein dauerhafter „verbunden“-Zustand. Mit einer RTC-Pufferbatterie
+   reicht ein einziger erfolgreicher Abgleich, die Zeit bleibt danach auch
+   über Stromverluste hinweg erhalten.
+5. Der Schalterzustand selbst wird **nicht** in NVS gespeichert – nach jedem
+   Neustart ist er wieder aus.
+
 ## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
 Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber + Decode-Task,
@@ -262,7 +294,20 @@ Service-Reset und das CSV-Logging.
 - **Wisch nach rechts** auf der Multi-Ansicht öffnet den Screen „SERVICE“ mit
   Buttons für weitere OBD2-Routinen (Oil reset, Brake reset, Brake Bleed,
   NOx Regen – die letzten beiden sind mangels bestätigter BMW-Diagnosebefehle
-  aktuell nicht hinterlegt). **Wisch nach links** führt zurück.
+  aktuell nicht hinterlegt). **Wisch nach rechts** auf diesem Screen öffnet
+  den Screen „SENSOREN“ (reine Digitalwert-Anzeige, 4 Zeilen × 2 Spalten):
+  Lambda Sensor 1/2 (Kraftstoff-Luft-Äquivalenzverhältnis) oben, darunter
+  deren Spannungswerte, darunter Ansaugkrümmerdruck (MAP) und Ladedruck,
+  unten Nockenwellen-Position Einlass/Auslass. Lambda und Ansaugdruck kommen
+  live per Standard-OBD2-PID (0x24/0x25/0x0B) von der eingestellten
+  Datenquelle; Ladedruck und Nockenwellen-Position zeigen immer „n/v“, da der
+  N43B20A laut `CLAUDE.md` keinen Turbo hat und es für beides ohnehin keine
+  standardisierte bzw. keine Mode-01-PID gibt (VANOS-Position wäre nur per
+  BMW-spezifischem UDS-Identifier auslesbar, nicht verifiziert). Die
+  Zuordnung „Lambda 1/2“ zu „Bank 1/2“ ist eine Annahme – beim N43 als
+  Reihenmotor mit nur einer Bank vermutlich eher Sensor vor/nach Kat
+  derselben Bank, am Fahrzeug noch zu verifizieren. **Wisch nach links**
+  führt zurück zu „SERVICE“, von dort weiter zurück zur Multi-Ansicht.
 - **3 Sekunden Touch in der Bildschirmmitte** zeigt den Waveshare-Demo-Screen
   (dort auch der Schalter für das **WLAN-Firmware-Update**, siehe oben), ein
   „Zurück“-Button führt zur BMW-Ansicht zurück.
@@ -270,9 +315,12 @@ Service-Reset und das CSV-Logging.
   (Primär-/Sekundärfarbe, wirkt sich auf alle Anzeigen und die Nadelfarbe
   aus). **Wisch nach rechts** auf diesem Screen öffnet „FUNKTIONEN“: Schalter
   für SD-Karten-Datenlogging (CSV, Excel-kompatibel), Umschalter
-  Wasser/Drehzahl für die große Multi-Kachel-Anzeige sowie ein Warnsummer
-  (Buzzer), der bei Kühlmitteltemperatur ≥ 120 °C auslöst (ein-/ausschaltbar).
-  **Wisch nach links** führt zurück zu den Farben.
+  Wasser/Drehzahl für die große Multi-Kachel-Anzeige, ein Warnsummer
+  (Buzzer), der bei Kühlmitteltemperatur ≥ 120 °C auslöst (ein-/ausschaltbar),
+  sowie der Schalter **„Hotspot verbinden“** für den einmaligen RTC-
+  Zeitabgleich per SNTP (siehe eigener Abschnitt oben, nicht gespeichert,
+  startet bei jedem Boot wieder aus). **Wisch nach links** führt zurück zu
+  den Farben.
 
 Details zur BMW-Multi-Ansicht siehe `CLAUDE.md` im Repo-Root sowie die
 projektspezifischen Notizen unter `2.1 LCD/demo projekt/esp-idf -

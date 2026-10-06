@@ -45,6 +45,31 @@ float BLE_OBD_throttle_pct(void);
 // Steuergeraete-Batteriespannung (ELM327-Kommando "ATRV").
 float BLE_OBD_bat_voltage(void);
 
+// --- Erweiterte Sensorwerte fuer den Sensoren-Screen (Standard-Mode-01-PIDs
+// 0x24/0x25/0x0B, im Rundlauf mit den anderen Live-Werten abgefragt, siehe
+// ble_obd_task()). Lambda = Kraftstoff-Luft-Aequivalenzverhaeltnis (1.0 =
+// stoechiometrisch), kein Rohspannungswert. "Lambda1"/"Lambda2" ist eine
+// Annahme: Standard-OBD2 nummeriert O2-Sensoren 1-8 (PID 0x24-0x2B)
+// durchlaufend, die Zuordnung zu Bank1/Bank2 ist fahrzeugabhaengig - beim N43
+// (Reihenmotor, nur eine Bank) sind das vermutlich Sensor1 (vor Kat) und
+// Sensor2 (nach Kat) derselben Bank, nicht zwei getrennte Baenke. Am
+// Fahrzeug noch zu verifizieren. ---
+float BLE_OBD_lambda1_ratio(void);
+float BLE_OBD_lambda1_voltage(void);
+float BLE_OBD_lambda2_ratio(void);
+float BLE_OBD_lambda2_voltage(void);
+// Ansaugkruemmerdruck (MAP), PID 0x0B, kPa.
+float BLE_OBD_intake_pressure(void);
+// Ladedruck (Turbo): Der N43B20A ist laut CLAUDE.md ein Saugmotor (kein
+// Turbo), zudem gibt es dafuer keine standardisierte Mode-01-PID - liefert
+// immer -1.0 (= "n/v" in der UI), es wird nichts geraten/abgefragt.
+float BLE_OBD_boost_pressure(void);
+// Nockenwellen-Position Einlass/Auslass (VANOS-Winkel): kein Standard-OBD2-
+// PID, nur per BMW-spezifischem UDS-Identifier auslesbar (nicht verifiziert,
+// nicht implementiert) - liefert immer -1.0 (= "n/v" in der UI).
+float BLE_OBD_cam_intake_pos(void);
+float BLE_OBD_cam_exhaust_pos(void);
+
 // Kein eigener Beschleunigungssensor ueber Standard-OBD2-PIDs verfuegbar
 // (im Gegensatz zum MCP2515-Pfad, der BMW-spezifische PT-CAN-Broadcasts
 // nutzt) - liefert immer 0.0.

@@ -21,7 +21,7 @@ static const char *TAG = "CAN_OBD2";
 #define ID_OBD2_RESP  0x7E8   // Antwort-ID des Motorsteuergeraets
 #define ID_KOMBI      0x611   // Kombiinstrument (CBS-Reset, UDS 0x31)
 
-#define OBD2_BAT_POLL_MS 1000  // Intervall fuer Mode-01-PID-0x42-Anfragen
+#define EXTRA_POLL_INTERVAL_MS 250  // Rundlauf-Intervall je PID (4 PIDs -> 1s/Zyklus, wie zuvor nur fuer 0x42)
 
 static volatile float s_speed_kmh    = 0.0f;
 static volatile float s_rpm          = 0.0f;
@@ -31,6 +31,14 @@ static volatile float s_gforce_x     = 0.0f;
 static volatile float s_gforce_y     = 0.0f;
 static volatile bool  s_online       = false;
 static volatile float s_obd2_bat_voltage = 0.0f;
+
+// --- Sensoren-Screen: Lambda (Ratio+Spannung) Sensor 1/2, Ansaugkruemmerdruck
+// (MAP) - siehe can_obd2.h fuer die Annahmen/Einschraenkungen dazu. ---
+static volatile float s_lambda1_ratio   = 0.0f;
+static volatile float s_lambda1_voltage = 0.0f;
+static volatile float s_lambda2_ratio   = 0.0f;
+static volatile float s_lambda2_voltage = 0.0f;
+static volatile float s_intake_pressure = 0.0f;
 
 #define MAX_DTC 8
 static volatile int s_dtc_count = -1;   // -1 = noch nicht ausgelesen
@@ -59,6 +67,21 @@ static void decode_frame(const mcp2515_frame_t *f)
             // Mode 01, PID 0x42 (Steuergeraete-Spannung): A/B in mV
             uint16_t raw = ((uint16_t)f->data[3] << 8) | f->data[4];
             s_obd2_bat_voltage = raw / 1000.0f;
+        } else if (f->dlc >= 7 && f->data[1] == 0x41 && f->data[2] == 0x24) {
+            // Mode 01, PID 0x24 (O2-Sensor 1, Lambda+Spannung): A,B,C,D
+            uint16_t ratio_raw = ((uint16_t)f->data[3] << 8) | f->data[4];
+            uint16_t volt_raw  = ((uint16_t)f->data[5] << 8) | f->data[6];
+            s_lambda1_ratio   = ratio_raw * (2.0f / 65536.0f);
+            s_lambda1_voltage = volt_raw  * (8.0f / 65536.0f);
+        } else if (f->dlc >= 7 && f->data[1] == 0x41 && f->data[2] == 0x25) {
+            // Mode 01, PID 0x25 (O2-Sensor 2, Lambda+Spannung)
+            uint16_t ratio_raw = ((uint16_t)f->data[3] << 8) | f->data[4];
+            uint16_t volt_raw  = ((uint16_t)f->data[5] << 8) | f->data[6];
+            s_lambda2_ratio   = ratio_raw * (2.0f / 65536.0f);
+            s_lambda2_voltage = volt_raw  * (8.0f / 65536.0f);
+        } else if (f->dlc >= 4 && f->data[1] == 0x41 && f->data[2] == 0x0B) {
+            // Mode 01, PID 0x0B (Ansaugkruemmerdruck/MAP): A in kPa
+            s_intake_pressure = (float)f->data[3];
         } else if (f->dlc >= 2 && f->data[1] == 0x43) {
             // Mode 03, positive Antwort: Fehlercodes ab Byte 2, je 2 Byte
             int n = 0;
@@ -105,7 +128,12 @@ static void decode_frame(const mcp2515_frame_t *f)
 static void can_task(void *arg)
 {
     mcp2515_frame_t f;
-    uint32_t last_bat_poll = 0;
+    uint32_t last_extra_poll = 0;
+    // Rundlauf: Batteriespannung (0x42) plus die drei neuen Sensoren-Screen-
+    // PIDs, je 250ms -> kompletter Zyklus weiterhin alle 1s wie zuvor nur
+    // fuer die Batteriespannung allein.
+    static const uint8_t extra_pids[] = {0x42, 0x24, 0x25, 0x0B};
+    int extra_idx = 0;
     while (1) {
         int drained = 0;
         while (mcp2515_receive(&f) && drained < 16) {
@@ -115,10 +143,11 @@ static void can_task(void *arg)
         }
 
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        if (now - last_bat_poll >= OBD2_BAT_POLL_MS) {
-            last_bat_poll = now;
-            uint8_t req[8] = {0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00};
+        if (now - last_extra_poll >= EXTRA_POLL_INTERVAL_MS) {
+            last_extra_poll = now;
+            uint8_t req[8] = {0x02, 0x01, extra_pids[extra_idx], 0x00, 0x00, 0x00, 0x00, 0x00};
             mcp2515_send(ID_OBD2_FUNC, req, 8);
+            extra_idx = (extra_idx + 1) % (int)(sizeof(extra_pids) / sizeof(extra_pids[0]));
         }
 
         vTaskDelay(pdMS_TO_TICKS(drained ? 2 : 10));
@@ -182,3 +211,12 @@ const char *CAN_OBD2_dtc_code(int idx)
 }
 
 float CAN_OBD2_bat_voltage(void) { return s_obd2_bat_voltage; }
+
+float CAN_OBD2_lambda1_ratio(void)   { return s_lambda1_ratio; }
+float CAN_OBD2_lambda1_voltage(void) { return s_lambda1_voltage; }
+float CAN_OBD2_lambda2_ratio(void)   { return s_lambda2_ratio; }
+float CAN_OBD2_lambda2_voltage(void) { return s_lambda2_voltage; }
+float CAN_OBD2_intake_pressure(void) { return s_intake_pressure; }
+float CAN_OBD2_boost_pressure(void)  { return -1.0f; }
+float CAN_OBD2_cam_intake_pos(void)  { return -1.0f; }
+float CAN_OBD2_cam_exhaust_pos(void) { return -1.0f; }

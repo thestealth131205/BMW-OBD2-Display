@@ -19,9 +19,29 @@
 
 #define SNTP_CONNECT_TIMEOUT_MS 10000
 #define SNTP_SYNC_TIMEOUT_MS 8000
-#define SD_WAIT_TIMEOUT_MS 5000
 
 #define WIFI_CONFIG_PATH "/sdcard/wifi-einstellungen.txt"
+
+static volatile bool s_busy = false;
+static volatile bool s_cancel_requested = false;
+static char s_status[64] = "Inaktiv";
+
+bool SNTP_Sync_IsBusy(void)
+{
+    return s_busy;
+}
+
+const char *SNTP_Sync_Status(void)
+{
+    return s_status;
+}
+
+void SNTP_Sync_Cancel(void)
+{
+    if (s_busy) {
+        s_cancel_requested = true;
+    }
+}
 
 // Legt die Vorlage an, falls die Datei noch nicht existiert, und liest
 // andernfalls SSID=/PASSWORT= daraus aus. Gibt true zurueck, wenn eine
@@ -42,13 +62,16 @@ static bool load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, 
         f = fopen(WIFI_CONFIG_PATH, "w");
         if (f) {
             fprintf(f,
-                "# WLAN-Zugangsdaten fuer den automatischen Zeitabgleich (SNTP)\r\n"
+                "# WLAN-Zugangsdaten fuer den manuellen Zeitabgleich (SNTP)\r\n"
                 "#\r\n"
-                "# Das Display verbindet sich damit EINMALIG kurz nach dem Einschalten\r\n"
-                "# mit diesem WLAN (z.B. Handy-Hotspot oder Heim-WLAN), holt sich die\r\n"
-                "# Uhrzeit von einem Zeitserver im Internet und schreibt sie in die\r\n"
-                "# eingebaute RTC. Mit einer RTC-Pufferbatterie haelt sie die Uhrzeit\r\n"
-                "# danach auch ohne Strom - ein einmaliger Abgleich reicht also.\r\n"
+                "# Im Funktionen-Screen des Displays gibt es den Schalter 'Hotspot\r\n"
+                "# verbinden'. Wird er eingeschaltet, verbindet sich das Display\r\n"
+                "# EINMALIG kurz mit dem hier hinterlegten WLAN (z.B. Handy-Hotspot\r\n"
+                "# oder Heim-WLAN), holt sich die Uhrzeit von einem Zeitserver im\r\n"
+                "# Internet und schreibt sie in die eingebaute RTC. Mit einer RTC-\r\n"
+                "# Pufferbatterie haelt sie die Uhrzeit danach auch ohne Strom - ein\r\n"
+                "# einmaliger Abgleich reicht also. Ohne Schalter-Aktivierung wird\r\n"
+                "# NIE automatisch nach einem Hotspot gesucht.\r\n"
                 "#\r\n"
                 "# Zum Eintragen: Nach dem Gleichheitszeichen ohne Anfuehrungszeichen\r\n"
                 "# und ohne Leerzeichen ausfuellen, Datei speichern, Karte zurueck ins\r\n"
@@ -138,97 +161,103 @@ static void sntp_sync_task(void *arg)
 {
     (void)arg;
 
-    // Diese Task hat eine hoehere Prioritaet als der Main-Task und koennte
-    // sonst schon laufen, bevor app_main() SD_Init() ueberhaupt aufgerufen
-    // hat. SD_Init_Done wird dort in jedem Fall gesetzt (Erfolg oder
-    // Fehlschlag) - kurz darauf warten, statt auf eine feste Verzoegerung
-    // zu vertrauen.
-    uint32_t sd_wait = 0;
-    while (!SD_Init_Done && sd_wait < SD_WAIT_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        sd_wait += 50;
-    }
-
     char ssid[33];
     char pass[65];
-    if (!load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass))) {
-        // Keine Karte, Datei fehlte noch (wurde gerade als Vorlage angelegt)
-        // oder SSID ist leer gelassen - Feature bleibt inaktiv.
-        vTaskDelete(NULL);
-        return;
-    }
+    bool have_config = load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
 
-    // Dem Boot-Scan aus Wireless.c (WIFI_Init) Zeit geben, seinen eigenen
-    // passiven Scan abzuschliessen und esp_wifi_stop() aufzurufen - sonst
-    // konkurrieren zwei Tasks um denselben WiFi-Treiber-Zustand. WiFi_Scan_
-    // Finish wird dort erst gesetzt, nachdem esp_wifi_init()/esp_wifi_start()
-    // bereits gelaufen sind, das Treiberhandle ist zu diesem Zeitpunkt also
-    // in jedem Fall gueltig.
-    uint32_t waited = 0;
-    while (!WiFi_Scan_Finish && waited < 8000) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        waited += 100;
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    // Teilt sich die 2,4-GHz-Antenne mit der dauerhaft aktiven BLE-OBD-
-    // Verbindung (gleiches Problem wie beim WLAN-Update, siehe ota_web.c).
-    BLE_OBD_Suspend();
-    vTaskDelay(pdMS_TO_TICKS(300));
-
-    s_wifi_event_group = xEventGroupCreate();
-    esp_event_handler_instance_t wifi_handler = NULL;
-    esp_event_handler_instance_t ip_handler = NULL;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &sntp_wifi_event_handler, NULL, &wifi_handler);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &sntp_wifi_event_handler, NULL, &ip_handler);
-
-    wifi_config_t sta_config = {0};
-    strlcpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid));
-    strlcpy((char *)sta_config.sta.password, pass, sizeof(sta_config.sta.password));
-    sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-    SD_Log("SNTP: esp_wifi_set_mode(STA) -> %s", esp_err_to_name(err));
-    err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-    SD_Log("SNTP: esp_wifi_set_config -> %s", esp_err_to_name(err));
-    err = esp_wifi_start();
-    SD_Log("SNTP: esp_wifi_start -> %s", esp_err_to_name(err));
-    err = esp_wifi_connect();
-    SD_Log("SNTP: esp_wifi_connect -> %s", esp_err_to_name(err));
-
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(SNTP_CONNECT_TIMEOUT_MS));
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        SD_Log("SNTP: mit Heim-WLAN verbunden, starte Zeitabgleich (pool.ntp.org)");
-        esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-        esp_netif_sntp_init(&sntp_cfg);
-        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_TIMEOUT_MS)) == ESP_OK) {
-            if (!write_time_to_rtc()) {
-                SD_Log("SNTP: Zeitserver-Antwort erhalten, aber Systemzeit wirkt ungueltig - RTC nicht geschrieben");
-            }
-        } else {
-            SD_Log("SNTP: Zeitserver antwortete nicht innerhalb von %ds", SNTP_SYNC_TIMEOUT_MS / 1000);
-        }
-        esp_netif_sntp_deinit();
+    if (!have_config) {
+        strlcpy(s_status, "Keine SSID in Datei hinterlegt", sizeof(s_status));
+        SD_Log("SNTP: %s", s_status);
+    } else if (s_cancel_requested) {
+        strlcpy(s_status, "Abgebrochen", sizeof(s_status));
     } else {
-        SD_Log("SNTP: Heim-WLAN nicht erreichbar/Verbindung fehlgeschlagen - RTC bleibt unveraendert");
+        // Teilt sich die 2,4-GHz-Antenne mit der dauerhaft aktiven BLE-OBD-
+        // Verbindung (gleiches Problem wie beim WLAN-Update, siehe ota_web.c).
+        strlcpy(s_status, "Pausiere BLE...", sizeof(s_status));
+        BLE_OBD_Suspend();
+        vTaskDelay(pdMS_TO_TICKS(300));
+
+        if (s_cancel_requested) {
+            strlcpy(s_status, "Abgebrochen", sizeof(s_status));
+        } else {
+            strlcpy(s_status, "Verbinde...", sizeof(s_status));
+
+            s_wifi_event_group = xEventGroupCreate();
+            esp_event_handler_instance_t wifi_handler = NULL;
+            esp_event_handler_instance_t ip_handler = NULL;
+            esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &sntp_wifi_event_handler, NULL, &wifi_handler);
+            esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &sntp_wifi_event_handler, NULL, &ip_handler);
+
+            wifi_config_t sta_config = {0};
+            strlcpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid));
+            strlcpy((char *)sta_config.sta.password, pass, sizeof(sta_config.sta.password));
+            sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+            esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+            SD_Log("SNTP: esp_wifi_set_mode(STA) -> %s", esp_err_to_name(err));
+            err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+            SD_Log("SNTP: esp_wifi_set_config -> %s", esp_err_to_name(err));
+            err = esp_wifi_start();
+            SD_Log("SNTP: esp_wifi_start -> %s", esp_err_to_name(err));
+            err = esp_wifi_connect();
+            SD_Log("SNTP: esp_wifi_connect -> %s", esp_err_to_name(err));
+
+            // In kleinen Schritten warten statt eines einzigen langen Timeouts,
+            // damit ein Cancel (Schalter waehrenddessen ausgeschaltet) zuegig
+            // greift statt bis zu 10s zu blockieren.
+            EventBits_t bits = 0;
+            uint32_t waited = 0;
+            while (waited < SNTP_CONNECT_TIMEOUT_MS) {
+                bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(200));
+                if (bits & (WIFI_CONNECTED_BIT | WIFI_FAIL_BIT)) break;
+                if (s_cancel_requested) break;
+                waited += 200;
+            }
+
+            if (s_cancel_requested) {
+                strlcpy(s_status, "Abgebrochen", sizeof(s_status));
+            } else if (bits & WIFI_CONNECTED_BIT) {
+                strlcpy(s_status, "Zeitabgleich laeuft...", sizeof(s_status));
+                SD_Log("SNTP: mit Hotspot verbunden, starte Zeitabgleich (pool.ntp.org)");
+                esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+                esp_netif_sntp_init(&sntp_cfg);
+                if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_TIMEOUT_MS)) == ESP_OK) {
+                    strlcpy(s_status, write_time_to_rtc() ? "Zeit abgeglichen" : "Fehler: ungueltige Zeit",
+                            sizeof(s_status));
+                } else {
+                    strlcpy(s_status, "Fehler: Zeitserver antwortet nicht", sizeof(s_status));
+                }
+                esp_netif_sntp_deinit();
+            } else {
+                strlcpy(s_status, "Hotspot nicht erreichbar", sizeof(s_status));
+            }
+            SD_Log("SNTP: %s", s_status);
+
+            esp_wifi_disconnect();
+            esp_wifi_stop();
+
+            esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_handler);
+            esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_handler);
+            vEventGroupDelete(s_wifi_event_group);
+            s_wifi_event_group = NULL;
+        }
+
+        BLE_OBD_Resume();
     }
 
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-
-    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_handler);
-    esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_handler);
-    vEventGroupDelete(s_wifi_event_group);
-    s_wifi_event_group = NULL;
-
-    BLE_OBD_Resume();
-
+    s_cancel_requested = false;
+    s_busy = false;
     vTaskDelete(NULL);
 }
 
-void SNTP_Sync_Init(void)
+void SNTP_Sync_Start(void)
 {
+    if (s_busy) {
+        return; // schon ein Versuch aktiv, Doppelstart vermeiden
+    }
+    s_busy = true;
+    s_cancel_requested = false;
+    strlcpy(s_status, "Starte...", sizeof(s_status));
     xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 4096, NULL, 2, NULL, 0);
 }

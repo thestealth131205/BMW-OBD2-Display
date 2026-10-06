@@ -19,7 +19,6 @@
 #include "ble_obd.h"
 #include "esp_core_dump.h"
 #include "boot_logo_img.h"
-#include "sntp_sync.h"
 
 // Boot-Start-Logo: kurz auf schwarzem Grund anzeigen, bevor die eigentliche
 // UI (Demo-Screen + BMW-Multi-Ansicht) aufgebaut wird. LVGL braucht dafuer
@@ -126,13 +125,10 @@ void app_main(void)
     Wireless_Init();
     Driver_Init();
 
-    // Einmaliger SNTP-Zeitabgleich (nur aktiv, wenn auf der SD-Karte in
-    // /sdcard/wifi-einstellungen.txt eine SSID eingetragen ist, siehe
-    // sntp_sync.h). Laeuft als eigener Hintergrund-Task, blockiert
-    // app_main() nicht. Ergebnis landet in der PCF85063-RTC - mit der
-    // geplanten Pufferbatterie haelt sie das danach auch ueber
-    // Stromverluste hinweg, ein einmaliger Abgleich reicht also.
-    SNTP_Sync_Init();
+    // Kein automatischer SNTP-Zeitabgleich mehr beim Boot: Der Nutzer loest
+    // ihn gezielt per "Hotspot verbinden"-Schalter im Funktionen-Screen aus
+    // (bmw_ui.c -> SNTP_Sync_Start(), siehe sntp_sync.h). So wird nie
+    // unbeabsichtigt nach einem Hotspot gesucht, z.B. waehrend der Fahrt.
 
     LCD_Init();
     Touch_Init();

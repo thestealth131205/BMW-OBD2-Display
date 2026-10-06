@@ -128,6 +128,14 @@ static volatile float s_water_temp      = 0.0f;
 static volatile float s_throttle_pct    = 0.0f;
 static volatile float s_bat_voltage     = 0.0f;
 
+// --- Sensoren-Screen: Lambda (Ratio+Spannung) Sensor 1/2, Ansaugkruemmerdruck
+// (MAP) - siehe ble_obd.h fuer die Annahmen/Einschraenkungen dazu. ---
+static volatile float s_lambda1_ratio   = 0.0f;
+static volatile float s_lambda1_voltage = 0.0f;
+static volatile float s_lambda2_ratio   = 0.0f;
+static volatile float s_lambda2_voltage = 0.0f;
+static volatile float s_intake_pressure = 0.0f;
+
 static volatile int s_dtc_count = -1;
 static char s_dtc_codes[MAX_DTC][6];
 
@@ -827,8 +835,38 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
+        case 4:
+            if (send_at_cmd("0124", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x24) {
+                    uint16_t ratio_raw = ((uint16_t)bytes[2] << 8) | bytes[3];
+                    uint16_t volt_raw  = ((uint16_t)bytes[4] << 8) | bytes[5];
+                    s_lambda1_ratio   = ratio_raw * (2.0f / 65536.0f);
+                    s_lambda1_voltage = volt_raw  * (8.0f / 65536.0f);
+                }
+            }
+            break;
+        case 5:
+            if (send_at_cmd("0125", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x25) {
+                    uint16_t ratio_raw = ((uint16_t)bytes[2] << 8) | bytes[3];
+                    uint16_t volt_raw  = ((uint16_t)bytes[4] << 8) | bytes[5];
+                    s_lambda2_ratio   = ratio_raw * (2.0f / 65536.0f);
+                    s_lambda2_voltage = volt_raw  * (8.0f / 65536.0f);
+                }
+            }
+            break;
+        case 6:
+            if (send_at_cmd("010B", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x0B) {
+                    s_intake_pressure = (float)bytes[2];
+                }
+            }
+            break;
         }
-        poll_step = (poll_step + 1) % 4;
+        poll_step = (poll_step + 1) % 7;
 
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         if (now - last_bat_poll >= 1000) {
@@ -930,6 +968,15 @@ float BLE_OBD_throttle_pct(void) { return s_throttle_pct; }
 float BLE_OBD_bat_voltage(void) { return s_bat_voltage; }
 float BLE_OBD_gforce_x(void) { return 0.0f; }
 float BLE_OBD_gforce_y(void) { return 0.0f; }
+
+float BLE_OBD_lambda1_ratio(void)   { return s_lambda1_ratio; }
+float BLE_OBD_lambda1_voltage(void) { return s_lambda1_voltage; }
+float BLE_OBD_lambda2_ratio(void)   { return s_lambda2_ratio; }
+float BLE_OBD_lambda2_voltage(void) { return s_lambda2_voltage; }
+float BLE_OBD_intake_pressure(void) { return s_intake_pressure; }
+float BLE_OBD_boost_pressure(void)  { return -1.0f; }
+float BLE_OBD_cam_intake_pos(void)  { return -1.0f; }
+float BLE_OBD_cam_exhaust_pos(void) { return -1.0f; }
 
 void BLE_OBD_read_dtc(void)
 {

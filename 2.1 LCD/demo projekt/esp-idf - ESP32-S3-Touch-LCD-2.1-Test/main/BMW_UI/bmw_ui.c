@@ -4,6 +4,7 @@
 #include "field_icons.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
+#include "sntp_sync.h"
 #include "service_funcs.h"
 #include "PCF85063.h"
 #include "sd_log.h"
@@ -100,6 +101,11 @@ static lv_obj_t *scr_settings_func;
 static lv_obj_t *scr_dtc;
 static lv_obj_t *scr_service;
 static lv_obj_t *service_status_label;
+static lv_obj_t *scr_sensors;
+static lv_obj_t *sens_lambda1_val, *sens_lambda2_val;
+static lv_obj_t *sens_lambda1_volt_val, *sens_lambda2_volt_val;
+static lv_obj_t *sens_map_val, *sens_boost_val;
+static lv_obj_t *sens_cam_in_val, *sens_cam_ex_val;
 
 static lv_obj_t *multi_meter;
 static lv_meter_scale_t *multi_needle_scale;
@@ -454,6 +460,20 @@ static void stop_datalogging(void)
     lv_label_set_text(log_status_label, "");
 }
 
+// Einmaliger, verzoegerter Start fuer das beim Boot aus NVS wiederhergestellte
+// Datenlogging: fopen() kann intern einen neuen FreeRTOS-Mutex fuer die
+// FILE-Struktur allokieren (__retarget_lock_init_recursive); schlaegt das
+// waehrend des noch laufenden LVGL-UI-Aufbaus (viele Screens/Meter/Styles
+// werden gerade erst angelegt, Heap ist an dieser Stelle im Boot-Ablauf
+// deterministisch knapp) fehl, ruft newlib abort() -> Bootloop. Der Timer
+// verschiebt den fopen()-Aufruf auf einen Zeitpunkt nach Abschluss des
+// UI-Aufbaus, wenn der Heap sich wieder beruhigt hat.
+static void deferred_start_datalogging_cb(lv_timer_t *timer)
+{
+    lv_timer_del(timer);
+    start_datalogging();
+}
+
 static void log_switch_cb(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
@@ -506,6 +526,25 @@ static void buzzer_switch_cb(lv_event_t *e)
         g_buzzer_active = false;
     }
     bmw_settings_save();
+}
+
+// "Hotspot verbinden"-Schalter: loest einen einmaligen SNTP-Zeitabgleich
+// aus (siehe sntp_sync.h), ohne dauerhaft zu speichern - dieser Schalter
+// ist bewusst NICHT Teil von bmw_settings_save()/_load(), nach jedem
+// Neustart ist er also wieder aus und es wird nie unbeabsichtigt nach
+// einem Hotspot gesucht. BMW_UI_Update() schaltet ihn automatisch wieder
+// aus, sobald der (einmalige) Versuch fertig ist, siehe dort.
+static lv_obj_t *hotspot_switch;
+static lv_obj_t *hotspot_status_label;
+
+static void hotspot_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+        SNTP_Sync_Start();
+    } else {
+        SNTP_Sync_Cancel();
+    }
 }
 
 // Einstellungs-Screen mit Primaer-/Sekundaerfarb-Auswahl, erreichbar per
@@ -573,10 +612,12 @@ static void create_settings_func_screen(void)
 
     // Aus NVS geladener Zustand (bmw_settings_load(), vor dem UI-Aufbau
     // aufgerufen): Schalter entsprechend vorbelegen und Logging bei Bedarf
-    // sofort starten, statt immer mit "aus" zu beginnen.
+    // starten, statt immer mit "aus" zu beginnen. Der eigentliche fopen()
+    // erfolgt verzoegert (siehe deferred_start_datalogging_cb) statt direkt
+    // hier mitten im UI-Aufbau, das fuehrte deterministisch zum Bootloop.
     if (g_datalog_enabled) {
         lv_obj_add_state(log_switch, LV_STATE_CHECKED);
-        start_datalogging();
+        lv_timer_create(deferred_start_datalogging_cb, 1500, NULL);
     }
 
     gauge_mode_label = lv_label_create(scr_settings_func);
@@ -605,6 +646,22 @@ static void create_settings_func_screen(void)
     }
     lv_obj_add_event_cb(buzzer_switch, buzzer_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+    // Einmaliger SNTP-Zeitabgleich ueber den in /sdcard/wifi-einstellungen.txt
+    // hinterlegten Hotspot - bewusst NICHT in NVS gespeichert (siehe
+    // hotspot_switch_cb), startet bei jedem Boot wieder aus.
+    lv_obj_t *hotspot_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(hotspot_label, "Hotspot verbinden");
+    lv_obj_align(hotspot_label, LV_ALIGN_TOP_MID, 0, 280);
+
+    hotspot_switch = lv_switch_create(scr_settings_func);
+    lv_obj_align(hotspot_switch, LV_ALIGN_TOP_MID, 0, 302);
+    lv_obj_add_event_cb(hotspot_switch, hotspot_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    hotspot_status_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(hotspot_status_label, "Inaktiv");
+    lv_obj_set_style_text_color(hotspot_status_label, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(hotspot_status_label, LV_ALIGN_TOP_MID, 0, 330);
+
     lv_obj_t *hint = lv_label_create(scr_settings_func);
     lv_label_set_text(hint, "<- Wisch: Farben");
     lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
@@ -629,6 +686,10 @@ static void swipe_gesture_cb(lv_event_t *e)
         lv_scr_load_anim(scr_service, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     } else if (scr == scr_service && dir == LV_DIR_LEFT) {
         lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    } else if (scr == scr_service && dir == LV_DIR_RIGHT) {
+        lv_scr_load_anim(scr_sensors, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    } else if (scr == scr_sensors && dir == LV_DIR_LEFT) {
+        lv_scr_load_anim(scr_service, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     } else if (scr == scr_settings && dir == LV_DIR_RIGHT) {
         lv_scr_load_anim(scr_settings_func, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     } else if (scr == scr_settings_func && dir == LV_DIR_LEFT) {
@@ -784,6 +845,64 @@ static void create_service_screen(void)
     lv_obj_align(service_status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
 
     lv_obj_add_event_cb(scr_service, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+
+// --- Sensoren-Screen: reine Digitalwert-Anzeige fuer Werte, die auf keiner
+// der 6 Hauptkacheln Platz haben. Erreichbar per Wisch nach rechts auf dem
+// Service-Screen (also "hinter" Multi-Ansicht -> Service), Wisch nach links
+// geht zurueck. Lambda/Ansaugdruck kommen live per Standard-OBD2-PID von der
+// eingestellten Datenquelle (siehe BMW_UI_Update()). Ladedruck und
+// Nockenwellen-Position zeigen immer "n/v": Fuer Ladedruck gibt es keine
+// standardisierte Mode-01-PID (und der N43B20A hat laut CLAUDE.md ohnehin
+// keinen Turbo), fuer die VANOS-Nockenwellenposition existiert ueberhaupt
+// kein Standard-OBD2-PID - das waere nur per BMW-spezifischem UDS-Identifier
+// auslesbar, was hier bewusst nicht blind nachgebaut wurde (vgl. die
+// ungeklaerten NOx-Regeneration-/Bremsenentlueften-Service-Funktionen).
+static lv_obj_t *create_sensor_cell(lv_obj_t *parent, const char *caption, int x, int y)
+{
+    lv_obj_t *cap = lv_label_create(parent);
+    lv_label_set_text(cap, caption);
+    lv_obj_set_style_text_color(cap, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(cap, LV_ALIGN_TOP_MID, x, y);
+
+    lv_obj_t *val = lv_label_create(parent);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_28, 0);
+    lv_label_set_text(val, "---");
+    lv_obj_align(val, LV_ALIGN_TOP_MID, x, y + 22);
+    return val;
+}
+
+static void create_sensors_screen(void)
+{
+    scr_sensors = lv_obj_create(NULL);
+    set_dark_bg(scr_sensors);
+    lv_obj_clear_flag(scr_sensors, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(scr_sensors);
+    lv_label_set_text(title, "SENSOREN");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 25);
+
+    sens_lambda1_val      = create_sensor_cell(scr_sensors, "Lambda B1",     -110, 70);
+    sens_lambda2_val      = create_sensor_cell(scr_sensors, "Lambda B2",      110, 70);
+    sens_lambda1_volt_val = create_sensor_cell(scr_sensors, "Lambda B1 Sp.", -110, 150);
+    sens_lambda2_volt_val = create_sensor_cell(scr_sensors, "Lambda B2 Sp.",  110, 150);
+    sens_map_val          = create_sensor_cell(scr_sensors, "Ansaugdruck",  -110, 230);
+    sens_boost_val        = create_sensor_cell(scr_sensors, "Ladedruck",     110, 230);
+    sens_cam_in_val       = create_sensor_cell(scr_sensors, "NW Einlass",   -110, 310);
+    sens_cam_ex_val       = create_sensor_cell(scr_sensors, "NW Auslass",    110, 310);
+
+    // Werden nie per OBD2 beantwortet (siehe Kommentar oben) - einmalig fest
+    // auf "n/v" setzen statt bei jedem BMW_UI_Update()-Tick neu zu schreiben.
+    lv_label_set_text(sens_boost_val, "n/v");
+    lv_label_set_text(sens_cam_in_val, "n/v");
+    lv_label_set_text(sens_cam_ex_val, "n/v");
+
+    lv_obj_t *hint = lv_label_create(scr_sensors);
+    lv_label_set_text(hint, "<- Wisch: Service");
+    lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    lv_obj_add_event_cb(scr_sensors, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
 // Rampe fuer die Start-Testanimation: 0 -> max (ANIM_UP_MS) -> 0 (ANIM_DOWN_MS),
@@ -1027,6 +1146,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     create_settings_func_screen();
     create_dtc_screen();
     create_service_screen();
+    create_sensors_screen();
 
     anim_start_tick = lv_tick_get();
     anim_done = false;
@@ -1122,6 +1242,19 @@ void BMW_UI_Update(void)
         g_buzzer_active = false;
     }
 
+    // "Hotspot verbinden": Statustext live aus sntp_sync.c, Schalter faellt
+    // automatisch wieder ab, sobald der einmalige Versuch fertig ist (Erfolg,
+    // Fehler oder Abbruch) - er ist kein dauerhafter "verbunden"-Zustand.
+    {
+        static bool last_sntp_busy = false;
+        bool sntp_busy = SNTP_Sync_IsBusy();
+        lv_label_set_text(hotspot_status_label, SNTP_Sync_Status());
+        if (last_sntp_busy && !sntp_busy) {
+            lv_obj_clear_state(hotspot_switch, LV_STATE_CHECKED);
+        }
+        last_sntp_busy = sntp_busy;
+    }
+
     for (int i = 0; i < 8; i++) {
         lv_label_set_text_fmt(multi_throttle_outline[i], "%d%%", (int)current_throttle_pct);
         lv_label_set_text_fmt(multi_rpm_outline[i], "%d", (int)current_rpm);
@@ -1171,6 +1304,39 @@ void BMW_UI_Update(void)
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%s", i > 0 ? "\n" : "", code);
         }
         lv_label_set_text(dtc_list_label, buf);
+    }
+
+    // Sensoren-Screen: Lambda/Ansaugdruck leben, solange die Quelle online
+    // ist, sonst bleiben die Felder auf "---" stehen. Ladedruck/Nockenwellen-
+    // Position sind bereits einmalig in create_sensors_screen() auf "n/v"
+    // gesetzt und werden hier nicht mehr angefasst (sie aendern sich nie).
+    {
+        bool sensors_online = use_ble_src ? BLE_OBD_online() : CAN_OBD2_online();
+        char sbuf[16];
+        if (sensors_online) {
+            float l1r = use_ble_src ? BLE_OBD_lambda1_ratio()   : CAN_OBD2_lambda1_ratio();
+            float l1v = use_ble_src ? BLE_OBD_lambda1_voltage() : CAN_OBD2_lambda1_voltage();
+            float l2r = use_ble_src ? BLE_OBD_lambda2_ratio()   : CAN_OBD2_lambda2_ratio();
+            float l2v = use_ble_src ? BLE_OBD_lambda2_voltage() : CAN_OBD2_lambda2_voltage();
+            float map_kpa = use_ble_src ? BLE_OBD_intake_pressure() : CAN_OBD2_intake_pressure();
+
+            snprintf(sbuf, sizeof(sbuf), "%.2f", l1r);
+            lv_label_set_text(sens_lambda1_val, sbuf);
+            snprintf(sbuf, sizeof(sbuf), "%.2f", l2r);
+            lv_label_set_text(sens_lambda2_val, sbuf);
+            snprintf(sbuf, sizeof(sbuf), "%.2fV", l1v);
+            lv_label_set_text(sens_lambda1_volt_val, sbuf);
+            snprintf(sbuf, sizeof(sbuf), "%.2fV", l2v);
+            lv_label_set_text(sens_lambda2_volt_val, sbuf);
+            snprintf(sbuf, sizeof(sbuf), "%.0f kPa", map_kpa);
+            lv_label_set_text(sens_map_val, sbuf);
+        } else {
+            lv_label_set_text(sens_lambda1_val, "---");
+            lv_label_set_text(sens_lambda2_val, "---");
+            lv_label_set_text(sens_lambda1_volt_val, "---");
+            lv_label_set_text(sens_lambda2_volt_val, "---");
+            lv_label_set_text(sens_map_val, "---");
+        }
     }
 
     // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)

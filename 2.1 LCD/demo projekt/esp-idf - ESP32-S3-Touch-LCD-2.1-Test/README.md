@@ -150,6 +150,30 @@ statt eine ungültige Firmware zu flashen.
 einer Änderung der Partitionstabelle selbst einmal regulär per USB geflasht
 werden – danach funktioniert das WLAN-Update für alle folgenden Versionen.
 
+## RTC-Zeitabgleich per SNTP über Hotspot
+
+Eigenes Modul `main/SNTP/sntp_sync.c`, unabhängig vom WLAN-Update-AP oben:
+Hier verbindet sich das Display als **Client** mit einem WLAN, das
+Internetzugang hat (Handy-Hotspot/Heim-WLAN), um die PCF85063-RTC einmalig
+per SNTP (`pool.ntp.org`) zu stellen.
+
+- Ausgelöst wird das **ausschließlich** über den Schalter **„Hotspot
+  verbinden“** im Funktionen-Screen (Doppeltipp → Wisch rechts, siehe
+  BMW-UI-Logik unten) – **kein** automatischer Versuch beim Boot, damit die
+  BLE-OBD-Verbindung nicht unbeabsichtigt (z. B. während der Fahrt) gestört
+  wird.
+- Zugangsdaten stehen in `/sdcard/wifi-einstellungen.txt` auf der SD-Karte
+  (bewusst nicht im Code, dieses Repo ist öffentlich). Fehlt die Datei noch,
+  legt der erste Versuch automatisch eine Vorlage mit Beispiel an.
+- Ablauf: BLE-OBD kurz pausieren (gleiche Antennen-Koexistenz wie beim
+  WLAN-Update) → per STA verbinden → SNTP-Sync → Zeit lokal (inkl.
+  Sommerzeit) in die RTC schreiben → BLE-OBD fortsetzen. Ein Statustext unter
+  dem Schalter zeigt den Fortschritt, der Schalter fällt nach dem (einmaligen)
+  Versuch automatisch wieder ab.
+- Der Schalterzustand wird **nicht** in NVS gespeichert – nach jedem Neustart
+  ist er wieder aus. Mit einer RTC-Pufferbatterie reicht ein einziger
+  erfolgreicher Abgleich.
+
 ## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
 Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber +
@@ -228,3 +252,24 @@ zum C6-Projekt:
   blinken alle gemeinsam.
 - Farbverwaltung/Nadel-Auswahl per Einstellungs-Screen (Doppeltipp), analog
   zur Farbpalette im C6-Projekt.
+- Funktionen-Screen (Wisch rechts ab Einstellungs-Screen) enthält zusätzlich
+  den Schalter „Hotspot verbinden“ für den manuellen RTC-Zeitabgleich per
+  SNTP (siehe eigener Abschnitt oben) – im C6-Projekt nicht vorhanden.
+- Neuer Screen „SENSOREN“ (Wisch rechts ab dem Service-Screen, Wisch links
+  zurück): reine Digitalwert-Anzeige, 4 Zeilen × 2 Spalten – Lambda Sensor
+  1/2 oben, darunter deren Spannungswerte, darunter Ansaugkrümmerdruck (MAP)
+  und Ladedruck, unten Nockenwellen-Position Einlass/Auslass. Lambda
+  (`BLE_OBD_lambda1_ratio()`/`..._voltage()` bzw. `CAN_OBD2_...`, PID 0x24/
+  0x25) und Ansaugdruck (PID 0x0B) kommen live von der eingestellten
+  Datenquelle. Ladedruck und Nockenwellen-Position liefern immer -1.0
+  (Anzeige „n/v“): Für Ladedruck gibt es keine standardisierte Mode-01-PID
+  und der N43B20A hat laut Haupt-`CLAUDE.md` ohnehin keinen Turbo; für die
+  VANOS-Nockenwellenposition existiert gar kein Standard-OBD2-PID, das wäre
+  nur per BMW-spezifischem UDS-Identifier auslesbar und wurde bewusst nicht
+  blind nachgebaut (ungeprüfte Diagnosebefehle an Steuergeräte sind riskant,
+  vgl. die ebenfalls offenen Punkte NOx-Regeneration/Bremsenentlüften im
+  Service-Screen). Die Zuordnung „Lambda 1/2“ zu „Bank 1/2“ ist eine Annahme
+  – Standard-OBD2 nummeriert O2-Sensoren 1–8 durchlaufend, die Zuordnung zu
+  Bank1/Bank2 ist fahrzeugabhängig; beim N43 als Reihenmotor mit nur einer
+  Bank sind das vermutlich Sensor vor/nach Kat derselben Bank, nicht zwei
+  getrennte Bänke – am Fahrzeug noch zu verifizieren.
