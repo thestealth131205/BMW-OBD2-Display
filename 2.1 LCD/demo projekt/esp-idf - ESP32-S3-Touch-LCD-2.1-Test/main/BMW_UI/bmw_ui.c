@@ -1,6 +1,7 @@
 #include "bmw_ui.h"
 #include "multi_bg_img.h"
 #include "needle_imgs.h"
+#include "field_icons.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
 #include "service_funcs.h"
@@ -827,6 +828,16 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
         lv_obj_set_style_text_color(fields[i], lv_color_white(), 0);
         lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
         lv_label_set_text(fields[i], "-");
+    }
+
+    // Symbol-Icons mittig ueber jedem der 4 Zusatzfelder (Batterie/Gaspedal/
+    // Drehzahl/Wasser), passend zur jeweiligen Anzeige
+    const lv_img_dsc_t *field_icons[4] = {&icon_battery_img, &icon_pedal_img, &icon_tacho_img, &icon_water_img};
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *icon = lv_img_create(scr_multi);
+        lv_img_set_src(icon, field_icons[i]);
+        lv_obj_align(icon, LV_ALIGN_CENTER, field_x[i], 32);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     }
     // Batterie-, Gaspedal-, Drehzahl- und Wasser-Feld doppelt so gross (Font 28 statt Standard 14)
     lv_obj_set_style_text_font(multi_bat_label, &lv_font_montserrat_28, 0);
