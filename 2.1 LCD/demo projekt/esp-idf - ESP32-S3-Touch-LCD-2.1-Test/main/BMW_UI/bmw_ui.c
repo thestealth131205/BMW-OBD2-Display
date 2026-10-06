@@ -8,6 +8,7 @@
 #include "service_funcs.h"
 #include "PCF85063.h"
 #include "sd_log.h"
+#include "SD_MMC.h"
 #include "Buzzer.h"
 #include <string.h>
 #include <stdio.h>
@@ -431,6 +432,16 @@ static lv_obj_t *log_status_label;
 
 static void start_datalogging(void)
 {
+    // Karte war beim Boot evtl. nicht eingelegt/nicht gemountet (SDCard_Size
+    // blieb 0) - z.B. weil sie erst nach dem Einschalten eingesteckt wurde.
+    // Hier erneut versuchen, statt direkt "SD-Fehler!" zu melden, obwohl die
+    // Karte jetzt sichtbar im Schacht steckt.
+    if (!SD_EnsureMounted()) {
+        lv_label_set_text(log_status_label, "SD-Fehler!");
+        return;
+    }
+    SD_Log_Init(); // no-op, falls schon beim Boot initialisiert
+
     datetime_t now;
     PCF85063_Read_Time(&now);
 

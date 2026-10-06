@@ -51,9 +51,14 @@ static bool load_or_create_wifi_config(char *ssid, size_t ssid_len, char *pass, 
     ssid[0] = '\0';
     pass[0] = '\0';
 
-    if (SDCard_Size == 0) {
+    // Karte war beim Boot evtl. nicht eingelegt/nicht gemountet - hier
+    // erneut versuchen, statt die Vorlage nie anzulegen, obwohl die Karte
+    // jetzt sichtbar im Schacht steckt (siehe gleiche Logik in bmw_ui.c
+    // start_datalogging()).
+    if (!SD_EnsureMounted()) {
         return false; // keine Karte gemountet - nichts zu lesen/anzulegen
     }
+    SD_Log_Init(); // no-op, falls schon beim Boot initialisiert
 
     FILE *f = fopen(WIFI_CONFIG_PATH, "r");
     if (!f) {

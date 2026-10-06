@@ -135,6 +135,14 @@ void SD_Init(void)
     SDCard_Size = ((uint64_t) card->csd.capacity) * card->csd.sector_size / (1024 * 1024);
     SD_Init_Done = true;
 }
+bool SD_EnsureMounted(void)
+{
+    if (SDCard_Size == 0) {
+        SD_Init();
+    }
+    return SDCard_Size > 0;
+}
+
 void Flash_Searching(void)
 {
     if(esp_flash_get_physical_size(NULL, &Flash_Size) == ESP_OK)

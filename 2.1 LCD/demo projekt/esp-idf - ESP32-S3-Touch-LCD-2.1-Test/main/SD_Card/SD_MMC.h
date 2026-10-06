@@ -32,3 +32,10 @@ extern uint32_t Flash_Size;
 extern volatile bool SD_Init_Done;
 void SD_Init(void);
 void Flash_Searching(void);
+
+// Versucht erneut zu mounten, falls SDCard_Size noch 0 ist (Karte war beim
+// Boot nicht eingelegt oder der Mount ist fehlgeschlagen, dann aber doch
+// nachtraeglich eingelegt worden). War bereits erfolgreich gemountet, tut
+// diese Funktion nichts. Gibt true zurueck, wenn die Karte danach gemountet
+// ist.
+bool SD_EnsureMounted(void);

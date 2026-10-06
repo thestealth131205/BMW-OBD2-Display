@@ -56,9 +56,14 @@ static void sd_log_task(void *arg)
     }
 }
 
+static bool s_init_done = false;
+
 void SD_Log_Init(void)
 {
+    if (s_init_done) return;        // bereits initialisiert (z.B. verzoegertes
+                                     // Remounten ueber SD_EnsureMounted())
     if (SDCard_Size == 0) return;   // keine Karte gemountet
+    s_init_done = true;
 
     s_mutex = xSemaphoreCreateMutex();
     s_file = fopen(SD_LOG_PATH, "a");
