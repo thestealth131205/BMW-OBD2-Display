@@ -24,6 +24,7 @@ idf_component_register(
                               "CAN_Driver/can_obd2.c"
                               "BLE_OBD/ble_obd.c"
                               "OTA_Web/ota_web.c"
+                              "SNTP/sntp_sync.c"
 
                         INCLUDE_DIRS "./EXIO"
                                      "./LCD_Driver"
@@ -42,5 +43,6 @@ idf_component_register(
                                      "./CAN_Driver"
                                      "./BLE_OBD"
                                      "./OTA_Web"
+                                     "./SNTP"
                                      "."
                         )

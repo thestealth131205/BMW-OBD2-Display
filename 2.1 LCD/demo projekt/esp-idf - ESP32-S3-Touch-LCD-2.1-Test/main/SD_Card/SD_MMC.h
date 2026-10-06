@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <string.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
@@ -28,5 +29,6 @@ esp_err_t s_example_read_file(const char *path);
 
 extern uint32_t SDCard_Size;
 extern uint32_t Flash_Size;
+extern volatile bool SD_Init_Done;
 void SD_Init(void);
 void Flash_Searching(void);

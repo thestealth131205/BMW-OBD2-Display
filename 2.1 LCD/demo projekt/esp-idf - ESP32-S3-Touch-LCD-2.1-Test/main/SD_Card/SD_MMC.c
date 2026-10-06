@@ -7,6 +7,11 @@ static const char *SD_TAG = "SD";
 
 uint32_t Flash_Size = 0;
 uint32_t SDCard_Size = 0;
+// Wird am Ende von SD_Init() in jedem Fall gesetzt (Erfolg oder Fehlschlag) -
+// andere Tasks, die vor dem Lesen/Schreiben auf der Karte sicher wissen
+// muessen, dass der Mount-Versuch durchgelaufen ist (z.B. sntp_sync.c),
+// koennen darauf pollen statt auf eine feste Verzoegerung zu vertrauen.
+volatile bool SD_Init_Done = false;
 esp_err_t SD_Card_D3_EN(void)
 {
     Set_EXIO(TCA9554_EXIO4,true);
@@ -120,6 +125,7 @@ void SD_Init(void)
             ESP_LOGE(SD_TAG, "Failed to initialize the card (%s). "
                      "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
         }
+        SD_Init_Done = true;
         return;
     }
     ESP_LOGI(SD_TAG, "Filesystem mounted");
@@ -127,6 +133,7 @@ void SD_Init(void)
     // Card has been initialized, print its properties
     sdmmc_card_print_info(stdout, card);
     SDCard_Size = ((uint64_t) card->csd.capacity) * card->csd.sector_size / (1024 * 1024);
+    SD_Init_Done = true;
 }
 void Flash_Searching(void)
 {

@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 // --- Farbpalette fuer die Einstellungen (Primaer-/Sekundaerfarbe, wie im
 // C6-Projekt inkl. Neongelb) ---
@@ -122,6 +124,11 @@ static multi_gauge_mode_t g_multi_gauge_mode = MULTI_GAUGE_WATER;
 // erneut ausgeloest wird, sondern nur bei einem Zustandswechsel.
 static bool g_buzzer_enabled = true;
 static bool g_buzzer_active  = false;
+
+// Merkt sich den Schalterzustand des Datenloggings (unabhaengig vom aktuell
+// offenen log_file, das sich bei jedem Neustart mit neuem Dateinamen oeffnet)
+// - wird wie die anderen Einstellungen in NVS gespeichert.
+static bool g_datalog_enabled = false;
 static lv_obj_t *multi_speed_label;
 static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
@@ -212,6 +219,72 @@ static void get_base_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, l
     *img = &multi_needle_red_img; *pivot_x = MULTI_NEEDLE_RED_PIVOT_X; *pivot_y = MULTI_NEEDLE_RED_PIVOT_Y;
 }
 
+// --- Einstellungen dauerhaft speichern (NVS-Flash, ueberlebt Stromverluste,
+// unabhaengig von der SD-Karte): Primaer-/Sekundaerfarbe, Datenquelle (BLE/
+// MCP), Datenlogging an/aus, Anzeige-Umschalter Wasser/Drehzahl, Warnsummer
+// an/aus. nvs_flash_init() laeuft bereits in Wireless_Init() (main.c), lange
+// bevor BMW_UI_Init() aufgerufen wird. ---
+#define BMW_SETTINGS_NVS_NS "bmw_set"
+
+static void bmw_settings_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(BMW_SETTINGS_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+
+    uint8_t pri_idx = 0, sec_idx = 1; // Fallback: Blau/Rot (Standardwerte)
+    for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
+        if (COLOR_PALETTE[i].color.full == g_color_primary.full)   pri_idx = (uint8_t)i;
+        if (COLOR_PALETTE[i].color.full == g_color_secondary.full) sec_idx = (uint8_t)i;
+    }
+
+    nvs_set_u8(h, "col_pri",    pri_idx);
+    nvs_set_u8(h, "col_sec",    sec_idx);
+    nvs_set_u8(h, "src",        (uint8_t)g_data_source);
+    nvs_set_u8(h, "log_en",     g_datalog_enabled ? 1 : 0);
+    nvs_set_u8(h, "gauge_mode", (uint8_t)g_multi_gauge_mode);
+    nvs_set_u8(h, "buzzer_en",  g_buzzer_enabled ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// Vor dem Aufbau der UI aufgerufen (BMW_UI_Init()), damit Farben, Nadelbild,
+// Datenquelle, Anzeige-Umschalter und Schalterstellungen gleich beim ersten
+// Aufbau den zuletzt gespeicherten Stand zeigen statt der Standardwerte.
+static void bmw_settings_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(BMW_SETTINGS_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return; // noch nie gespeichert (frischer Flash) - Standardwerte bleiben
+    }
+
+    uint8_t v;
+    if (nvs_get_u8(h, "col_pri", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
+        g_color_primary = COLOR_PALETTE[v].color;
+    }
+    if (nvs_get_u8(h, "col_sec", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
+        g_color_secondary = COLOR_PALETTE[v].color;
+    }
+    if (nvs_get_u8(h, "src", &v) == ESP_OK && v <= DATA_SRC_MCP2515) {
+        g_data_source = (data_source_t)v;
+    }
+    if (nvs_get_u8(h, "log_en", &v) == ESP_OK) {
+        g_datalog_enabled = (v != 0);
+    }
+    if (nvs_get_u8(h, "gauge_mode", &v) == ESP_OK && v <= MULTI_GAUGE_RPM) {
+        g_multi_gauge_mode = (multi_gauge_mode_t)v;
+    }
+    if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
+        g_buzzer_enabled = (v != 0);
+    }
+    nvs_close(h);
+
+    SD_Log("Einstellungen aus NVS geladen: Quelle=%s Logging=%d Anzeige=%s Summer=%d",
+           g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP", (int)g_datalog_enabled,
+           g_multi_gauge_mode == MULTI_GAUGE_RPM ? "Drehzahl" : "Wasser", (int)g_buzzer_enabled);
+}
+
 // 3-Sekunden-Halten in der Bildschirmmitte -> Demo-Seite anzeigen,
 // Doppeltipp in der Mitte -> Einstellungs-Screen (Farben) anzeigen.
 static void center_touch_cb(lv_event_t *e)
@@ -273,6 +346,7 @@ static void src_ble_btn_cb(lv_event_t *e)
     LV_UNUSED(e);
     g_data_source = DATA_SRC_BLE_OBD;
     update_source_btn_styles();
+    bmw_settings_save();
 }
 
 static void src_mcp_btn_cb(lv_event_t *e)
@@ -280,6 +354,7 @@ static void src_mcp_btn_cb(lv_event_t *e)
     LV_UNUSED(e);
     g_data_source = DATA_SRC_MCP2515;
     update_source_btn_styles();
+    bmw_settings_save();
 }
 
 // --- Einstellungs-Screen (Farben) ---
@@ -301,6 +376,7 @@ static void color_btn_clicked_cb(lv_event_t *e)
     } else {
         g_color_secondary = chosen;
     }
+    bmw_settings_save();
 }
 
 // Baut eine vertikal scrollbare Spalte mit Farb-Buttons (mehr Auswahl als
@@ -381,11 +457,13 @@ static void stop_datalogging(void)
 static void log_switch_cb(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
-    if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+    g_datalog_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (g_datalog_enabled) {
         start_datalogging();
     } else {
         stop_datalogging();
     }
+    bmw_settings_save();
 }
 
 static lv_obj_t *gauge_mode_label;
@@ -414,6 +492,7 @@ static void gauge_mode_switch_cb(lv_event_t *e)
         lv_meter_set_scale_range(multi_meter, multi_ring_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
     }
+    bmw_settings_save();
 }
 
 // Warnsummer bei Kuehlmitteltemperatur >= 120 Grad (siehe BMW_UI_Update()),
@@ -426,6 +505,7 @@ static void buzzer_switch_cb(lv_event_t *e)
         Buzzer_Off();
         g_buzzer_active = false;
     }
+    bmw_settings_save();
 }
 
 // Einstellungs-Screen mit Primaer-/Sekundaerfarb-Auswahl, erreichbar per
@@ -491,6 +571,14 @@ static void create_settings_func_screen(void)
     lv_label_set_text(log_status_label, "");
     lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
 
+    // Aus NVS geladener Zustand (bmw_settings_load(), vor dem UI-Aufbau
+    // aufgerufen): Schalter entsprechend vorbelegen und Logging bei Bedarf
+    // sofort starten, statt immer mit "aus" zu beginnen.
+    if (g_datalog_enabled) {
+        lv_obj_add_state(log_switch, LV_STATE_CHECKED);
+        start_datalogging();
+    }
+
     gauge_mode_label = lv_label_create(scr_settings_func);
     lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
     lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_MID, 85, 75);
@@ -499,13 +587,22 @@ static void create_settings_func_screen(void)
     lv_obj_align(gauge_mode_switch, LV_ALIGN_TOP_MID, 85, 97);
     lv_obj_add_event_cb(gauge_mode_switch, gauge_mode_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+    if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
+        lv_obj_add_state(gauge_mode_switch, LV_STATE_CHECKED);
+        lv_label_set_text(gauge_mode_label, "Anzeige: Drehzahl");
+        lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
+        lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
+    }
+
     lv_obj_t *buzzer_label = lv_label_create(scr_settings_func);
     lv_label_set_text(buzzer_label, "Warnsummer ab 120\xC2\xB0""C");
     lv_obj_align(buzzer_label, LV_ALIGN_TOP_MID, 0, 190);
 
     lv_obj_t *buzzer_switch = lv_switch_create(scr_settings_func);
     lv_obj_align(buzzer_switch, LV_ALIGN_TOP_MID, 0, 212);
-    lv_obj_add_state(buzzer_switch, LV_STATE_CHECKED); // Standard: an, wie g_buzzer_enabled
+    if (g_buzzer_enabled) {
+        lv_obj_add_state(buzzer_switch, LV_STATE_CHECKED); // aus NVS geladen, Standard: an
+    }
     lv_obj_add_event_cb(buzzer_switch, buzzer_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *hint = lv_label_create(scr_settings_func);
@@ -712,6 +809,12 @@ static void update_timer_cb(lv_timer_t *t)
 
 void BMW_UI_Init(lv_obj_t *demo_screen)
 {
+    // Vor jedem UI-Aufbau zuerst die zuletzt gespeicherten Einstellungen aus
+    // NVS laden (Farben, Datenquelle, Logging, Anzeige-Umschalter, Summer) -
+    // alle folgenden Konstruktionsschritte lesen direkt die betroffenen
+    // Globals, es muss hier nichts weiter angewendet werden.
+    bmw_settings_load();
+
     scr_demo = demo_screen;
 
     scr_multi = lv_obj_create(NULL);

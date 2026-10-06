@@ -38,17 +38,42 @@ void Wireless_Init(void)
 
 void WIFI_Init(void *arg)
 {
-    esp_netif_init();                                                     
-    esp_event_loop_create_default();                                  
-    esp_netif_create_default_wifi_sta();                                 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();              
-    esp_wifi_init(&cfg);                                      
-    esp_wifi_set_mode(WIFI_MODE_STA);              
-    esp_wifi_start();                         
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    // Unsere einzige WiFi-Nutzung ist der Boot-Scan hier und spaeter der
+    // SoftAP im WLAN-Update (ota_web.c) mit fest hinterlegtem SSID/Passwort -
+    // es gibt nichts, was dauerhaft in NVS gespeichert werden muesste. Laut
+    // Waveshare-eigenem WiFi-Tutorial (docs.waveshare.com/.../Wi-Fi) fuehrt
+    // das Belassen auf dem Standard WIFI_STORAGE_FLASH bei hart codierten
+    // Zugangsdaten nur zu unnoetigen NVS-Warnungen/-Fehlern. Zusaetzlich lief
+    // die "wifi"-NVS-Namespace hier schon durch dieselben harten Resets wie
+    // die vorher beschaedigte SD-Karte - RAM-Storage umgeht das vollstaendig,
+    // esp_wifi_set_config() in ota_web.c schreibt dann nie mehr auf Flash.
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 
     WIFI_NUM = WIFI_Scan();
     printf("WIFI:%d\r\n",WIFI_NUM);
-    
+
+    // Nach dem einmaligen Boot-Scan WiFi wieder abschalten, statt den Treiber
+    // im STA-Modus dauerhaft "gestartet" zu lassen. Waveshares eigenes
+    // SoftAP-Beispiel (docs.waveshare.com/ESP32-ESP-IDF-Tutorials/Wi-Fi) kennt
+    // WiFi nur in genau zwei Zustaenden: aus, oder bewusst mit esp_wifi_start()
+    // aktiv eingeschaltet fuer einen konkreten Zweck - nie "nebenbei weiterhin
+    // an". Bei uns blieb der Funkteil nach dem Scan die gesamte Laufzeit ueber
+    // aktiv im STA-Modus, parallel zur dauerhaft aktiven BLE-OBD-Verbindung -
+    // zusaetzliche, unnoetige Funk-Koexistenz-Last schon lange bevor die
+    // WLAN-Update-Seite ueberhaupt eingeschaltet wird. ota_web.c ruft vor dem
+    // eigentlichen AP-Start ohnehin esp_wifi_stop() auf, baut Mode/Config aber
+    // komplett neu auf - der Treiber selbst bleibt mit esp_wifi_init()
+    // initialisiert, nur eben nicht laufend.
+    esp_err_t stop_err = esp_wifi_stop();
+    printf("WIFI: Boot-Scan fertig, esp_wifi_stop() -> %s\r\n", esp_err_to_name(stop_err));
+
     vTaskDelete(NULL);
 }
 uint16_t WIFI_Scan(void)

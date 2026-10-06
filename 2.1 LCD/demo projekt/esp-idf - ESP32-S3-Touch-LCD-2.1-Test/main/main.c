@@ -19,6 +19,7 @@
 #include "ble_obd.h"
 #include "esp_core_dump.h"
 #include "boot_logo_img.h"
+#include "sntp_sync.h"
 
 // Boot-Start-Logo: kurz auf schwarzem Grund anzeigen, bevor die eigentliche
 // UI (Demo-Screen + BMW-Multi-Ansicht) aufgebaut wird. LVGL braucht dafuer
@@ -64,8 +65,20 @@ static void log_and_clear_coredump(void)
         return; // kein Dump vorhanden
     }
 
+    // Erst loeschen, dann (bestenfalls) auswerten: Ein beschaedigter Dump
+    // (z. B. durch einen Reset waehrend des Schreibens) kann das Parsen in
+    // esp_core_dump_get_summary() selbst zum Absturz bringen - das wuerde
+    // einen Boot-Loop erzeugen, der sich nie aufloest, weil der fehlerhafte
+    // Dump sonst bis zum naechsten Boot liegen bleibt und wieder geparst
+    // wird. Mit dem Loeschen zuerst ist der Loop spaetestens nach einem
+    // einzigen Absturz durchbrochen, auch wenn die Diagnose-Zeile darunter
+    // selbst nicht mehr zustande kommt.
     esp_core_dump_summary_t summary;
-    if (esp_core_dump_get_summary(&summary) == ESP_OK) {
+    esp_err_t summary_err = esp_core_dump_get_summary(&summary);
+
+    esp_core_dump_image_erase();
+
+    if (summary_err == ESP_OK) {
         SD_Log("=== COREDUMP gefunden: Task '%s', PC=0x%08" PRIx32 ", exc_cause=%" PRIu32 ", exc_vaddr=0x%08" PRIx32,
                summary.exc_task, summary.exc_pc, summary.ex_info.exc_cause, summary.ex_info.exc_vaddr);
         char bt[256];
@@ -78,8 +91,6 @@ static void log_and_clear_coredump(void)
     } else {
         SD_Log("=== COREDUMP vorhanden, aber Zusammenfassung konnte nicht gelesen werden ===");
     }
-
-    esp_core_dump_image_erase();
 }
 
 void Driver_Loop(void *parameter)
@@ -114,6 +125,14 @@ void app_main(void)
 {   
     Wireless_Init();
     Driver_Init();
+
+    // Einmaliger SNTP-Zeitabgleich (nur aktiv, wenn auf der SD-Karte in
+    // /sdcard/wifi-einstellungen.txt eine SSID eingetragen ist, siehe
+    // sntp_sync.h). Laeuft als eigener Hintergrund-Task, blockiert
+    // app_main() nicht. Ergebnis landet in der PCF85063-RTC - mit der
+    // geplanten Pufferbatterie haelt sie das danach auch ueber
+    // Stromverluste hinweg, ein einmaliger Abgleich reicht also.
+    SNTP_Sync_Init();
 
     LCD_Init();
     Touch_Init();

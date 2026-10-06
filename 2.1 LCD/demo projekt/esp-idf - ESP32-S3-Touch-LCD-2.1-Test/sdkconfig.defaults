@@ -57,3 +57,15 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_EXAMPLE_DOUBLE_FB=y
 CONFIG_EXAMPLE_USE_BOUNCE_BUFFER=n
 CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM=n
+
+# Die AP-Zugangsdaten fuer das WLAN-Update (OTA_WEB_SSID/OTA_WEB_PASS in
+# ota_web.c) sind fest im Code hinterlegt, nicht vom Nutzer eingegeben. Der
+# WiFi-Treiber versucht trotzdem per Default, jede esp_wifi_set_config()-
+# Aenderung in die "nvs"-Partition zu schreiben und beim naechsten Start
+# wieder von dort zu lesen (wifi_init_config_t.nvs_enable, ueber
+# WIFI_INIT_CONFIG_DEFAULT() gesetzt). Laut Waveshares eigenem Hinweis fuehrt
+# das bei hartkodierten Zugangsdaten zu Warnungen/Fehlern - da hier ohnehin
+# nie eine gespeicherte Config gebraucht wird (Umschalten STA<->AP passiert
+# nur zur Laufzeit in ota_web.c), schaltet dieser Schalter die NVS-Nutzung
+# des WiFi-Treibers komplett ab.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
