@@ -39,3 +39,11 @@ void Flash_Searching(void);
 // diese Funktion nichts. Gibt true zurueck, wenn die Karte danach gemountet
 // ist.
 bool SD_EnsureMounted(void);
+
+// Formatiert die SD-Karte (FAT). Ist die Karte bereits gemountet, wird sie
+// ueber esp_vfs_fat_sdcard_format() neu formatiert (haengt intern selbst
+// aus/ein). War sie dagegen nicht mountbar (z.B. unformatiert/beschaedigt),
+// erfolgt ein einmaliger erzwungener Formatierungs-Mount-Versuch
+// (format_if_mount_failed=true). Blockiert den Aufrufer - sollte nur aus
+// einem eigenen Task, nicht aus dem LVGL-Haupttask, aufgerufen werden.
+esp_err_t SD_Format(void);

@@ -206,6 +206,15 @@ Internetzugang hat (z. B. Handy-Hotspot oder Heim-WLAN).
 5. Der Schalterzustand selbst wird **nicht** in NVS gespeichert – nach jedem
    Neustart ist er wieder aus.
 
+**SD-Karte formatieren:** Direkt darunter im Funktionen-Screen gibt es den
+Button **„SD formatieren“** – für den Fall, dass die Karte unformatiert oder
+beschädigt ist (z. B. „SD-Fehler!“ beim Datenlogging oder „Fehler: zu wenig
+Speicher“ beim Hotspot-Versuch, weil die Karte nie erfolgreich mountet).
+Ein aktives Datenlogging wird dabei automatisch gestoppt. Die Formatierung
+läuft im Hintergrund (ein eigener Task, damit die UI währenddessen nicht
+einfriert); der Statustext darunter zeigt „Formatiere…“ und danach
+„Fertig“ bzw. „Fehler!“.
+
 ## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
 Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber + Decode-Task,

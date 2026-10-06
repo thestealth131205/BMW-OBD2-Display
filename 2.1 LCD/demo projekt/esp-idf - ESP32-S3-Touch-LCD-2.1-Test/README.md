@@ -174,6 +174,16 @@ per SNTP (`pool.ntp.org`) zu stellen.
   ist er wieder aus. Mit einer RTC-Pufferbatterie reicht ein einziger
   erfolgreicher Abgleich.
 
+**SD-Karte formatieren** (`SD_MMC.c: SD_Format()`): Button direkt unter dem
+Hotspot-Schalter im Funktionen-Screen, für unformatierte/beschädigte Karten
+(z. B. „SD-Fehler!“ bei Datenlogging oder „Fehler: zu wenig Speicher“ beim
+Hotspot-Task, weil `SD_EnsureMounted()` nie erfolgreich mountet). Ist die
+Karte bereits gemountet, läuft `esp_vfs_fat_sdcard_format()` (hängt selbst
+aus/ein); ist sie es nicht, erfolgt ein einmaliger erzwungener
+Formatierungs-Mount (`format_if_mount_failed=true`). Aktives Datenlogging
+wird vorher gestoppt, die eigentliche Formatierung läuft in einem eigenen
+Task, damit die UI währenddessen nicht einfriert.
+
 ## OBD2 / CAN-Auswertung (MCP2515-Quelle)
 
 Läuft über `main/CAN_Driver/` (eigener MCP2515-SPI-Treiber +

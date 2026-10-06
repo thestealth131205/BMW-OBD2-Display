@@ -47,7 +47,7 @@ static void sd_log_task(void *arg)
         s_dropped = 0;
         xSemaphoreGive(s_mutex);
 
-        if (n) {
+        if (n && s_file) {
             fwrite(local, 1, n, s_file);
             if (dropped) fprintf(s_file, "[log] %lu Zeilen verworfen (Puffer voll)\r\n", (unsigned long)dropped);
             fflush(s_file);
@@ -104,4 +104,17 @@ void SD_Log(const char *fmt, ...)
         s_dropped++;
     }
     xSemaphoreGive(s_mutex);
+}
+
+void SD_Log_Deinit(void)
+{
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_file) {
+        fclose(s_file);
+        s_file = NULL;
+    }
+    s_len = 0;
+    s_dropped = 0;
+    s_init_done = false;
+    if (s_mutex) xSemaphoreGive(s_mutex);
 }

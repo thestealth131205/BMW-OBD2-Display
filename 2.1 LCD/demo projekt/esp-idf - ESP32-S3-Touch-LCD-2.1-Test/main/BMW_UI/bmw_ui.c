@@ -478,6 +478,7 @@ static void back_from_settings_cb(lv_event_t *e)
 static FILE *log_file = NULL;
 static uint32_t log_last_tick = 0;
 static lv_obj_t *log_status_label;
+static lv_obj_t *log_switch; // auch von sd_format_btn_cb() gebraucht, um den Schalter beim Formatieren zurueckzusetzen
 
 static void start_datalogging(void)
 {
@@ -558,6 +559,58 @@ static void log_switch_cb(lv_event_t *e)
         stop_datalogging();
     }
     bmw_settings_save();
+}
+
+// --- SD-Karte formatieren: fuer den Fall, dass die Karte unformatiert/
+// beschaedigt ist (SD_EnsureMounted() liefert dann false, "SD-Fehler!" bzw.
+// "SD-Karte nicht gefunden" bei Datenlogging/Hotspot) oder einfach neu
+// aufgesetzt werden soll. Die eigentliche Formatierung laeuft in einem
+// eigenen Task, da esp_vfs_fat_sdcard_format() mehrere hundert ms blockiert
+// und sonst den LVGL-Haupttask anhaelt - deshalb darf dieser Task selbst
+// keine LVGL-Funktionen aufrufen (nicht threadsicher), genau wie beim
+// bestehenden SNTP-Hotspot-Task. Die UI wird stattdessen aus
+// BMW_UI_Update() heraus per Polling von s_sd_format_busy aktualisiert.
+static lv_obj_t *sd_format_status_label;
+static volatile bool s_sd_format_busy = false;
+static volatile bool s_sd_format_ok = false;
+
+static void sd_format_task(void *arg)
+{
+    (void)arg;
+
+    // Ein offener Log-Datei-Handle auf dem gerade neu formatierten
+    // Dateisystem waere danach ungueltig - vorher schliessen. Das
+    // Datenlogging selbst (log_file/g_datalog_enabled/UI) ist bereits in
+    // sd_format_btn_cb() auf dem LVGL-Thread gestoppt worden.
+    SD_Log_Deinit();
+
+    esp_err_t err = SD_Format();
+    if (err == ESP_OK) {
+        SD_Log_Init();
+        SD_Log("SD-Karte formatiert (SD_Format), neue Groesse=%lu MB", (unsigned long)SDCard_Size);
+    }
+
+    s_sd_format_ok = (err == ESP_OK);
+    s_sd_format_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void sd_format_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    if (s_sd_format_busy) return;
+
+    if (g_datalog_enabled) {
+        g_datalog_enabled = false;
+        lv_obj_clear_state(log_switch, LV_STATE_CHECKED);
+        stop_datalogging();
+        bmw_settings_save();
+    }
+
+    s_sd_format_busy = true;
+    s_sd_format_ok = false;
+    lv_label_set_text(sd_format_status_label, "Formatiere...");
+    xTaskCreatePinnedToCore(sd_format_task, "sd_format", 4096, NULL, 2, NULL, 0);
 }
 
 static lv_obj_t *gauge_mode_label;
@@ -676,7 +729,7 @@ static void create_settings_func_screen(void)
     lv_label_set_text(log_label, "Datenlogging");
     lv_obj_align(log_label, LV_ALIGN_TOP_MID, -85, 75);
 
-    lv_obj_t *log_switch = lv_switch_create(scr_settings_func);
+    log_switch = lv_switch_create(scr_settings_func);
     lv_obj_align(log_switch, LV_ALIGN_TOP_MID, -85, 97);
     lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -735,6 +788,24 @@ static void create_settings_func_screen(void)
     lv_label_set_text(hotspot_status_label, "Inaktiv");
     lv_obj_set_style_text_color(hotspot_status_label, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hotspot_status_label, LV_ALIGN_TOP_MID, 0, 330);
+
+    // SD-Karte formatieren: Wenn die Karte unformatiert/beschaedigt ist
+    // (z.B. "SD-Fehler!" beim Datenlogging oder "zu wenig Speicher" beim
+    // Hotspot-Task, weil die Karte nie erfolgreich mountet), hilft weder
+    // Datenlogging noch Hotspot - hier direkt neu formatieren.
+    lv_obj_t *format_btn = lv_btn_create(scr_settings_func);
+    lv_obj_set_size(format_btn, 170, 34);
+    lv_obj_align(format_btn, LV_ALIGN_TOP_MID, 0, 358);
+    set_dark_blue_btn(format_btn);
+    lv_obj_add_event_cb(format_btn, sd_format_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *format_btn_label = lv_label_create(format_btn);
+    lv_label_set_text(format_btn_label, "SD formatieren");
+    lv_obj_center(format_btn_label);
+
+    sd_format_status_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(sd_format_status_label, "");
+    lv_obj_set_style_text_color(sd_format_status_label, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(sd_format_status_label, LV_ALIGN_TOP_MID, 0, 396);
 
     lv_obj_t *hint = lv_label_create(scr_settings_func);
     lv_label_set_text(hint, "<- Wisch: Farben");
@@ -1327,6 +1398,18 @@ void BMW_UI_Update(void)
             lv_obj_clear_state(hotspot_switch, LV_STATE_CHECKED);
         }
         last_sntp_busy = sntp_busy;
+    }
+
+    // "SD formatieren": Statustext erst nach Abschluss des Hintergrund-Tasks
+    // setzen (der Task selbst ruft keine LVGL-Funktionen auf, siehe
+    // sd_format_task()).
+    {
+        static bool last_format_busy = false;
+        bool format_busy = s_sd_format_busy;
+        if (last_format_busy && !format_busy) {
+            lv_label_set_text(sd_format_status_label, s_sd_format_ok ? "Fertig" : "Fehler!");
+        }
+        last_format_busy = format_busy;
     }
 
     for (int i = 0; i < 8; i++) {
