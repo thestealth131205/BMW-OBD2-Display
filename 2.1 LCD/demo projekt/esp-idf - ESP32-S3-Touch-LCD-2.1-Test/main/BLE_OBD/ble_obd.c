@@ -731,6 +731,13 @@ static void ble_obd_task(void *arg)
     s_reinit = false;
     elm_init_sequence(resp, sizeof(resp));
 
+    // RPM wird fuer die Nadel/den Farbring der Multi-Kachel gebraucht, die
+    // sich bei einem Motor viel schneller aendert als Speed/Wasser/Gaspedal -
+    // deshalb wird 010C in JEDER Schleife abgefragt (eigener Schritt, nicht
+    // Teil des Rundlaufs unten), die uebrigen PIDs rotieren nur dazwischen.
+    // Vorher lagen alle 7 PIDs gleichwertig im selben Rundlauf, wodurch RPM
+    // nur alle ~1-1.5s aktualisiert wurde - sichtbar als Nachlauf von Nadel
+    // und Farbring bei schnellen Drehzahlaenderungen.
     int poll_step = 0;
     uint32_t last_bat_poll = 0;
 
@@ -801,17 +808,21 @@ static void ble_obd_task(void *arg)
         uint8_t bytes[16];
         int n;
         if (!s_online && poll_step == 0) OBD_LOGI("Poll, noch offline. Letzte Antwort: %s", resp);
+
+        // RPM hat einen eigenen Schritt, der bei JEDEM Schleifendurchlauf
+        // laeuft (nicht nur alle 6 Durchlaeufe wie die uebrigen PIDs) -
+        // damit Nadel und Farbring der Multi-Kachel so schnell wie die
+        // BLE-Verbindung es zulaesst nachziehen.
+        if (send_at_cmd("010C", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+            n = hex_tokenize(resp, bytes, sizeof(bytes));
+            if (n >= 4 && bytes[0] == 0x41 && bytes[1] == 0x0C) {
+                s_rpm = (((uint16_t)bytes[2] << 8) | bytes[3]) / 4.0f;
+                s_online = true;
+            }
+        }
+
         switch (poll_step) {
         case 0:
-            if (send_at_cmd("010C", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
-                n = hex_tokenize(resp, bytes, sizeof(bytes));
-                if (n >= 4 && bytes[0] == 0x41 && bytes[1] == 0x0C) {
-                    s_rpm = (((uint16_t)bytes[2] << 8) | bytes[3]) / 4.0f;
-                    s_online = true;
-                }
-            }
-            break;
-        case 1:
             if (send_at_cmd("010D", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x0D) {
@@ -820,7 +831,7 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
-        case 2:
+        case 1:
             if (send_at_cmd("0105", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x05) {
@@ -829,7 +840,7 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
-        case 3:
+        case 2:
             if (send_at_cmd("0111", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x11) {
@@ -838,7 +849,7 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
-        case 4:
+        case 3:
             if (s_sensors_active && send_at_cmd("0124", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x24) {
@@ -849,7 +860,7 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
-        case 5:
+        case 4:
             if (s_sensors_active && send_at_cmd("0125", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x25) {
@@ -860,7 +871,7 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
-        case 6:
+        case 5:
             if (s_sensors_active && send_at_cmd("010B", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x0B) {
@@ -869,7 +880,7 @@ static void ble_obd_task(void *arg)
             }
             break;
         }
-        poll_step = (poll_step + 1) % 7;
+        poll_step = (poll_step + 1) % 6;
 
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         if (now - last_bat_poll >= 1000) {

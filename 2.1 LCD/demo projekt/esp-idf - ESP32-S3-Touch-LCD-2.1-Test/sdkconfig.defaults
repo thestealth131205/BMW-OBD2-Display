@@ -97,3 +97,17 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
+
+# Ohne diese Zeile greift ESP-IDFs eigener Kconfig-Default
+# CONFIG_FATFS_LFN_NONE=y (Long-Filename-Unterstuetzung AUS) - FatFs erlaubt
+# dann nur noch klassische 8.3-Kurznamen. "wifi-einstellungen.txt" sowie
+# "log_<Datum>_<Zeit>.csv" ueberschreiten beide das 8-Zeichen-Namensfeld und
+# werden von create_name() in ff.c mit FR_INVALID_NAME abgelehnt (esp-idf
+# vfs_fat.c mappt das 1:1 auf errno=EINVAL) - exakt der Fehler aus dem SD-Log
+# ("fopen(...) fehlgeschlagen (errno=22: Invalid argument)") beim Anlegen von
+# wifi-einstellungen.txt, und vermutlich zugleich die wahre, bisher ungeklaerte
+# Ursache dafuer, dass die Datenlogging-CSV-Datei trotz gemeldetem "oeffne"
+# nie auf der Karte zu finden war. "obd_log.txt" (7+3 Zeichen) hat dagegen
+# immer funktioniert, weil es zufaellig exakt ins 8.3-Schema passt. Heap statt
+# Stack gewaehlt, da Task-Stacks in diesem Projekt bereits mehrfach knapp waren.
+CONFIG_FATFS_LFN_HEAP=y
