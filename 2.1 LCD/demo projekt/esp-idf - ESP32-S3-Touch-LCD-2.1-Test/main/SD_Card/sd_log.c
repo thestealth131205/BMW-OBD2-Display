@@ -28,6 +28,15 @@ static SemaphoreHandle_t s_mutex = NULL;
 static char s_buf[SD_LOG_BUF];
 static size_t s_len = 0;
 static uint32_t s_dropped = 0;
+// true, solange sd_log_task() gerade AUSSERHALB des Mutex auf s_file
+// schreibt (fwrite/fflush/fsync) - wird selbst nur unter Mutex-Schutz
+// gesetzt/geprueft. Ohne das konnte SD_Log_Deinit() (z.B. von
+// sd_format_task() vor einer SD-Formatierung) den Datei-Handle exakt in
+// diesem Fenster fclose()n, waehrend der Schreib-Task noch mitten im
+// fwrite()/fsync() darauf war - ein use-after-close. Trat nicht bei jedem
+// Format-Versuch auf (nur wenn der 300ms-Flush-Zyklus zufaellig genau
+// dann lief), passt aber zum Muster der sporadischen Abstuerze.
+static volatile bool s_write_in_progress = false;
 
 // Schreibt den RAM-Puffer auf die Karte. SD-Zugriffe (fsync) dauern teils
 // 10-100 ms und duerfen den Bluetooth-Stack nicht blockieren - deshalb
@@ -45,6 +54,7 @@ static void sd_log_task(void *arg)
         if (n) memcpy(local, s_buf, n);
         s_len = 0;
         s_dropped = 0;
+        if (n) s_write_in_progress = true; // noch unter Mutex gesetzt, siehe SD_Log_Deinit()
         xSemaphoreGive(s_mutex);
 
         if (n && s_file) {
@@ -53,6 +63,7 @@ static void sd_log_task(void *arg)
             fflush(s_file);
             fsync(fileno(s_file));
         }
+        s_write_in_progress = false;
     }
 }
 
@@ -108,7 +119,17 @@ void SD_Log(const char *fmt, ...)
 
 void SD_Log_Deinit(void)
 {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (!s_mutex) return;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    // Solange der Schreib-Task gerade (ausserhalb des Mutex) auf s_file
+    // schreibt, warten statt den Handle unter ihm wegzuziehen - siehe
+    // Kommentar bei s_write_in_progress oben.
+    while (s_write_in_progress) {
+        xSemaphoreGive(s_mutex);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+    }
     if (s_file) {
         fclose(s_file);
         s_file = NULL;
@@ -116,5 +137,5 @@ void SD_Log_Deinit(void)
     s_len = 0;
     s_dropped = 0;
     s_init_done = false;
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    xSemaphoreGive(s_mutex);
 }

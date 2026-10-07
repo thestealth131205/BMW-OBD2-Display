@@ -12,6 +12,8 @@
 #include "Buzzer.h"
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <unistd.h>
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -488,6 +490,7 @@ static void start_datalogging(void)
     // Karte jetzt sichtbar im Schacht steckt.
     if (!SD_EnsureMounted()) {
         lv_label_set_text(log_status_label, "SD-Fehler!");
+        SD_Log("Datenlogging: SD_EnsureMounted() fehlgeschlagen (Karte fehlt/nicht lesbar)");
         return;
     }
     SD_Log_Init(); // no-op, falls schon beim Boot initialisiert
@@ -502,21 +505,34 @@ static void start_datalogging(void)
     // Heap-Stand unmittelbar vor dem fopen() protokollieren: Genau dieser
     // Aufruf ist in v1.0.39 per Coredump/ELF-Symbolaufloesung als Absturzstelle
     // bestaetigt (fopen -> __sfp -> __retarget_lock_init_recursive ->
-    // lock_init_generic -> abort). Ob das an knappem/fragmentiertem Heap
-    // liegt, zeigt sich erst mit echten Zahlen aus dem Feld statt zu raten.
-    SD_Log("Datenlogging: oeffne %s (freier Heap=%u, groesster 8-Bit-Block=%u)",
-           path, (unsigned)esp_get_free_heap_size(),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // lock_init_generic -> abort). esp_get_free_heap_size()/MALLOC_CAP_8BIT
+    // zaehlen das reichlich vorhandene PSRAM mit rein (siehe gleicher Fund in
+    // sntp_sync.c) - fuer den internen Mutex, den fopen() hier allokiert, ist
+    // aber nur MALLOC_CAP_INTERNAL relevant. Mit echten Zahlen aus dem Feld
+    // statt zu raten.
+    SD_Log("Datenlogging: oeffne %s (freier interner Heap=%u, groesster interner Block=%u)",
+           path, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     log_file = fopen(path, "w");
     if (!log_file) {
         lv_label_set_text(log_status_label, "SD-Fehler!");
+        SD_Log("Datenlogging: fopen(%s) fehlgeschlagen, errno=%d (%s)",
+               path, errno, strerror(errno));
         return;
     }
     fprintf(log_file,
             "Zeit_ms;Geschwindigkeit_kmh;Drehzahl_U_min;Wassertemperatur_C;"
             "Gaspedal_pct;Batterie_OBD2_V;GKraft_Quer_g;GKraft_Laengs_g\r\n");
     fflush(log_file);
+    // fflush() reicht den stdio-Puffer nur an FatFs weiter - das neue
+    // Verzeichnis/die FAT-Tabellenaenderung fuer die frisch angelegte Datei
+    // bleibt ohne fsync() im FatFs-internen Cache und wird nie auf die Karte
+    // committet, wenn (wie im Auto normal) die Zuendung sofort stromlos
+    // schaltet statt ein cleanes Unmount zuzulassen. Exakt dasselbe Problem
+    // wurde in sd_log.c bereits per fsync(fileno(...)) behoben - hier bisher
+    // vergessen, obwohl es dieselbe FatFs-Instanz ist.
+    fsync(fileno(log_file));
     log_last_tick = lv_tick_get();
     lv_label_set_text(log_status_label, "Aktiv");
 
@@ -577,6 +593,22 @@ static volatile bool s_sd_format_ok = false;
 static void sd_format_task(void *arg)
 {
     (void)arg;
+
+    // Der SNTP-Hotspot-Task (sntp_sync.c) liest/schreibt /sdcard/wifi-
+    // einstellungen.txt auf demselben FatFs-Volume, das SD_Format() gleich
+    // unmountet und neu anlegt - ein offener Handle dort waere danach
+    // genauso ungueltig wie der Datenlogging-Handle unten. Laeuft gerade ein
+    // Versuch, zuerst abbrechen und auf das Ende warten, statt parallel zu
+    // formatieren. SNTP_Sync_Cancel() wirkt nicht sofort - steckt der
+    // Versuch gerade im blockierenden esp_netif_sntp_sync_wait() (bis zu
+    // SNTP_SYNC_TIMEOUT_MS=8s), greift der Abbruch erst danach - Wartezeit
+    // hier daher grosszuegig bemessen.
+    if (SNTP_Sync_IsBusy()) {
+        SNTP_Sync_Cancel();
+        for (int waited = 0; waited < 10000 && SNTP_Sync_IsBusy(); waited += 100) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
 
     // Ein offener Log-Datei-Handle auf dem gerade neu formatierten
     // Dateisystem waere danach ungueltig - vorher schliessen. Das
@@ -668,6 +700,16 @@ static void hotspot_switch_cb(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
     if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+        // Waehrend sd_format_task() formatiert, ist /sdcard kurzzeitig
+        // unmounted/neu angelegt - ein zeitgleicher Hotspot-Versuch wuerde
+        // versuchen, wifi-einstellungen.txt genau in diesem Fenster zu
+        // lesen/anzulegen. Lieber ablehnen als in die gleiche Race-
+        // Situation laufen, die sd_format_task() umgekehrt schon vermeidet.
+        if (s_sd_format_busy) {
+            lv_obj_clear_state(sw, LV_STATE_CHECKED);
+            lv_label_set_text(hotspot_status_label, "SD wird formatiert");
+            return;
+        }
         SNTP_Sync_Start();
     } else {
         SNTP_Sync_Cancel();
@@ -1444,6 +1486,11 @@ void BMW_UI_Update(void)
                 (unsigned long)lv_tick_get(), current_speed_kmh, current_rpm,
                 current_water_temp, current_throttle_pct, obd2_bat, gx, gy);
         fflush(log_file);
+        // Siehe Kommentar in start_datalogging(): ohne fsync() bleibt jede
+        // Zeile im FatFs-Cache, bis das Zuendungs-Abschalten den Strom ohne
+        // Vorwarnung wegnimmt - dann ist sie verloren, auch wenn fopen() hier
+        // als erfolgreich geloggt wurde.
+        fsync(fileno(log_file));
     }
 
     // Fehlercode-Liste auf dem DTC-Screen aktualisieren

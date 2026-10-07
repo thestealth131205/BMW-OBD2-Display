@@ -27,3 +27,13 @@ void WIFI_Init(void *arg);
 uint16_t WIFI_Scan(void);
 void BLE_Init(void *arg);
 uint16_t BLE_Scan(void);
+
+// Zentrales An-/Abschalten des WiFi-Treibers selbst (nicht nur Start/Stop):
+// esp_wifi_init() allokiert RX/TX-Puffer im internen DRAM, die auch nach
+// esp_wifi_stop() bestehen bleiben - WiFi wird aber nur fuer den kurzen
+// WLAN-Update- bzw. Hotspot-Zeitabgleich-Vorgang gebraucht, den Rest der
+// Laufzeit laeuft nur BLE-OBD. ota_web.c/sntp_sync.c rufen diese beiden statt
+// esp_wifi_init()/esp_wifi_deinit() direkt auf, damit der Zustand an einer
+// Stelle verwaltet wird.
+bool Wireless_WiFi_Init_If_Needed(void);
+void Wireless_WiFi_Deinit(void);

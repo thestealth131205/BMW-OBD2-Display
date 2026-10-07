@@ -80,3 +80,20 @@ CONFIG_ESP_WIFI_NVS_ENABLED=n
 # entlastet nicht nur SNTP, sondern jede kuenftige xTaskCreate-Allokation
 # (z. B. den SD-Format-Task).
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# Zusaetzlich zum vollstaendigen esp_wifi_deinit() bei Nichtbenutzung
+# (Wireless.c: Wireless_WiFi_Init_If_Needed()/_Deinit(), seit v1.0.43) auch
+# die Puffergroessen fuer die kurzen Momente verkleinert, in denen WiFi
+# tatsaechlich aktiv ist (Boot-Scan, WLAN-Update-AP, Hotspot-Zeitabgleich-
+# STA). Alle drei Faelle sind Low-Throughput (ein Scan, eine Firmware-Datei
+# ueber den eigenen AP, ein einzelnes NTP-Paket) - die ESP-IDF-Standardwerte
+# (10 statische + 32 dynamische RX-, 32 TX-Puffer, AMPDU an) sind fuer
+# Video-Streaming o.ae. ausgelegt und belegen dafuer unnoetig viel internes
+# DRAM, das sich die dauerhaft aktive Bluedroid-BLE-OBD-Verbindung mit
+# WiFi und LVGL teilt.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8

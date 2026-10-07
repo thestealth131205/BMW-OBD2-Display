@@ -24,8 +24,18 @@
 // Display stecken. Ohne ausgefuellte SSID (oder ohne Karte) bricht der
 // Versuch sofort mit einer entsprechenden Statusmeldung ab.
 
-// Startet den einmaligen Verbindungs-/Zeitabgleichsversuch als Hintergrund-
-// Task, sofern nicht schon einer laeuft. Nicht blockierend.
+// Legt den Hintergrund-Task EINMALIG an (blockiert danach auf eine
+// Freigabe durch SNTP_Sync_Start() und existiert dauerhaft weiter). MUSS
+// einmal frueh in app_main() aufgerufen werden, direkt nach Wireless_Init()
+// - zu diesem Zeitpunkt ist das interne DRAM noch am wenigsten durch
+// Bluedroid/WiFi/LVGL fragmentiert. Spaeteres, wiederholtes Anlegen bei
+// jedem Tastendruck (frueheres Verhalten) schlug nach einiger Laufzeit
+// zuverlaessig fehl, obwohl der generische "freie Heap" riesig aussah (siehe
+// sntp_sync.c).
+void SNTP_Sync_Init(void);
+
+// Loest einen Verbindungs-/Zeitabgleichsversuch im bereits laufenden
+// Hintergrund-Task aus, sofern nicht schon einer laeuft. Nicht blockierend.
 void SNTP_Sync_Start(void);
 
 // Bricht einen laufenden Versuch ab (z.B. wenn der Nutzer den Schalter

@@ -6,6 +6,7 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -27,6 +28,22 @@
 static volatile bool s_busy = false;
 static volatile bool s_cancel_requested = false;
 static char s_status[64] = "Inaktiv";
+static SemaphoreHandle_t s_start_sem = NULL;
+
+// Zeigt zusaetzlich zu den bisherigen (durch PSRAM-Anteile stark
+// aufgeblaehten, siehe unten) Gesamt-Heap-Zahlen den tatsaechlich knappen
+// internen DRAM-Zustand - Task-Kontrollbloecke (TCB) MUESSEN laut FreeRTOS-
+// Port intern liegen, selbst wenn CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+// den Stack-Anteil nach PSRAM ausweichen laesst.
+static void log_heap_state(const char *prefix)
+{
+    SD_Log("%s (gesamt frei=%u, groesster 8-Bit-Block=%u | intern frei=%u, groesster interner Block=%u)",
+           prefix,
+           (unsigned)esp_get_free_heap_size(),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
 
 bool SNTP_Sync_IsBusy(void)
 {
@@ -185,20 +202,11 @@ static bool write_time_to_rtc(void)
     return true;
 }
 
-static void sntp_sync_task(void *arg)
+// Ein einzelner Versuch (Datei lesen, verbinden, Zeit abgleichen). Laeuft
+// immer im selben, bereits beim Boot angelegten Task - siehe sntp_sync_task().
+static void do_sync_attempt(void)
 {
-    (void)arg;
-
-    // Letzter Testlauf: "Hotspot verbinden" blieb ueber mehrere Minuten bei
-    // "Starte..." stehen, OHNE dass auch nur die erste SNTP-Log-Zeile
-    // (SD_EnsureMounted) je erschien - obwohl die Karte zu diesem Zeitpunkt
-    // bereits erfolgreich gemountet war (sonst gaebe es gar kein Log). Das
-    // deutet darauf hin, dass dieser Task-Body nie lief, nicht dass er darin
-    // haengen blieb. Deshalb hier die allererste Zeile, noch vor jedem
-    // anderen Aufruf, plus Heap-Zahlen - zeigt beim naechsten Versuch, ob der
-    // Task ueberhaupt gestartet ist.
-    SD_Log("SNTP: Task gestartet (freier Heap=%u, groesster 8-Bit-Block=%u)",
-           (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    log_heap_state("SNTP: Versuch gestartet");
 
     char ssid[33];
     char pass[65];
@@ -229,6 +237,12 @@ static void sntp_sync_task(void *arg)
 
         if (s_cancel_requested) {
             strlcpy(s_status, "Abgebrochen", sizeof(s_status));
+        } else if (!Wireless_WiFi_Init_If_Needed()) {
+            // WiFi-Treiber steht seit der Heap-Entlastung nach dem Boot-Scan
+            // nicht mehr dauerhaft initialisiert - hier frisch anlegen, statt
+            // von einem bereits laufenden Treiber auszugehen.
+            strlcpy(s_status, "Fehler: WiFi-Init fehlgeschlagen", sizeof(s_status));
+            SD_Log("SNTP: Wireless_WiFi_Init_If_Needed() fehlgeschlagen");
         } else {
             strlcpy(s_status, "Verbinde...", sizeof(s_status));
 
@@ -285,7 +299,10 @@ static void sntp_sync_task(void *arg)
             SD_Log("SNTP: %s", s_status);
 
             esp_wifi_disconnect();
-            esp_wifi_stop();
+            // Treiber komplett deinitialisieren statt nur zu stoppen - gibt
+            // die RX/TX-Puffer im internen DRAM wieder frei, die sonst bis
+            // zum naechsten Geraete-Neustart ungenutzt belegt blieben.
+            Wireless_WiFi_Deinit();
 
             esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_handler);
             esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_handler);
@@ -298,7 +315,35 @@ static void sntp_sync_task(void *arg)
 
     s_cancel_requested = false;
     s_busy = false;
-    vTaskDelete(NULL);
+}
+
+// Laeuft die gesamte Laufzeit als EIN einziger, bereits beim Boot angelegter
+// Task - schlaeft die meiste Zeit blockiert auf s_start_sem. Grund: Ein
+// Testlauf zeigte "xTaskCreatePinnedToCore fehlgeschlagen" trotz >4,6MB
+// "freiem Heap" - der generische esp_get_free_heap_size()/MALLOC_CAP_8BIT-
+// Wert zaehlt das reichlich vorhandene externe PSRAM mit. Das FreeRTOS-TCB
+// (Task-Kontrollblock) selbst MUSS laut Port aber immer aus internem DRAM
+// kommen, unabhaengig von CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY (das
+// erlaubt nur dem STACK-Anteil, nach PSRAM auszuweichen) - und genau dieses
+// interne DRAM wird im Laufzeitbetrieb durch Bluedroid/WiFi/LVGL zunehmend
+// fragmentiert. Wird der Task stattdessen einmalig ganz am Anfang von
+// app_main() angelegt (wo das interne DRAM noch am wenigsten belegt ist),
+// faellt das spaetere, dann oft fehlschlagende Anlegen komplett weg.
+static void sntp_sync_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        xSemaphoreTake(s_start_sem, portMAX_DELAY);
+        do_sync_attempt();
+    }
+}
+
+void SNTP_Sync_Init(void)
+{
+    s_start_sem = xSemaphoreCreateBinary();
+    BaseType_t ok = xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 6144, NULL, 2, NULL, 0);
+    SD_Log("SNTP: Init, Task-Anlage -> %s", ok == pdPASS ? "ok" : "FEHLGESCHLAGEN");
+    log_heap_state("SNTP: Heap direkt nach Task-Anlage");
 }
 
 void SNTP_Sync_Start(void)
@@ -306,24 +351,15 @@ void SNTP_Sync_Start(void)
     if (s_busy) {
         return; // schon ein Versuch aktiv, Doppelstart vermeiden
     }
+    if (!s_start_sem) {
+        // SNTP_Sync_Init() wurde nicht aufgerufen oder ist dort schon
+        // fehlgeschlagen - ohne Semaphor kann kein Versuch ausgeloest werden.
+        SD_Log("SNTP: SNTP_Sync_Start() ohne initialisierten Task aufgerufen");
+        strlcpy(s_status, "Fehler: SNTP nicht initialisiert", sizeof(s_status));
+        return;
+    }
     s_busy = true;
     s_cancel_requested = false;
     strlcpy(s_status, "Starte...", sizeof(s_status));
-    // Stack bewusst grosszuegig (FatFS-Mount/fopen/fprintf brauchen zusammen
-    // mehr als die vorher genutzten 4096 Byte - siehe aehnliche, durch
-    // Stack-Druck ausgeloeste stille Abstuerze bei ble_obd_task/BTU_TASK).
-    //
-    // Rueckgabewert bisher ungeprueft: Schlaegt die Allokation des 6144-Byte-
-    // Stacks mangels Heap fehl, haette der Schalter bisher fuer immer bei
-    // "Starte..." stehen bleiben und keinen weiteren Versuch mehr zulassen
-    // (s_busy bliebe dauerhaft true) - passt zum beobachteten "haengt
-    // minutenlang, keine einzige SNTP-Logzeile". Jetzt mit klarer
-    // Fehlermeldung und s_busy-Reset, statt stillschweigend zu haengen.
-    BaseType_t ok = xTaskCreatePinnedToCore(sntp_sync_task, "sntp_sync", 6144, NULL, 2, NULL, 0);
-    if (ok != pdPASS) {
-        SD_Log("SNTP: xTaskCreatePinnedToCore fehlgeschlagen (freier Heap=%u, groesster 8-Bit-Block=%u)",
-               (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        strlcpy(s_status, "Fehler: zu wenig Speicher", sizeof(s_status));
-        s_busy = false;
-    }
+    xSemaphoreGive(s_start_sem);
 }

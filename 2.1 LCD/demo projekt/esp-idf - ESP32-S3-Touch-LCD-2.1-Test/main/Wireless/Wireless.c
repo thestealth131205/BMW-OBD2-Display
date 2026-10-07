@@ -1,4 +1,5 @@
 #include "Wireless.h"
+#include "esp_heap_caps.h"
 
 uint16_t BLE_NUM = 0;
 uint16_t WIFI_NUM = 0;
@@ -7,6 +8,41 @@ bool Scan_finish = 0;
 bool WiFi_Scan_Finish = 0;
 bool BLE_Scan_Finish = 0;
 volatile bool BLE_Stack_Ready = 0;
+
+// esp_wifi_init() reserviert RX/TX-Puffer im internen DRAM (bei den Default-
+// Groessen mehrere 10 KB), die auch nach esp_wifi_stop() bestehen bleiben -
+// der Treiber ist dann "gestoppt", aber weiterhin initialisiert. Dieses Flag
+// haelt den tatsaechlichen Init-Zustand fest, damit WIFI_Init() (Boot-Scan),
+// ota_web.c (AP) und sntp_sync.c (STA) sich den Treiber teilen koennen, ohne
+// ihn versehentlich doppelt zu initialisieren oder zu frueh zu deinitialisieren.
+static bool s_wifi_driver_up = false;
+
+bool Wireless_WiFi_Init_If_Needed(void)
+{
+    if (s_wifi_driver_up) return true;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        printf("WIFI: esp_wifi_init (Re-Init) -> %s\r\n", esp_err_to_name(err));
+        return false;
+    }
+    // Siehe Kommentar in WIFI_Init(): keine NVS-Nutzung fuer WiFi-Config
+    // noetig, vermeidet unnoetige Flash-Schreibzugriffe/-Fehler.
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    s_wifi_driver_up = true;
+    return true;
+}
+
+void Wireless_WiFi_Deinit(void)
+{
+    if (!s_wifi_driver_up) return;
+    esp_wifi_stop();
+    esp_err_t err = esp_wifi_deinit();
+    printf("WIFI: esp_wifi_deinit -> %s (freier interner Heap: %u Byte)\r\n",
+           esp_err_to_name(err), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    s_wifi_driver_up = false;
+}
+
 void Wireless_Init(void)
 {
     // Initialize NVS.
@@ -41,38 +77,23 @@ void WIFI_Init(void *arg)
     esp_netif_init();
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    // Unsere einzige WiFi-Nutzung ist der Boot-Scan hier und spaeter der
-    // SoftAP im WLAN-Update (ota_web.c) mit fest hinterlegtem SSID/Passwort -
-    // es gibt nichts, was dauerhaft in NVS gespeichert werden muesste. Laut
-    // Waveshare-eigenem WiFi-Tutorial (docs.waveshare.com/.../Wi-Fi) fuehrt
-    // das Belassen auf dem Standard WIFI_STORAGE_FLASH bei hart codierten
-    // Zugangsdaten nur zu unnoetigen NVS-Warnungen/-Fehlern. Zusaetzlich lief
-    // die "wifi"-NVS-Namespace hier schon durch dieselben harten Resets wie
-    // die vorher beschaedigte SD-Karte - RAM-Storage umgeht das vollstaendig,
-    // esp_wifi_set_config() in ota_web.c schreibt dann nie mehr auf Flash.
-    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    Wireless_WiFi_Init_If_Needed();
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
 
     WIFI_NUM = WIFI_Scan();
     printf("WIFI:%d\r\n",WIFI_NUM);
 
-    // Nach dem einmaligen Boot-Scan WiFi wieder abschalten, statt den Treiber
-    // im STA-Modus dauerhaft "gestartet" zu lassen. Waveshares eigenes
-    // SoftAP-Beispiel (docs.waveshare.com/ESP32-ESP-IDF-Tutorials/Wi-Fi) kennt
-    // WiFi nur in genau zwei Zustaenden: aus, oder bewusst mit esp_wifi_start()
-    // aktiv eingeschaltet fuer einen konkreten Zweck - nie "nebenbei weiterhin
-    // an". Bei uns blieb der Funkteil nach dem Scan die gesamte Laufzeit ueber
-    // aktiv im STA-Modus, parallel zur dauerhaft aktiven BLE-OBD-Verbindung -
-    // zusaetzliche, unnoetige Funk-Koexistenz-Last schon lange bevor die
-    // WLAN-Update-Seite ueberhaupt eingeschaltet wird. ota_web.c ruft vor dem
-    // eigentlichen AP-Start ohnehin esp_wifi_stop() auf, baut Mode/Config aber
-    // komplett neu auf - der Treiber selbst bleibt mit esp_wifi_init()
-    // initialisiert, nur eben nicht laufend.
-    esp_err_t stop_err = esp_wifi_stop();
-    printf("WIFI: Boot-Scan fertig, esp_wifi_stop() -> %s\r\n", esp_err_to_name(stop_err));
+    // Nach dem einmaligen Boot-Scan WiFi komplett abschalten UND deinitiali-
+    // sieren, statt den Treiber nur zu stoppen. esp_wifi_init() allokiert
+    // RX/TX-Puffer im internen DRAM (mehrere 10 KB), die mit blossem
+    // esp_wifi_stop() bestehen blieben - die ganze Laufzeit ueber, parallel
+    // zur dauerhaft aktiven Bluedroid-BLE-OBD-Verbindung, obwohl WiFi nur fuer
+    // den kurzen WLAN-Update- bzw. Hotspot-Zeitabgleich-Vorgang gebraucht
+    // wird. ota_web.c/sntp_sync.c rufen jetzt selbst Wireless_WiFi_Init_If_
+    // Needed() auf, wenn sie WiFi tatsaechlich brauchen, und holen sich den
+    // Treiber dann frisch zurueck.
+    Wireless_WiFi_Deinit();
 
     vTaskDelete(NULL);
 }

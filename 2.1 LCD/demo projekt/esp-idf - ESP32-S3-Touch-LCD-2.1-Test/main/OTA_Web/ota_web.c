@@ -15,6 +15,7 @@
 #include "lvgl.h"
 #include "sd_log.h"
 #include "ble_obd.h"
+#include "Wireless.h"
 
 // Mindestanzahl Bytes, bevor wir den App-Beschreibungsblock (esp_app_desc_t)
 // zuverlaessig aus der Partition zurücklesen koennen - der Block beginnt kurz
@@ -233,6 +234,15 @@ static bool start_ap_and_server(void)
     s_last_error[0] = '\0';
     esp_err_t err;
 
+    // WiFi-Treiber steht seit v1.0.42+ (Heap-Entlastung) nach dem Boot-Scan
+    // nicht mehr nur "gestoppt", sondern komplett deinitialisiert - hier
+    // bei Bedarf frisch wieder anlegen, statt von einem bereits laufenden
+    // Treiber auszugehen.
+    if (!Wireless_WiFi_Init_If_Needed()) {
+        snprintf(s_last_error, sizeof(s_last_error), "wifi_init fehlgeschlagen");
+        return false;
+    }
+
     err = esp_wifi_stop();
     SD_Log("OTA_WEB: esp_wifi_stop -> %s", esp_err_to_name(err));
 
@@ -307,13 +317,11 @@ static void stop_ap_and_server(void)
         httpd_stop(s_server);
         s_server = NULL;
     }
-    // Zurueck in den Ausgangszustand (reiner STA-Modus wie nach dem Boot-Scan).
-    esp_err_t err = esp_wifi_stop();
-    SD_Log("OTA_WEB: Stop esp_wifi_stop -> %s", esp_err_to_name(err));
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    SD_Log("OTA_WEB: Stop esp_wifi_set_mode(STA) -> %s", esp_err_to_name(err));
-    err = esp_wifi_start();
-    SD_Log("OTA_WEB: Stop esp_wifi_start(STA) -> %s", esp_err_to_name(err));
+    // WiFi komplett abschalten UND deinitialisieren (nicht nur stoppen) -
+    // gibt die vom Treiber gehaltenen RX/TX-Puffer im internen DRAM wieder
+    // frei, die sonst bis zum naechsten Geraete-Neustart ungenutzt belegt
+    // blieben, waehrend parallel nur noch BLE-OBD laeuft.
+    Wireless_WiFi_Deinit();
     s_ap_active = false;
 }
 
@@ -352,7 +360,10 @@ static void ota_ap_start_task(void *arg)
         stop_ap_and_server();
         BLE_OBD_Resume();
     } else if (!ok) {
-        // WiFi-Start fehlgeschlagen - BLE_OBD nicht sinnlos pausiert lassen.
+        // WiFi-Start fehlgeschlagen - Treiber wieder freigeben (sonst bleibt
+        // er fuer nichts initialisiert haengen) und BLE_OBD nicht sinnlos
+        // pausiert lassen.
+        Wireless_WiFi_Deinit();
         BLE_OBD_Resume();
     }
     s_ap_busy = false;

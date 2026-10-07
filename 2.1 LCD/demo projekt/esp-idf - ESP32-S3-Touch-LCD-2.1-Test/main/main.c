@@ -17,6 +17,7 @@
 #include "bmw_ui.h"
 #include "can_obd2.h"
 #include "ble_obd.h"
+#include "sntp_sync.h"
 #include "esp_core_dump.h"
 #include "boot_logo_img.h"
 
@@ -125,16 +126,23 @@ void app_main(void)
     Wireless_Init();
     Driver_Init();
 
-    // Kein automatischer SNTP-Zeitabgleich mehr beim Boot: Der Nutzer loest
-    // ihn gezielt per "Hotspot verbinden"-Schalter im Funktionen-Screen aus
-    // (bmw_ui.c -> SNTP_Sync_Start(), siehe sntp_sync.h). So wird nie
-    // unbeabsichtigt nach einem Hotspot gesucht, z.B. waehrend der Fahrt.
-
     LCD_Init();
     Touch_Init();
     SD_Init();
     SD_Log_Init();
     log_and_clear_coredump();
+
+    // Legt nur den SNTP-Hintergrund-Task an (blockiert sofort auf eine
+    // Freigabe) - loest noch KEINEN Verbindungsversuch aus. Das passiert erst
+    // gezielt per "Hotspot verbinden"-Schalter im Funktionen-Screen
+    // (bmw_ui.c -> SNTP_Sync_Start()). Die Anlage muss aber so frueh wie
+    // moeglich passieren, solange das interne DRAM noch nicht durch
+    // LVGL/CAN/Bluedroid fragmentiert ist (siehe sntp_sync.c) - deshalb hier,
+    // noch vor LVGL_Init()/CAN_OBD2_Init()/BLE_OBD_Init(), aber nach
+    // SD_Log_Init(), damit die Init-Log-Zeile tatsaechlich auf der Karte
+    // landet statt vor dessen Start zu verfallen.
+    SNTP_Sync_Init();
+
     LVGL_Init();
 
     lv_obj_t *scr_boot = show_boot_logo();
