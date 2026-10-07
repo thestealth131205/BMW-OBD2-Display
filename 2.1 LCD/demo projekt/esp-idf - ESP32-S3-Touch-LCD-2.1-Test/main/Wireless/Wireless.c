@@ -219,6 +219,63 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     }
 }
 
+// true, sobald der BT-Controller + Bluedroid-Stack gerade aktiv ist. Wird
+// von Wireless_BT_Deinit()/_Reinit() umgeschaltet, damit BLE_OBD_Suspend()/
+// _Resume() den Stack fuer die kurze WiFi-Nutzung (Hotspot/OTA) komplett
+// abbauen und danach wieder aufbauen koennen, statt ihn die ganze Laufzeit
+// ueber dauerhaft allokiert zu lassen.
+static bool s_bt_stack_up = false;
+
+// Gemeinsamer Bring-up-Code fuer den allerersten Start (BLE_Init) und einen
+// spaeteren Re-Init nach Wireless_BT_Deinit() (Wireless_BT_Reinit()).
+// esp_bt_controller_mem_release() darf nur EINMAL, vor dem allerersten
+// esp_bt_controller_init(), aufgerufen werden - deshalb separat per
+// first_time-Flag, nicht bei jedem Re-Init wiederholt.
+static bool bt_stack_bringup(bool first_time)
+{
+    esp_err_t ret;
+    if (first_time) {
+        ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+        if (ret != ESP_OK) {
+            printf("%s mem_release failed: %s\n", __func__, esp_err_to_name(ret));
+        }
+    }
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        printf("%s initialize controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return false;
+    }
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret) {
+        printf("%s enable controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return false;
+    }
+    ret = esp_bluedroid_init();
+    if (ret) {
+        printf("%s init bluetooth failed: %s\n", __func__, esp_err_to_name(ret));
+        return false;
+    }
+    ret = esp_bluedroid_enable();
+    if (ret) {
+        printf("%s enable bluetooth failed: %s\n", __func__, esp_err_to_name(ret));
+        return false;
+    }
+
+    //register the  callback function to the gap module
+    ret = esp_ble_gap_register_callback(esp_gap_cb);
+    if (ret){
+        printf("%s gap register error, error code = %x\n", __func__, ret);
+        return false;
+    }
+    s_bt_stack_up = true;
+    // Stack ist bereit: der BLE-OBD-Client kann sofort mit Suche/Verbindung
+    // starten (parallel zur Start-Animation). Den Geraetezaehler der
+    // Demo-Seite fuettert dessen Dauerscan waehrend der ersten Sekunden.
+    BLE_Stack_Ready = 1;
+    return true;
+}
+
 void BLE_Init(void *arg)
 {
     // Kurze Verzoegerung, damit die restliche Peripherie-Initialisierung in
@@ -226,38 +283,36 @@ void BLE_Init(void *arg)
     // BT-Controller-/Bluedroid-Start um Bus-/CPU-Zeit konkurriert.
     vTaskDelay(pdMS_TO_TICKS(700));
 
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    esp_err_t ret = esp_bt_controller_init(&bt_cfg);                                            
-    if (ret) {
-        printf("%s initialize controller failed: %s\n", __func__, esp_err_to_name(ret));        
-        return;}
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);                                           
-    if (ret) {
-        printf("%s enable controller failed: %s\n", __func__, esp_err_to_name(ret));            
-        return;}
-    ret = esp_bluedroid_init();                                                                 
-    if (ret) {
-        printf("%s init bluetooth failed: %s\n", __func__, esp_err_to_name(ret));               
-        return;}
-    ret = esp_bluedroid_enable();                                                               
-    if (ret) {
-        printf("%s enable bluetooth failed: %s\n", __func__, esp_err_to_name(ret));             
-        return;}
-
-    //register the  callback function to the gap module
-    ret = esp_ble_gap_register_callback(esp_gap_cb);                                            
-    if (ret){
-        printf("%s gap register error, error code = %x\n", __func__, ret);                      
-        return;
+    if (bt_stack_bringup(true)) {
+        BLE_Scan();
     }
-    // Stack ist bereit: der BLE-OBD-Client kann sofort mit Suche/Verbindung
-    // starten (parallel zur Start-Animation). Den Geraetezaehler der
-    // Demo-Seite fuettert dessen Dauerscan waehrend der ersten Sekunden.
-    BLE_Stack_Ready = 1;
-    BLE_Scan();
     vTaskDelete(NULL);
+}
 
+bool Wireless_BT_Deinit(void)
+{
+    if (!s_bt_stack_up) return true;
+    esp_err_t e1 = esp_bluedroid_disable();
+    esp_err_t e2 = esp_bluedroid_deinit();
+    esp_err_t e3 = esp_bt_controller_disable();
+    esp_err_t e4 = esp_bt_controller_deinit();
+    SD_Log("BT: disable=%s deinit=%s ctrl_disable=%s ctrl_deinit=%s (intern frei=%u)",
+           esp_err_to_name(e1), esp_err_to_name(e2), esp_err_to_name(e3), esp_err_to_name(e4),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    // Unabhaengig vom Ergebnis als "unten" markieren: Ein fehlgeschlagener
+    // disable/deinit laesst den Stack ohnehin in einem Zustand, in dem
+    // BLE_OBD nicht mehr sinnvoll weiterarbeiten kann - der anschliessende
+    // Wireless_BT_Reinit()-Versuch beim Resume ist dann die einzige Chance,
+    // wieder in einen definierten Zustand zu kommen.
+    BLE_Stack_Ready = 0;
+    s_bt_stack_up = false;
+    return true;
+}
+
+bool Wireless_BT_Reinit(void)
+{
+    if (s_bt_stack_up) return true;
+    return bt_stack_bringup(false);
 }
 uint16_t BLE_Scan(void)
 {

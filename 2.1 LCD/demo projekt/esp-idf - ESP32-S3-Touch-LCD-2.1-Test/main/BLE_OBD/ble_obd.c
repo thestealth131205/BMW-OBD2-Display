@@ -954,21 +954,38 @@ void BLE_OBD_Suspend(void)
     s_suspended = true;
     OBD_LOGI("BLE_OBD pausiert (WLAN-Update aktiv)");
     esp_ble_gap_stop_scanning();
-    if (s_connected) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id); // -> DISCONNECT_EVT, start_scan bleibt wegen s_suspended inaktiv
-    } else {
-        set_status("Pausiert");
-    }
-    // s_connecting (Verbindungsaufbau laeuft bereits, aber CONNECT_EVT noch
-    // nicht eingetroffen) wird direkt im CONNECT_EVT-Handler abgefangen.
+    set_status("Pausiert");
+    s_connecting = false;
+    s_connected = false;
+    s_notify_ready = false;
+    s_online = false;
+    // Scan-Stop/GATT-Disconnect allein gaben bisher nie die mehreren 10 KB
+    // internes DRAM frei, die esp_bluedroid_init()/esp_bt_controller_init()
+    // dauerhaft fuer ACL-/GATT-/HCI-Puffer reserviert hatten - das war die
+    // eigentliche Ursache, warum esp_wifi_init() beim WLAN-Update/Hotspot-
+    // Zeitabgleich trotz augenscheinlich ausreichend freiem Heap wiederholt
+    // mit ESP_ERR_NO_MEM scheiterte. Deshalb jetzt vollstaendiger Abbau des
+    // BT-Controllers/Bluedroid-Stacks, nicht nur der GATT-Verbindung.
+    Wireless_BT_Deinit();
 }
 
 void BLE_OBD_Resume(void)
 {
     if (!s_started || !s_suspended) return;
+    OBD_LOGI("BLE_OBD fortgesetzt, baue BT-Stack neu auf");
+    if (!Wireless_BT_Reinit()) {
+        OBD_LOGW("BT-Stack-Reinit fehlgeschlagen - BLE_OBD bleibt pausiert");
+        return;
+    }
     s_suspended = false;
-    OBD_LOGI("BLE_OBD fortgesetzt, starte Suche neu");
-    ble_obd_start_scan();
+    // Security-Parameter und GATT-App-Registrierung gehen bei
+    // esp_bluedroid_deinit() verloren und muessen nach jedem Reinit neu
+    // gesetzt werden (genau wie beim allerersten Start in ble_obd_start_task).
+    ble_obd_setup_security();
+    esp_ble_gattc_register_callback(ble_obd_gattc_cb);
+    esp_ble_gattc_app_register(BLE_OBD_APP_ID);
+    // REG_EVT -> set_scan_params() -> SCAN_PARAM_SET_COMPLETE_EVT ->
+    // ble_obd_start_scan() stoesst die Suche automatisch wieder an.
 }
 
 bool BLE_OBD_online(void) { return s_online; }
