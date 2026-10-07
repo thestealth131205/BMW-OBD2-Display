@@ -874,8 +874,16 @@ static void swipe_gesture_cb(lv_event_t *e)
     } else if (scr == scr_service && dir == LV_DIR_LEFT) {
         lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     } else if (scr == scr_service && dir == LV_DIR_RIGHT) {
+        // Lambda/MAP-Abfrage erst jetzt starten - kostet sonst unnoetig
+        // Poll-Zeit/Buszeit, solange niemand auf den Screen schaut.
+        if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_set_sensors_active(true);
+        else CAN_OBD2_set_sensors_active(true);
         lv_scr_load_anim(scr_sensors, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     } else if (scr == scr_sensors && dir == LV_DIR_LEFT) {
+        // Beide Quellen stoppen (nicht nur die gerade aktive) - falls
+        // zwischendurch umgeschaltet wurde, bleibt sonst eine Quelle aktiv.
+        BLE_OBD_set_sensors_active(false);
+        CAN_OBD2_set_sensors_active(false);
         lv_scr_load_anim(scr_service, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     } else if (scr == scr_settings && dir == LV_DIR_RIGHT) {
         lv_scr_load_anim(scr_settings_func, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);

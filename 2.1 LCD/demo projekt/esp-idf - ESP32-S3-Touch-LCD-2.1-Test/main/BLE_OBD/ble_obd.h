@@ -53,7 +53,13 @@ float BLE_OBD_bat_voltage(void);
 // durchlaufend, die Zuordnung zu Bank1/Bank2 ist fahrzeugabhaengig - beim N43
 // (Reihenmotor, nur eine Bank) sind das vermutlich Sensor1 (vor Kat) und
 // Sensor2 (nach Kat) derselben Bank, nicht zwei getrennte Baenke. Am
-// Fahrzeug noch zu verifizieren. ---
+// Fahrzeug noch zu verifizieren.
+//
+// Die drei PIDs werden nur abgefragt, solange der Sensoren-Screen sichtbar
+// ist (true/false hier vom UI beim Rein-/Rausswipen gesetzt) - sonst bleibt
+// mehr Zeit im Poll-Rundlauf fuer RPM/Speed/Wasser/Gaspedal, und ohne
+// aktiven Trigger kaemen hier sonst nie Werte an. ---
+void BLE_OBD_set_sensors_active(bool active);
 float BLE_OBD_lambda1_ratio(void);
 float BLE_OBD_lambda1_voltage(void);
 float BLE_OBD_lambda2_ratio(void);

@@ -33,7 +33,9 @@ static volatile bool  s_online       = false;
 static volatile float s_obd2_bat_voltage = 0.0f;
 
 // --- Sensoren-Screen: Lambda (Ratio+Spannung) Sensor 1/2, Ansaugkruemmerdruck
-// (MAP) - siehe can_obd2.h fuer die Annahmen/Einschraenkungen dazu. ---
+// (MAP) - siehe can_obd2.h fuer die Annahmen/Einschraenkungen dazu. Werden nur
+// abgefragt, solange der Sensoren-Screen sichtbar ist (CAN_OBD2_set_sensors_active). ---
+static volatile bool  s_sensors_active  = false;
 static volatile float s_lambda1_ratio   = 0.0f;
 static volatile float s_lambda1_voltage = 0.0f;
 static volatile float s_lambda2_ratio   = 0.0f;
@@ -145,9 +147,15 @@ static void can_task(void *arg)
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         if (now - last_extra_poll >= EXTRA_POLL_INTERVAL_MS) {
             last_extra_poll = now;
-            uint8_t req[8] = {0x02, 0x01, extra_pids[extra_idx], 0x00, 0x00, 0x00, 0x00, 0x00};
+            // Ohne sichtbaren Sensoren-Screen nur die Batteriespannung (0x42)
+            // abfragen - Lambda/MAP (0x24/0x25/0x0B) kosten sonst unnoetig
+            // Buszeit, obwohl niemand hinschaut.
+            uint8_t pid = s_sensors_active ? extra_pids[extra_idx] : extra_pids[0];
+            uint8_t req[8] = {0x02, 0x01, pid, 0x00, 0x00, 0x00, 0x00, 0x00};
             mcp2515_send(ID_OBD2_FUNC, req, 8);
-            extra_idx = (extra_idx + 1) % (int)(sizeof(extra_pids) / sizeof(extra_pids[0]));
+            extra_idx = s_sensors_active
+                ? (extra_idx + 1) % (int)(sizeof(extra_pids) / sizeof(extra_pids[0]))
+                : 0;
         }
 
         vTaskDelay(pdMS_TO_TICKS(drained ? 2 : 10));
@@ -211,6 +219,8 @@ const char *CAN_OBD2_dtc_code(int idx)
 }
 
 float CAN_OBD2_bat_voltage(void) { return s_obd2_bat_voltage; }
+
+void CAN_OBD2_set_sensors_active(bool active) { s_sensors_active = active; }
 
 float CAN_OBD2_lambda1_ratio(void)   { return s_lambda1_ratio; }
 float CAN_OBD2_lambda1_voltage(void) { return s_lambda1_voltage; }

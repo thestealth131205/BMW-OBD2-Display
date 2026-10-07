@@ -52,7 +52,12 @@ float CAN_OBD2_bat_voltage(void);
 // nummeriert O2-Sensoren 1-8 (PID 0x24-0x2B) durchlaufend, die Zuordnung zu
 // Bank1/Bank2 ist fahrzeugabhaengig - beim N43 (Reihenmotor, nur eine Bank)
 // sind das vermutlich Sensor1 (vor Kat) und Sensor2 (nach Kat) derselben
-// Bank, nicht zwei getrennte Baenke. Am Fahrzeug noch zu verifizieren. ---
+// Bank, nicht zwei getrennte Baenke. Am Fahrzeug noch zu verifizieren.
+//
+// Werden nur abgefragt, solange der Sensoren-Screen sichtbar ist (vom UI
+// beim Rein-/Rausswipen gesetzt) - sonst bleibt nur PID 0x42 (Batterie) im
+// Rundlauf, und ohne aktiven Trigger kaemen hier sonst nie Werte an. ---
+void CAN_OBD2_set_sensors_active(bool active);
 float CAN_OBD2_lambda1_ratio(void);
 float CAN_OBD2_lambda1_voltage(void);
 float CAN_OBD2_lambda2_ratio(void);

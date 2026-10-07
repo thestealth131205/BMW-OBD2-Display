@@ -129,7 +129,10 @@ static volatile float s_throttle_pct    = 0.0f;
 static volatile float s_bat_voltage     = 0.0f;
 
 // --- Sensoren-Screen: Lambda (Ratio+Spannung) Sensor 1/2, Ansaugkruemmerdruck
-// (MAP) - siehe ble_obd.h fuer die Annahmen/Einschraenkungen dazu. ---
+// (MAP) - siehe ble_obd.h fuer die Annahmen/Einschraenkungen dazu. Werden nur
+// abgefragt, solange der Sensoren-Screen sichtbar ist (BLE_OBD_set_sensors_active),
+// sonst bleibt mehr Zeit im Poll-Rundlauf fuer RPM/Speed/Wasser/Gaspedal. ---
+static volatile bool  s_sensors_active  = false;
 static volatile float s_lambda1_ratio   = 0.0f;
 static volatile float s_lambda1_voltage = 0.0f;
 static volatile float s_lambda2_ratio   = 0.0f;
@@ -836,7 +839,7 @@ static void ble_obd_task(void *arg)
             }
             break;
         case 4:
-            if (send_at_cmd("0124", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+            if (s_sensors_active && send_at_cmd("0124", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x24) {
                     uint16_t ratio_raw = ((uint16_t)bytes[2] << 8) | bytes[3];
@@ -847,7 +850,7 @@ static void ble_obd_task(void *arg)
             }
             break;
         case 5:
-            if (send_at_cmd("0125", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+            if (s_sensors_active && send_at_cmd("0125", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 6 && bytes[0] == 0x41 && bytes[1] == 0x25) {
                     uint16_t ratio_raw = ((uint16_t)bytes[2] << 8) | bytes[3];
@@ -858,7 +861,7 @@ static void ble_obd_task(void *arg)
             }
             break;
         case 6:
-            if (send_at_cmd("010B", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+            if (s_sensors_active && send_at_cmd("010B", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
                 n = hex_tokenize(resp, bytes, sizeof(bytes));
                 if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x0B) {
                     s_intake_pressure = (float)bytes[2];
@@ -968,6 +971,8 @@ float BLE_OBD_throttle_pct(void) { return s_throttle_pct; }
 float BLE_OBD_bat_voltage(void) { return s_bat_voltage; }
 float BLE_OBD_gforce_x(void) { return 0.0f; }
 float BLE_OBD_gforce_y(void) { return 0.0f; }
+
+void BLE_OBD_set_sensors_active(bool active) { s_sensors_active = active; }
 
 float BLE_OBD_lambda1_ratio(void)   { return s_lambda1_ratio; }
 float BLE_OBD_lambda1_voltage(void) { return s_lambda1_voltage; }
