@@ -1,5 +1,6 @@
 #include "Wireless.h"
 #include "esp_heap_caps.h"
+#include "sd_log.h"
 
 uint16_t BLE_NUM = 0;
 uint16_t WIFI_NUM = 0;
@@ -23,7 +24,11 @@ bool Wireless_WiFi_Init_If_Needed(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
-        printf("WIFI: esp_wifi_init (Re-Init) -> %s\r\n", esp_err_to_name(err));
+        // Vorher nur per printf (UART) sichtbar - landete nie im SD-Log, das
+        // einzige, was man im Auto ohne angeschlossenen Rechner einsehen
+        // kann. "fehlgeschlagen" ohne Fehlercode war daher nicht diagnostizierbar.
+        SD_Log("WIFI: esp_wifi_init (Re-Init) -> %s (intern frei=%u)",
+               esp_err_to_name(err), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return false;
     }
     // Siehe Kommentar in WIFI_Init(): keine NVS-Nutzung fuer WiFi-Config
@@ -36,11 +41,20 @@ bool Wireless_WiFi_Init_If_Needed(void)
 void Wireless_WiFi_Deinit(void)
 {
     if (!s_wifi_driver_up) return;
-    esp_wifi_stop();
+    esp_err_t stop_err = esp_wifi_stop();
     esp_err_t err = esp_wifi_deinit();
-    printf("WIFI: esp_wifi_deinit -> %s (freier interner Heap: %u Byte)\r\n",
-           esp_err_to_name(err), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    s_wifi_driver_up = false;
+    SD_Log("WIFI: esp_wifi_stop -> %s, esp_wifi_deinit -> %s (intern frei=%u)",
+           esp_err_to_name(stop_err), esp_err_to_name(err),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    // Schlug esp_wifi_deinit() fehl, ist der Treiber laut ESP-IDF weiterhin
+    // initialisiert - das Flag muss das widerspiegeln, sonst wuerde
+    // Wireless_WiFi_Init_If_Needed() spaeter faelschlich ein zweites
+    // esp_wifi_init() auf einen bereits initialisierten Treiber versuchen
+    // (das schlaegt dann mit ESP_ERR_WIFI_NOT_STOPPED/ESP_FAIL fehl - exakt
+    // das beobachtete "Wireless_WiFi_Init_If_Needed() fehlgeschlagen").
+    if (err == ESP_OK) {
+        s_wifi_driver_up = false;
+    }
 }
 
 void Wireless_Init(void)
