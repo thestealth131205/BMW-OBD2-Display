@@ -1,3 +1,7 @@
 dependencies:
   idf: ">=4.4"
   lvgl/lvgl: "~8.2.0"
+  # WS2812/SK6812-Ansteuerung fuer den LED-Control-Screen (led_ctrl.c),
+  # RMT-Backend. Versionsbereich statt fester Version, damit der Component-
+  # Manager wie bei lvgl automatisch die neueste kompatible 2.x-Version zieht.
+  espressif/led_strip: "^2.4.1"

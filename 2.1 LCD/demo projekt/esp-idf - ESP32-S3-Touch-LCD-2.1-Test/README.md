@@ -71,7 +71,11 @@ herausgeführt. Verdrahtung des MCP2515-Moduls (blaue Platine mit TJA1050,
 | SI (MOSI) | GPIO44 | SPI Data ESP→MCP2515 |
 | SO (MISO) | GPIO19 | SPI Data MCP2515→ESP |
 | CS | GPIO20 | SPI Chip-Select |
-| INT | GPIO0 | Interrupt (Polling-Fallback möglich) |
+| INT | *nicht verbunden* | reiner Software-Poll über SPI (`mcp2515.c`), kein ISR-Pin nötig |
+
+**GPIO0 bleibt dadurch dauerhaft frei** für den LED-Control-Screen (siehe
+unten) – unabhängig davon, ob BLE-OBD oder MCP2515 als Datenquelle gewählt
+ist.
 
 Danach MCP2515 → CAN-Transceiver (TJA1050 ist meist schon auf dem Modul
 integriert) → BMW E90 OBD2-Stecker:
@@ -243,6 +247,32 @@ Service-Reset und das CSV-Logging.
 - Ein BLE-Adapter benötigt **keine** Verdrahtung – GPIO19/20/43/44 bleiben bei
   reiner BLE-Nutzung frei (MCP2515 dann nicht anschließen).
 
+## LED-Steuerung (WS2812B/SK6812)
+
+Wisch nach oben auf der Multi-Ansicht öffnet den Screen „LED CONTROL“
+(`main/LED_Control/led_ctrl.c`, RMT-Backend über die Komponente
+`espressif/led_strip`), Wisch nach unten geht zurück.
+
+![LED-Streifen-Verdrahtung](docs/led_wiring.png)
+
+| Streifen | ESP32-S3 GPIO | Funktion |
+|---|---|---|
+| DIN (Daten) | **GPIO0** | WS2812/SK6812-Protokoll (RMT) |
+| VCC | 5V (extern, je nach LED-Anzahl) | Versorgung |
+| GND | GND | Masse |
+
+- GPIO0 ist der einzige der 5 freien Pins, der nicht fest fürs MCP2515-Modul
+  gebraucht wird (siehe Tabelle oben) – dauerhaft frei, unabhängig von der
+  BLE/MCP-Datenquellenwahl. Ein evtl. am MCP2515-Modul angeschlossener
+  INT-Draht an GPIO0 muss für den LED-Betrieb abgezogen werden.
+- Max. 100 LEDs, Ein-/Ausschalter (RMT-Ausgang wird erst bei aktivem
+  Schalter konfiguriert), zwei Muster: **Solid** (eine Farbe) und **Chase**
+  (Hauptfarbe als Hintergrund, Zweitfarbe läuft mit kurzem Schweif im Loop,
+  Geschwindigkeit per Regler).
+- Anzahl und beide Farben (10er-Palette, volle 8-Bit-RGB-Werte statt der
+  RGB565-Display-Darstellung) per Regler/Farbauswahl einstellbar, alle
+  Einstellungen in NVS gespeichert.
+
 ## UI-Logik (Kurzfassung)
 
 - **Boot-Logo**: Direkt nach der LVGL-Initialisierung zeigt das Display
@@ -283,3 +313,6 @@ zum C6-Projekt:
   Bank1/Bank2 ist fahrzeugabhängig; beim N43 als Reihenmotor mit nur einer
   Bank sind das vermutlich Sensor vor/nach Kat derselben Bank, nicht zwei
   getrennte Bänke – am Fahrzeug noch zu verifizieren.
+- Neuer Screen „LED CONTROL“ (Wisch oben ab der Multi-Ansicht, Wisch unten
+  zurück): Ansteuerung eines WS2812B/SK6812-Streifens an GPIO0 (siehe eigener
+  Abschnitt oben) – im C6-Projekt nicht vorhanden.

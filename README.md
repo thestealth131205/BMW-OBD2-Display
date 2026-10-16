@@ -64,13 +64,15 @@ herausgeführt.
 | SI (MOSI) | GPIO44 | SPI Data ESP→MCP2515 |
 | SO (MISO) | GPIO19 | SPI Data MCP2515→ESP |
 | CS | GPIO20 | SPI Chip-Select |
-| INT | GPIO0 | Interrupt (Polling-Fallback möglich) |
+| INT | *nicht verbunden* | reiner Software-Poll über SPI (`mcp2515.c`), kein ISR-Pin nötig |
 
 **Achtung Pin-Konflikt:** GPIO43/44 sind gleichzeitig die UART-Konsole des
 ESP32-S3 – mit dieser Belegung ist die serielle Debug-Ausgabe (`idf.py
 monitor`) zur Laufzeit nicht nutzbar (Flashen funktioniert weiterhin über den
 USB-Download-Modus). GPIO19/20 sind außerdem die nativen-USB-Pins – auch
-diese Funktion steht dadurch nicht mehr zur Verfügung.
+diese Funktion steht dadurch nicht mehr zur Verfügung. **GPIO0** bleibt
+dadurch dauerhaft frei für den LED-Control-Screen (siehe unten) –
+unabhängig davon, ob BLE-OBD oder MCP2515 als Datenquelle gewählt ist.
 
 ## Anschlussplan
 
@@ -277,6 +279,41 @@ Service-Reset und das CSV-Logging.
 - Ein BLE-Adapter benötigt **keine** Verdrahtung – GPIO19/20/43/44 bleiben bei
   reiner BLE-Nutzung frei (MCP2515 dann nicht anschließen).
 
+## LED-Steuerung (WS2812B/SK6812)
+
+Ein adressierbarer LED-Streifen (WS2812B/SK6812-kompatibel, max. 100 LEDs)
+lässt sich direkt vom Display aus ansteuern – erreichbar per **Wisch nach
+oben** auf der Multi-Ansicht, **Wisch nach unten** geht zurück
+(`main/LED_Control/led_ctrl.c`, RMT-Backend über die Komponente
+`espressif/led_strip`).
+
+![LED-Streifen-Verdrahtung](docs/led_wiring.png)
+
+| Streifen | ESP32-S3 GPIO | Funktion |
+|---|---|---|
+| DIN (Daten) | **GPIO0** | WS2812/SK6812-Protokoll (RMT) |
+| VCC | 5V (externe Versorgung je nach LED-Anzahl empfohlen) | Versorgung |
+| GND | GND | Masse (mit ESP32-S3-GND verbinden) |
+
+- **GPIO0 ist der einzige der 5 herausgeführten freien Pins, der nicht fest
+  für das MCP2515-Modul gebraucht wird** (SCK/MOSI/MISO/CS belegen
+  GPIO43/44/19/20, siehe oben). Der MCP2515-Treiber wertet seinen INT-Pin
+  ohnehin nie aus (reiner Software-Poll über das CANINTF-Register per SPI),
+  GPIO0 bleibt also **unabhängig von der BLE/MCP-Datenquellenwahl** dauerhaft
+  für die LED-Ansteuerung frei. Hängt am MCP2515-Modul trotzdem noch ein
+  INT-Draht an GPIO0, muss er für den LED-Betrieb abgezogen werden.
+- Der Streifen ist per Schalter ein-/ausschaltbar; der GPIO wird erst bei
+  aktivem Schalter als RMT-Ausgang konfiguriert.
+- Zwei Muster: **Solid** (eine Farbe für alle LEDs) und **Chase** (Hauptfarbe
+  als Hintergrund, Zweitfarbe läuft mit kurzem Komet-Schweif von LED 0 bis
+  zum Ende im Loop, Geschwindigkeit per Schieberegler 0–100 %).
+- Anzahl LEDs (1–100) und beide Farben (aus derselben 10-Farben-Palette wie
+  Primär-/Sekundärfarbe, aber mit vollen 8-Bit-RGB-Werten statt der auf
+  RGB565 gestutzten Display-Darstellung) sind ebenfalls per Regler/
+  Farbauswahl einstellbar.
+- Alle Einstellungen (Ein/Aus, Muster, Anzahl, Geschwindigkeit, beide Farben)
+  werden wie die übrigen Einstellungen dauerhaft in NVS gespeichert.
+
 ## UI-Logik (Kurzfassung)
 
 - **Boot-Logo**: Direkt nach der LVGL-Initialisierung zeigt das Display
@@ -296,6 +333,10 @@ Service-Reset und das CSV-Logging.
 - **Schaltpunkt-Kästchen** (6 Stück, Drehzahl-Kachel): füllen sich einzeln je
   nach Drehzahl (Schwellen 1500/2500/3500/4500/5500/6500 U/min), ab
   6800 U/min blinken alle gemeinsam wie eine digitale Schaltanzeige.
+- **Wisch nach oben** auf der Multi-Ansicht öffnet den Screen „LED CONTROL“
+  (siehe eigener Abschnitt oben): Ein-/Ausschalter, Muster Solid/Chase,
+  Anzahl- und Geschwindigkeitsregler, zwei Farbauswahl-Spalten für Haupt-/
+  Zweitfarbe. **Wisch nach unten** führt zurück zur Multi-Ansicht.
 - **Wisch nach links** auf der Multi-Ansicht öffnet den Fehlercode-Screen:
   oben eine scrollbare Liste der ausgelesenen DTCs (Klartext, z. B. „P0301“),
   darunter „Auslesen“/„Löschen“ nebeneinander sowie „Service Reset“ (CBS-

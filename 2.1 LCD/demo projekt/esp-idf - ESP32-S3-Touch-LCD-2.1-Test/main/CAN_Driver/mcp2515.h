@@ -23,8 +23,16 @@ extern "C" {
 #ifndef MCP2515_PIN_CS
 #define MCP2515_PIN_CS    20   // MCP2515 CS
 #endif
+// -1 = nicht verbunden (Polling): mcp2515_receive() fragt den Empfangsstatus
+// ohnehin ueber das CANINTF-Register per SPI ab (reiner Software-Poll), der
+// INT-Pin wurde nie per gpio_get_level()/ISR tatsaechlich ausgewertet - daher
+// bleibt GPIO0 jetzt fest frei fuer die LED-Streifen-Ansteuerung (siehe
+// LED_Control/led_ctrl.c), unabhaengig von der BLE/MCP-Datenquellenwahl.
+// Hardware: ein evtl. am MCP2515-Modul angeschlossener INT-Draht muss fuer
+// den LED-Betrieb abgezogen werden, die anderen vier Leitungen bleiben
+// unveraendert.
 #ifndef MCP2515_PIN_INT
-#define MCP2515_PIN_INT   0    // MCP2515 INT (-1 = nicht verbunden, dann Polling)
+#define MCP2515_PIN_INT   -1
 #endif
 
 // Quarz auf dem MCP2515-Modul: 8 oder 16 (MHz). Muss zum Aufdruck passen,

@@ -18,6 +18,7 @@
 #include "can_obd2.h"
 #include "ble_obd.h"
 #include "sntp_sync.h"
+#include "led_ctrl.h"
 #include "esp_core_dump.h"
 #include "boot_logo_img.h"
 
@@ -153,6 +154,11 @@ void app_main(void)
     // OBD2 per Bluetooth-LE-ELM327-Adapter (z.B. Veepeak OBDCheck BLE) -
     // scannt/verbindet im Hintergrund, Standard-Datenquelle in bmw_ui.c
     BLE_OBD_Init();
+
+    // LED-Control-Screen (WS2812B/SK6812 an GPIO0): legt nur den
+    // Hintergrund-Task an, der RMT-Ausgang wird erst bei aktivem Schalter
+    // konfiguriert (siehe led_ctrl.c).
+    LED_Ctrl_Init();
 /********************* BMW Multi-Ansicht (Standard) + Waveshare-Demo *********************/
     // Demo-Seite des Waveshare-Projekts auf einem eigenen Screen aufbauen
     // (erscheint beim 3-Sekunden-Halten in der Bildschirmmitte).

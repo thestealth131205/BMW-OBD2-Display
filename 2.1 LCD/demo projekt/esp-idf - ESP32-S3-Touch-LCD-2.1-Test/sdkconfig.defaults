@@ -111,3 +111,8 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
 # immer funktioniert, weil es zufaellig exakt ins 8.3-Schema passt. Heap statt
 # Stack gewaehlt, da Task-Stacks in diesem Projekt bereits mehrfach knapp waren.
 CONFIG_FATFS_LFN_HEAP=y
+
+# Anzahl-/Geschwindigkeits-Regler auf dem LED-Control-Screen (bmw_ui.c) -
+# sollte zwar per Default an sein (default y if !LV_CONF_MINIMAL), hier
+# trotzdem explizit gesetzt, da sich hier nicht lokal kompilieren laesst.
+CONFIG_LV_USE_SLIDER=y

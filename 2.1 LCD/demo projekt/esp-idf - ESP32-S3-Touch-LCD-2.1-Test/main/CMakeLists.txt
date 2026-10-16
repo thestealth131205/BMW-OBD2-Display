@@ -25,6 +25,7 @@ idf_component_register(
                               "BLE_OBD/ble_obd.c"
                               "OTA_Web/ota_web.c"
                               "SNTP/sntp_sync.c"
+                              "LED_Control/led_ctrl.c"
 
                         INCLUDE_DIRS "./EXIO"
                                      "./LCD_Driver"
@@ -44,5 +45,6 @@ idf_component_register(
                                      "./BLE_OBD"
                                      "./OTA_Web"
                                      "./SNTP"
+                                     "./LED_Control"
                                      "."
                         )

@@ -6,6 +6,7 @@
 #include "ble_obd.h"
 #include "sntp_sync.h"
 #include "service_funcs.h"
+#include "led_ctrl.h"
 #include "PCF85063.h"
 #include "sd_log.h"
 #include "SD_MMC.h"
@@ -40,6 +41,26 @@ static const ColorOption COLOR_PALETTE[] = {
     {"Weiss",    LV_COLOR_MAKE(255, 255, 255)},
 };
 static const int COLOR_PALETTE_SIZE = sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0]);
+
+// Dieselbe Reihenfolge/Namen wie COLOR_PALETTE, aber mit vollen 8-Bit-RGB-
+// Werten statt der auf RGB565 (LV_COLOR_DEPTH=16) gestutzten lv_color_t -
+// der LED-Control-Screen (led_ctrl.c) steuert einen WS2812-Streifen, der die
+// volle 24-Bit-Praezision tatsaechlich darstellen kann, anders als das
+// Display selbst. Nur fuer die LED-Farbwahl genutzt, die Swatch-Buttons im
+// UI selbst nutzen weiterhin COLOR_PALETTE[].color.
+typedef struct { uint8_t r, g, b; } RgbColor;
+static const RgbColor COLOR_PALETTE_RGB[] = {
+    {0, 162, 255},   // Blau
+    {255, 0, 0},     // Rot
+    {0, 230, 64},    // Gruen
+    {255, 214, 0},   // Gelb
+    {224, 255, 0},   // Neongelb
+    {255, 140, 0},   // Orange
+    {255, 0, 144},   // Pink
+    {170, 0, 255},   // Lila
+    {0, 255, 220},   // Cyan
+    {255, 255, 255}, // Weiss
+};
 
 // Primaerfarbe (Geschwindigkeitsanzeige) / Sekundaerfarbe (Nadel-Basisfarbe,
 // solange die Wassertemperatur unter 95 Grad liegt) - per Einstellungs-Screen
@@ -110,6 +131,11 @@ static lv_obj_t *sens_lambda1_val, *sens_lambda2_val;
 static lv_obj_t *sens_lambda1_volt_val, *sens_lambda2_volt_val;
 static lv_obj_t *sens_map_val, *sens_boost_val;
 static lv_obj_t *sens_cam_in_val, *sens_cam_ex_val;
+static lv_obj_t *scr_led;
+static lv_obj_t *led_count_label;
+static lv_obj_t *led_speed_label;
+static lv_obj_t *led_pattern_solid_btn, *led_pattern_chase_btn;
+static lv_obj_t *led_speed_row; // Container (Label+Slider) nur im Chase-Muster sichtbar
 
 static lv_obj_t *multi_meter;
 static lv_meter_scale_t *multi_needle_scale;
@@ -139,6 +165,18 @@ static bool g_buzzer_active  = false;
 // offenen log_file, das sich bei jedem Neustart mit neuem Dateinamen oeffnet)
 // - wird wie die anderen Einstellungen in NVS gespeichert.
 static bool g_datalog_enabled = false;
+
+// LED-Streifen-Einstellungen (LED-Control-Screen), wie die anderen
+// Einstellungen in NVS gespeichert. Farben werden direkt als Index in
+// COLOR_PALETTE_RGB[] gehalten (nicht als lv_color_t): LV_COLOR_DEPTH=16
+// (RGB565) wuerde die 24-Bit-Praezision, die ein WS2812-Streifen tatsaechlich
+// darstellen kann, unnoetig auf 5/6/5 Bit je Kanal stutzen.
+static bool g_led_enabled = false;
+static led_pattern_t g_led_pattern = LED_PATTERN_SOLID;
+static int g_led_count = 30;
+static uint8_t g_led_speed = 50;
+static uint8_t g_led_color_main_idx   = 0; // Blau
+static uint8_t g_led_color_second_idx = 1; // Rot
 static lv_obj_t *multi_speed_label;
 static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
@@ -255,6 +293,12 @@ static void bmw_settings_save(void)
     nvs_set_u8(h, "log_en",     g_datalog_enabled ? 1 : 0);
     nvs_set_u8(h, "gauge_mode", (uint8_t)g_multi_gauge_mode);
     nvs_set_u8(h, "buzzer_en",  g_buzzer_enabled ? 1 : 0);
+    nvs_set_u8(h, "led_en",     g_led_enabled ? 1 : 0);
+    nvs_set_u8(h, "led_pat",    (uint8_t)g_led_pattern);
+    nvs_set_u8(h, "led_cnt",    (uint8_t)g_led_count);
+    nvs_set_u8(h, "led_spd",    g_led_speed);
+    nvs_set_u8(h, "led_col_m",  g_led_color_main_idx);
+    nvs_set_u8(h, "led_col_s",  g_led_color_second_idx);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -289,6 +333,24 @@ static void bmw_settings_load(void)
     }
     if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
         g_buzzer_enabled = (v != 0);
+    }
+    if (nvs_get_u8(h, "led_en", &v) == ESP_OK) {
+        g_led_enabled = (v != 0);
+    }
+    if (nvs_get_u8(h, "led_pat", &v) == ESP_OK && v <= LED_PATTERN_CHASE) {
+        g_led_pattern = (led_pattern_t)v;
+    }
+    if (nvs_get_u8(h, "led_cnt", &v) == ESP_OK && v >= 1 && v <= LED_CTRL_MAX_LEDS) {
+        g_led_count = v;
+    }
+    if (nvs_get_u8(h, "led_spd", &v) == ESP_OK) {
+        g_led_speed = v;
+    }
+    if (nvs_get_u8(h, "led_col_m", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
+        g_led_color_main_idx = v;
+    }
+    if (nvs_get_u8(h, "led_col_s", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
+        g_led_color_second_idx = v;
     }
 
     // Bootloop-Schutz fuer das wiederhergestellte Datenlogging: In v1.0.39
@@ -889,6 +951,10 @@ static void swipe_gesture_cb(lv_event_t *e)
         lv_scr_load_anim(scr_settings_func, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     } else if (scr == scr_settings_func && dir == LV_DIR_LEFT) {
         lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    } else if (scr == scr_multi && dir == LV_DIR_TOP) {
+        lv_scr_load_anim(scr_led, LV_SCR_LOAD_ANIM_MOVE_TOP, 200, 0, false);
+    } else if (scr == scr_led && dir == LV_DIR_BOTTOM) {
+        lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 200, 0, false);
     }
 }
 
@@ -1098,6 +1164,240 @@ static void create_sensors_screen(void)
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 
     lv_obj_add_event_cb(scr_sensors, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
+}
+
+// --- LED-Control-Screen: Ansteuerung eines WS2812B/SK6812-kompatiblen
+// Streifens an GPIO0 (einziger dauerhaft freier GPIO der 5 herausgefuehrten
+// Pins, siehe led_ctrl.c/mcp2515.h - unabhaengig von der BLE/MCP-
+// Datenquellenwahl, da der MCP2515-INT-Pin ohnehin nie ausgewertet wird).
+// Erreichbar per Wisch nach oben auf der Multi-Ansicht, Wisch nach unten
+// geht zurueck. Zwei Muster: Solid (eine Farbe fuer alle LEDs) und Chase
+// (Hauptfarbe als Hintergrund, Zweitfarbe laeuft mit kurzem Schweif von
+// LED 0 bis zum Ende im Loop, Geschwindigkeit per Schieberegler).
+static void led_enable_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    g_led_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    LED_Ctrl_SetEnabled(g_led_enabled);
+    bmw_settings_save();
+}
+
+static void update_led_pattern_btn_styles(void)
+{
+    lv_obj_set_style_bg_color(led_pattern_solid_btn,
+        g_led_pattern == LED_PATTERN_SOLID ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_bg_color(led_pattern_chase_btn,
+        g_led_pattern == LED_PATTERN_CHASE ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
+    // Zweitfarbe/Geschwindigkeit sind nur im Chase-Muster relevant.
+    if (g_led_pattern == LED_PATTERN_CHASE) {
+        lv_obj_clear_flag(led_speed_row, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(led_speed_row, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void led_pattern_solid_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    g_led_pattern = LED_PATTERN_SOLID;
+    LED_Ctrl_SetPattern(g_led_pattern);
+    update_led_pattern_btn_styles();
+    bmw_settings_save();
+}
+
+static void led_pattern_chase_btn_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    g_led_pattern = LED_PATTERN_CHASE;
+    LED_Ctrl_SetPattern(g_led_pattern);
+    update_led_pattern_btn_styles();
+    bmw_settings_save();
+}
+
+static void led_count_slider_changed_cb(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    g_led_count = lv_slider_get_value(slider);
+    LED_Ctrl_SetCount(g_led_count);
+    lv_label_set_text_fmt(led_count_label, "Anzahl: %d", g_led_count);
+}
+
+// Erst beim Loslassen in NVS schreiben, nicht bei jedem Zwischenschritt
+// waehrend des Ziehens - sonst unnoetig viele Flash-Schreibzyklen.
+static void led_count_slider_released_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    bmw_settings_save();
+}
+
+static void led_speed_slider_changed_cb(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    g_led_speed = (uint8_t)lv_slider_get_value(slider);
+    LED_Ctrl_SetSpeed(g_led_speed);
+    lv_label_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led_speed);
+}
+
+static void led_speed_slider_released_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    bmw_settings_save();
+}
+
+typedef struct {
+    int index;
+    bool is_second; // false = Hauptfarbe, true = Zweitfarbe
+} LedColorBtnCtx;
+
+static LedColorBtnCtx led_main_color_ctx[sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0])];
+static LedColorBtnCtx led_second_color_ctx[sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0])];
+
+static void led_color_btn_clicked_cb(lv_event_t *e)
+{
+    LedColorBtnCtx *ctx = (LedColorBtnCtx *)lv_event_get_user_data(e);
+    const RgbColor *c = &COLOR_PALETTE_RGB[ctx->index];
+    if (ctx->is_second) {
+        g_led_color_second_idx = (uint8_t)ctx->index;
+        LED_Ctrl_SetSecondColor(c->r, c->g, c->b);
+    } else {
+        g_led_color_main_idx = (uint8_t)ctx->index;
+        LED_Ctrl_SetMainColor(c->r, c->g, c->b);
+    }
+    bmw_settings_save();
+}
+
+// Schlankere Variante von create_color_picker_column() (Farben-Screen): die
+// Spalte muss hier unter Enable-Schalter/Muster-Buttons/Anzahl/Tempo passen,
+// deshalb kleinere Swatches und weniger Hoehe (weiterhin vertikal scrollbar,
+// alle COLOR_PALETTE_SIZE Eintraege bleiben erreichbar).
+static void create_led_color_picker_column(lv_obj_t *parent, const char *title, int x_offset,
+                                            bool is_second, LedColorBtnCtx *ctx_array)
+{
+    lv_obj_t *header = lv_label_create(parent);
+    lv_label_set_text(header, title);
+    lv_obj_align(header, LV_ALIGN_TOP_MID, x_offset, 280);
+
+    lv_obj_t *list = lv_obj_create(parent);
+    set_dark_bg(list);
+    lv_obj_set_size(list, 150, 140);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, x_offset, 310);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_style_pad_row(list, 8, 0);
+
+    for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, 70, 40);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_bg_color(btn, COLOR_PALETTE[i].color, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+
+        ctx_array[i].index = i;
+        ctx_array[i].is_second = is_second;
+        lv_obj_add_event_cb(btn, led_color_btn_clicked_cb, LV_EVENT_CLICKED, &ctx_array[i]);
+    }
+}
+
+static void create_led_screen(void)
+{
+    scr_led = lv_obj_create(NULL);
+    set_dark_bg(scr_led);
+    lv_obj_clear_flag(scr_led, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(scr_led);
+    lv_label_set_text(title, "LED CONTROL");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+
+    lv_obj_t *enable_label = lv_label_create(scr_led);
+    lv_label_set_text(enable_label, "Streifen aktiv");
+    lv_obj_align(enable_label, LV_ALIGN_TOP_MID, 0, 50);
+
+    led_enable_switch = lv_switch_create(scr_led);
+    lv_obj_align(led_enable_switch, LV_ALIGN_TOP_MID, 0, 72);
+    lv_obj_add_event_cb(led_enable_switch, led_enable_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    if (g_led_enabled) {
+        lv_obj_add_state(led_enable_switch, LV_STATE_CHECKED);
+    }
+
+    led_pattern_solid_btn = lv_btn_create(scr_led);
+    lv_obj_set_size(led_pattern_solid_btn, 130, 40);
+    lv_obj_align(led_pattern_solid_btn, LV_ALIGN_TOP_MID, -75, 115);
+    lv_obj_add_event_cb(led_pattern_solid_btn, led_pattern_solid_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *solid_lbl = lv_label_create(led_pattern_solid_btn);
+    lv_label_set_text(solid_lbl, "Solid");
+    lv_obj_center(solid_lbl);
+
+    led_pattern_chase_btn = lv_btn_create(scr_led);
+    lv_obj_set_size(led_pattern_chase_btn, 130, 40);
+    lv_obj_align(led_pattern_chase_btn, LV_ALIGN_TOP_MID, 75, 115);
+    lv_obj_add_event_cb(led_pattern_chase_btn, led_pattern_chase_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *chase_lbl = lv_label_create(led_pattern_chase_btn);
+    lv_label_set_text(chase_lbl, "Chase");
+    lv_obj_center(chase_lbl);
+
+    led_count_label = lv_label_create(scr_led);
+    lv_label_set_text_fmt(led_count_label, "Anzahl: %d", g_led_count);
+    lv_obj_align(led_count_label, LV_ALIGN_TOP_MID, 0, 160);
+
+    lv_obj_t *count_slider = lv_slider_create(scr_led);
+    lv_obj_set_size(count_slider, 300, 14);
+    lv_obj_align(count_slider, LV_ALIGN_TOP_MID, 0, 185);
+    lv_slider_set_range(count_slider, 1, LED_CTRL_MAX_LEDS);
+    lv_slider_set_value(count_slider, g_led_count, LV_ANIM_OFF);
+    lv_obj_add_event_cb(count_slider, led_count_slider_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(count_slider, led_count_slider_released_cb, LV_EVENT_RELEASED, NULL);
+
+    // Nur im Chase-Muster relevant (Geschwindigkeit des Komet-Schweifs) -
+    // Sichtbarkeit wird in update_led_pattern_btn_styles() gesteuert.
+    led_speed_row = lv_obj_create(scr_led);
+    lv_obj_set_size(led_speed_row, 320, 60);
+    lv_obj_align(led_speed_row, LV_ALIGN_TOP_MID, 0, 215);
+    lv_obj_set_style_bg_opa(led_speed_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(led_speed_row, 0, 0);
+    lv_obj_clear_flag(led_speed_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    led_speed_label = lv_label_create(led_speed_row);
+    lv_label_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led_speed);
+    lv_obj_align(led_speed_label, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *speed_slider = lv_slider_create(led_speed_row);
+    lv_obj_set_size(speed_slider, 300, 14);
+    lv_obj_align(speed_slider, LV_ALIGN_TOP_MID, 0, 26);
+    lv_slider_set_range(speed_slider, 0, 100);
+    lv_slider_set_value(speed_slider, g_led_speed, LV_ANIM_OFF);
+    lv_obj_add_event_cb(speed_slider, led_speed_slider_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(speed_slider, led_speed_slider_released_cb, LV_EVENT_RELEASED, NULL);
+
+    create_led_color_picker_column(scr_led, "Hauptfarbe", -115, false, led_main_color_ctx);
+    create_led_color_picker_column(scr_led, "Zweitfarbe", 115, true, led_second_color_ctx);
+
+    lv_obj_t *hint = lv_label_create(scr_led);
+    lv_label_set_text(hint, "Wisch runter: Zurueck");
+    lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    // Aktuellen (ggf. aus NVS geladenen) Zustand auf das Backend anwenden,
+    // bevor der Screen zum ersten Mal sichtbar wird - analog zum Muster bei
+    // Datenlogging/Buzzer/Gauge-Modus in create_settings_func_screen().
+    // LED_Ctrl_SetEnabled() gibt bei Bedarf nur ein Semaphor frei, das den
+    // led_task aufweckt (siehe led_ctrl.c) - kein synchroner I/O mitten im
+    // UI-Aufbau wie beim fruehen fopen()-Bootloop des Datenloggings.
+    LED_Ctrl_SetCount(g_led_count);
+    LED_Ctrl_SetSpeed(g_led_speed);
+    LED_Ctrl_SetPattern(g_led_pattern);
+    LED_Ctrl_SetMainColor(COLOR_PALETTE_RGB[g_led_color_main_idx].r,
+                           COLOR_PALETTE_RGB[g_led_color_main_idx].g,
+                           COLOR_PALETTE_RGB[g_led_color_main_idx].b);
+    LED_Ctrl_SetSecondColor(COLOR_PALETTE_RGB[g_led_color_second_idx].r,
+                             COLOR_PALETTE_RGB[g_led_color_second_idx].g,
+                             COLOR_PALETTE_RGB[g_led_color_second_idx].b);
+    update_led_pattern_btn_styles();
+    if (g_led_enabled) {
+        LED_Ctrl_SetEnabled(true);
+    }
+
+    lv_obj_add_event_cb(scr_led, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
 // Rampe fuer die Start-Testanimation: 0 -> max (ANIM_UP_MS) -> 0 (ANIM_DOWN_MS),
@@ -1342,6 +1642,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     create_dtc_screen();
     create_service_screen();
     create_sensors_screen();
+    create_led_screen();
 
     anim_start_tick = lv_tick_get();
     anim_done = false;
