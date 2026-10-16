@@ -132,6 +132,7 @@ static lv_obj_t *sens_lambda1_volt_val, *sens_lambda2_volt_val;
 static lv_obj_t *sens_map_val, *sens_boost_val;
 static lv_obj_t *sens_cam_in_val, *sens_cam_ex_val;
 static lv_obj_t *scr_led;
+static lv_obj_t *led_enable_switch;
 static lv_obj_t *led_count_label;
 static lv_obj_t *led_speed_label;
 static lv_obj_t *led_pattern_solid_btn, *led_pattern_chase_btn;
