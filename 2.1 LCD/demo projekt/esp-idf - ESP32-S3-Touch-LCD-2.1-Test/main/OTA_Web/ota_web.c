@@ -28,6 +28,10 @@
 #define OTA_WEB_SSID "BMW-E90-OTA"
 #define OTA_WEB_PASS "bmw320i2010"
 
+// Pfad muss zu SD_LOG_PATH in sd_log.c passen - bewusst hier dupliziert statt
+// ueber einen Header geteilt, da sd_log.h diesen Pfad nicht exportiert.
+#define OTA_WEB_LOG_PATH "/sdcard/obd_log.txt"
+
 static httpd_handle_t s_server = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_enabled = false;
@@ -67,6 +71,7 @@ static const char OTA_WEB_PAGE[] =
 "<h2>BMW E90 Display &ndash; Firmware-Update</h2>"
 "<p>Nur die Datei <b>*_update.bin</b> auswaehlen und hochladen "
 "(nicht die -merged.bin, die ist nur fuer das initiale USB-Flashen).</p>"
+"<p><a href='/log' style='color:#4fc3f7'>Logfile von der SD-Karte herunterladen</a></p>"
 "<input type='file' id='f'><br>"
 "<button onclick='up()'>Hochladen</button>"
 "<p id='s'></p>"
@@ -90,6 +95,36 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, OTA_WEB_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+// Liefert /sdcard/obd_log.txt zum Download aus. Die Datei wird vom
+// sd_log_task() periodisch per fflush()/fsync() aktualisiert, ein
+// gleichzeitiges Oeffnen zum Lesen ist deshalb unkritisch. Streaming in
+// kleinen Chunks statt alles in einen RAM-Puffer zu laden, da das Logfile
+// ueber die Laufzeit beliebig gross werden kann.
+static esp_err_t log_get_handler(httpd_req_t *req)
+{
+    FILE *f = fopen(OTA_WEB_LOG_PATH, "r");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Logdatei nicht gefunden (keine SD-Karte?)");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"obd_log.txt\"");
+
+    static char buf[2048];
+    size_t n;
+    esp_err_t ret = ESP_OK;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+            ret = ESP_FAIL;
+            break;
+        }
+    }
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ret;
 }
 
 static esp_err_t update_post_handler(httpd_req_t *req)
@@ -287,7 +322,7 @@ static bool start_ap_and_server(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 5;
     config.lru_purge_enable = true;
 
     err = httpd_start(&s_server, &config);
@@ -306,6 +341,11 @@ static bool start_ap_and_server(void)
         .uri = "/update", .method = HTTP_POST, .handler = update_post_handler, .user_ctx = NULL
     };
     httpd_register_uri_handler(s_server, &update_uri);
+
+    httpd_uri_t log_uri = {
+        .uri = "/log", .method = HTTP_GET, .handler = log_get_handler, .user_ctx = NULL
+    };
+    httpd_register_uri_handler(s_server, &log_uri);
 
     SD_Log("OTA_WEB: Access Point aktiv (SSID=%s)", OTA_WEB_SSID);
     return true;
