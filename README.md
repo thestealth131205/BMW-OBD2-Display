@@ -343,6 +343,12 @@ pro Streifen).
   ein Farbring mit: Neongelb bis zur Warnschwelle (Wasser 100 °C / Drehzahl
   6500 U/min), danach Orange, ab der Alarmschwelle (Wasser 115 °C / Drehzahl
   6900 U/min) Rot. Im Wasser-Modus blinkt die Nadel zusätzlich ab 112 °C.
+  Deutlich weiter innen, als eigene kleine Leuchtskala nach dem Vorbild der
+  segmentierten Kühlmitteltemperatur-Anzeige im BMW-Kombiinstrument: zeigt
+  **immer** die Kühlmitteltemperatur, unabhängig vom gerade gewählten
+  Anzeige-Modus des Haupt-Rings (also auch, wenn dieser auf Drehzahl steht).
+  Blau als Grundfarbe, ab 100 °C Orange, ab 115 °C Rot – dieselben Schwellen
+  wie beim Haupt-Ring im Wasser-Modus.
   Drehzahl ist außerdem immer digital sichtbar (großer Font). Zusatzfelder:
   Board-Akku-Spannung (ADC), Gaspedal, Drehzahl, Wasser-Temperatur – alle mit
   schmaler schwarzer Umrandung für bessere Lesbarkeit – dazwischen mittig,

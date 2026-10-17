@@ -294,6 +294,10 @@ zum C6-Projekt:
 
 - Ringnadel der Multi-Kachel zeigt Kühlmitteltemperatur (Skala 40–119 °C,
   ab 95 °C Farbwechsel), Drehzahl bleibt zusätzlich digital sichtbar.
+- Zusätzliche, immer aktive innere Leuchtskala (Vorbild: segmentierte
+  Kühlmitteltemperatur-Anzeige im BMW-Kombiinstrument): zeigt unabhängig vom
+  gewählten Anzeige-Modus des Haupt-Rings (Wasser/Drehzahl) stets die
+  Kühlmitteltemperatur – Blau als Grundfarbe, ab 100 °C Orange, ab 115 °C Rot.
 - Schaltpunkt-Kästchen (6 Stück) füllen sich einzeln je nach Drehzahl
   (aktuelle Schwellen: 1500/2500/3500/4500/5500/6500 U/min), ab 6800 U/min
   blinken alle gemeinsam.

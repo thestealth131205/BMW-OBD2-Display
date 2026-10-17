@@ -151,6 +151,17 @@ static lv_meter_indicator_t *multi_ring_yellow;
 static lv_meter_indicator_t *multi_ring_orange;
 static lv_meter_indicator_t *multi_ring_red;
 
+// Zusaetzliche, immer aktive Leuchtskala im inneren Kreis (Vorbild: die
+// segmentierte Kuehlmitteltemperatur-Anzeige im BMW-Kombiinstrument) - zeigt
+// anders als der Haupt-Ring IMMER die Wassertemperatur, auch wenn die grosse
+// Ring/Nadel-Anzeige per Einstellungs-Screen auf Drehzahl umgeschaltet ist.
+// Eigene, fest auf den Wasserbereich eingestellte Skala statt der
+// umschaltbaren multi_ring_scale.
+static lv_meter_scale_t *multi_water_inner_scale;
+static lv_meter_indicator_t *multi_water_inner_blue;
+static lv_meter_indicator_t *multi_water_inner_orange;
+static lv_meter_indicator_t *multi_water_inner_red;
+
 // Grosse Anzeige (Ring+Nadel) in der Multi-Kachel: per Einstellungs-Screen
 // umschaltbar zwischen Kuehlmitteltemperatur (Standard) und Drehzahl.
 typedef enum {
@@ -1006,9 +1017,19 @@ static void swipe_gesture_cb(lv_event_t *e)
     } else if (scr == scr_settings_func && dir == LV_DIR_LEFT) {
         lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     } else if (scr == scr_multi && dir == LV_DIR_TOP) {
-        lv_scr_load_anim(scr_led, LV_SCR_LOAD_ANIM_MOVE_TOP, 200, 0, false);
+        // Kein Slide (LV_SCR_LOAD_ANIM_NONE statt MOVE_TOP): Die Multi-Kachel
+        // zeigt als einzige Ansicht einen detailreichen Ring mit feinen
+        // Teilstrichen, auf dem das seit v1.0.9-1.0.14 bekannte, ungeloeste
+        // RGB-Panel-Tearing (Doppel-Framebuffer ohne Vsync-Sync) am
+        // deutlichsten auffaellt. Die 200ms-Animation erzeugt viele schnell
+        // aufeinanderfolgende Teil-Redraws und war der wahrscheinlichste
+        // zusaetzliche Ausloeser dafuer, dass es hier erstmals auffiel.
+        // Ohne Animation (ein Frame direkt ersetzt das andere) sollte das
+        // Risiko sinken - behebt das zugrunde liegende Tearing aber nicht,
+        // das steckt tiefer im RGB-Treiber (siehe README/CLAUDE.md).
+        lv_scr_load_anim(scr_led, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
     } else if (scr == scr_led && dir == LV_DIR_BOTTOM) {
-        lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 200, 0, false);
+        lv_scr_load_anim(scr_multi, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
     }
 }
 
@@ -1388,8 +1409,13 @@ static void led_color_btn_clicked_cb(lv_event_t *e)
 
 // Schlankere Variante von create_color_picker_column() (Farben-Screen): die
 // Spalte muss hier unter Tabs/Enable-Schalter/Muster-Buttons/Anzahl/Tempo
-// passen, deshalb kleinere Swatches und weniger Hoehe (weiterhin vertikal
-// scrollbar, alle COLOR_PALETTE_SIZE Eintraege bleiben erreichbar).
+// passen, deshalb nur 115px Hoehe verfuegbar. Mit einer einspaltigen Liste
+// (urspruengliche Version) ergab das bei 10 Farben ca. 472px Inhaltshoehe
+// gegen nur 115px Fenster (~4x Ueberlauf) - zu viel Scroll-Weg fuer dieses
+// kleine Fenster, der Nutzer kam beim Hochscrollen nicht zuverlaessig bis
+// "Gruen" (Index 2) zurueck. Fix: 2-spaltiges Raster (ROW_WRAP) statt einer
+// einzelnen Spalte - halbiert die Inhaltshoehe auf 5 Reihen (~220px), Gruen
+// liegt dadurch bereits in Reihe 2 und ist ohne/mit minimalem Scrollen sichtbar.
 static void create_led_color_picker_column(lv_obj_t *parent, const char *title, int x_offset,
                                             bool is_second, LedColorBtnCtx *ctx_array)
 {
@@ -1401,14 +1427,16 @@ static void create_led_color_picker_column(lv_obj_t *parent, const char *title, 
     set_dark_bg(list);
     lv_obj_set_size(list, 150, 115);
     lv_obj_align(list, LV_ALIGN_TOP_MID, x_offset, 332);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(list, 4, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_style_pad_row(list, 6, 0);
+    lv_obj_set_style_pad_column(list, 6, 0);
 
     for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
         lv_obj_t *btn = lv_btn_create(list);
-        lv_obj_set_size(btn, 70, 40);
+        lv_obj_set_size(btn, 66, 36);
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_set_style_bg_color(btn, COLOR_PALETTE[i].color, 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
@@ -1617,6 +1645,20 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     multi_ring_yellow = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_color_make(224, 255, 0), 20);
     multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 20);
     multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 20);
+
+    // Innere Leuchtskala (Kuehlmitteltemperatur, immer aktiv - siehe
+    // Deklaration oben): gleiche Winkel/Skala wie der Haupt-Ring (rotation=135
+    // kompensiert denselben Bild-Nadel-Offset), aber mit negativem r_mod weit
+    // nach innen verschoben (Radius ~115 statt ~245 beim Haupt-Ring), damit
+    // sie nicht mit den 4 Zusatzfeldern/Icons (Radius ~64-174) ueberlappt.
+    // Blau als Grundfarbe statt Neongelb (Vorbild: Foto der BMW-Segmentanzeige),
+    // dieselben Schwellen wie beim Haupt-Ring (ab 100 Grad Orange, ab 115 Grad Rot).
+    multi_water_inner_scale = lv_meter_add_scale(multi_meter);
+    lv_meter_set_scale_range(multi_meter, multi_water_inner_scale,
+                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
+    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -110);
+    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -110);
+    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -110);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
@@ -2047,6 +2089,29 @@ void BMW_UI_Update(void)
         multi_needle->type_data.needle_img.src = needle_src;
         multi_needle->opa = needle_opa;
         lv_obj_invalidate(multi_meter);
+    }
+
+    // Innere Leuchtskala (Kuehlmitteltemperatur): immer aktiv, unabhaengig
+    // von g_multi_gauge_mode - zeigt die Wassertemperatur auch dann, wenn die
+    // grosse Ring/Nadel-Anzeige gerade auf Drehzahl steht. Gleiche
+    // Schwellen-Logik wie der Haupt-Ring im Wasser-Modus, nur auf die drei
+    // blau/orange/rot-Indikatoren der inneren Skala angewendet.
+    {
+        float t = current_water_temp;
+        float blue_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
+        if (blue_end < MULTI_WATER_SCALE_MIN) blue_end = MULTI_WATER_SCALE_MIN;
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_blue, MULTI_WATER_SCALE_MIN);
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_blue, (int32_t)blue_end);
+
+        float orange_end = t < (float)MULTI_WATER_RING_RED_AT ? t : (float)MULTI_WATER_RING_RED_AT;
+        if (orange_end < (float)MULTI_WATER_RING_ORANGE_AT) orange_end = (float)MULTI_WATER_RING_ORANGE_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_orange, MULTI_WATER_RING_ORANGE_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_orange, (int32_t)orange_end);
+
+        float red_end = t > MULTI_WATER_SCALE_MAX ? MULTI_WATER_SCALE_MAX : t;
+        if (red_end < (float)MULTI_WATER_RING_RED_AT) red_end = (float)MULTI_WATER_RING_RED_AT;
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_red, MULTI_WATER_RING_RED_AT);
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_red, (int32_t)red_end);
     }
 
     // Farbring: waechst von aussen entlang der Skalenteilstriche mit.
