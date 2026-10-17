@@ -26,14 +26,21 @@ extern "C" {
 // -1 = nicht verbunden (Polling): mcp2515_receive() fragt den Empfangsstatus
 // ohnehin ueber das CANINTF-Register per SPI ab (reiner Software-Poll), der
 // INT-Pin wurde nie per gpio_get_level()/ISR tatsaechlich ausgewertet - daher
-// bleibt GPIO0 jetzt fest frei fuer die LED-Streifen-Ansteuerung (siehe
-// LED_Control/led_ctrl.c), unabhaengig von der BLE/MCP-Datenquellenwahl.
-// Hardware: ein evtl. am MCP2515-Modul angeschlossener INT-Draht muss fuer
-// den LED-Betrieb abgezogen werden, die anderen vier Leitungen bleiben
+// bleibt GPIO0 jetzt fest frei fuer LED-Streifen 1 (siehe LED_Control/
+// led_ctrl.c), unabhaengig von der BLE/MCP-Datenquellenwahl. Hardware: ein
+// evtl. am MCP2515-Modul angeschlossener INT-Draht muss fuer den
+// Streifen-1-Betrieb abgezogen werden, die anderen vier Leitungen bleiben
 // unveraendert.
 #ifndef MCP2515_PIN_INT
 #define MCP2515_PIN_INT   -1
 #endif
+
+// LED-Streifen 2 (led_ctrl.c, LED_Ctrl2_*) nutzt GPIO19 - exakt
+// MCP2515_PIN_MISO. SPI braucht alle 4 Leitungen (SCK/MOSI/MISO/CS), ein
+// fehlendes MISO macht das MCP2515-Modul komplett funktionsunfaehig - daher
+// schliessen sich Streifen 2 und das (verkabelte) MCP2515-Modul gegenseitig
+// aus. Wird Streifen 2 benutzt, muss die Datenquelle auf BLE-OBD stehen und
+// das MCP2515-Modul unverbunden bleiben (siehe docs/led_wiring.png).
 
 // Quarz auf dem MCP2515-Modul: 8 oder 16 (MHz). Muss zum Aufdruck passen,
 // sonst stimmt die CAN-Baudrate nicht.

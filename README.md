@@ -281,38 +281,55 @@ Service-Reset und das CSV-Logging.
 
 ## LED-Steuerung (WS2812B/SK6812)
 
-Ein adressierbarer LED-Streifen (WS2812B/SK6812-kompatibel, max. 100 LEDs)
-lässt sich direkt vom Display aus ansteuern – erreichbar per **Wisch nach
-oben** auf der Multi-Ansicht, **Wisch nach unten** geht zurück
-(`main/LED_Control/led_ctrl.c`, RMT-Backend über die Komponente
-`espressif/led_strip`).
+**Zwei unabhängig voneinander steuerbare** adressierbare LED-Streifen
+(WS2812B/SK6812-kompatibel, je max. 100 LEDs) lassen sich direkt vom Display
+aus ansteuern – erreichbar per **Wisch nach oben** auf der Multi-Ansicht,
+**Wisch nach unten** geht zurück (`main/LED_Control/led_ctrl.c`, RMT-Backend
+über die Komponente `espressif/led_strip`, je ein eigener Hintergrund-Task
+pro Streifen).
 
 ![LED-Streifen-Verdrahtung](docs/led_wiring.png)
 
 | Streifen | ESP32-S3 GPIO | Funktion |
 |---|---|---|
-| DIN (Daten) | **GPIO0** | WS2812/SK6812-Protokoll (RMT) |
-| VCC | 5V (externe Versorgung je nach LED-Anzahl empfohlen) | Versorgung |
-| GND | GND | Masse (mit ESP32-S3-GND verbinden) |
+| Streifen 1 – DIN | **GPIO0** | WS2812/SK6812-Protokoll (RMT), immer frei |
+| Streifen 2 – DIN | **GPIO19** | WS2812/SK6812-Protokoll (RMT), **= MCP2515-MISO** |
+| VCC (beide) | 5V, bei längeren Streifen direkt von der KFZ-Stromversorgung (12V→5V-Step-Down), nicht vom ESP32-Board | Versorgung |
+| GND (beide) | GND | Masse (gemeinsam mit ESP32-S3/KFZ-Masse verbinden) |
 
-- **GPIO0 ist der einzige der 5 herausgeführten freien Pins, der nicht fest
-  für das MCP2515-Modul gebraucht wird** (SCK/MOSI/MISO/CS belegen
-  GPIO43/44/19/20, siehe oben). Der MCP2515-Treiber wertet seinen INT-Pin
-  ohnehin nie aus (reiner Software-Poll über das CANINTF-Register per SPI),
-  GPIO0 bleibt also **unabhängig von der BLE/MCP-Datenquellenwahl** dauerhaft
-  für die LED-Ansteuerung frei. Hängt am MCP2515-Modul trotzdem noch ein
-  INT-Draht an GPIO0, muss er für den LED-Betrieb abgezogen werden.
-- Der Streifen ist per Schalter ein-/ausschaltbar; der GPIO wird erst bei
-  aktivem Schalter als RMT-Ausgang konfiguriert.
-- Zwei Muster: **Solid** (eine Farbe für alle LEDs) und **Chase** (Hauptfarbe
-  als Hintergrund, Zweitfarbe läuft mit kurzem Komet-Schweif von LED 0 bis
-  zum Ende im Loop, Geschwindigkeit per Schieberegler 0–100 %).
+- **GPIO0 (Streifen 1) ist dauerhaft frei**, unabhängig von der BLE/MCP-
+  Datenquellenwahl: Der MCP2515-Treiber wertet seinen INT-Pin ohnehin nie aus
+  (reiner Software-Poll über das CANINTF-Register per SPI). Hängt am
+  MCP2515-Modul trotzdem noch ein INT-Draht an GPIO0, muss er für den
+  Streifen-1-Betrieb abgezogen werden.
+- **GPIO19 (Streifen 2) ist identisch mit der MCP2515-MISO-Leitung** –
+  SPI braucht alle 4 Leitungen (SCK/MOSI/MISO/CS), ein fehlendes MISO macht
+  das MCP2515-Modul komplett funktionsunfähig. **Streifen 2 und das
+  (verkabelte) MCP2515-Modul schließen sich deshalb gegenseitig aus.** Für
+  Streifen 2 muss die Datenquelle auf BLE-OBD stehen, das MCP2515-Modul
+  bleibt unverbunden (siehe Verdrahtungsplan oben). Die Einstellungs-UI zeigt
+  auf dem Streifen-2-Tab einen Warnhinweis, solange die Datenquelle
+  trotzdem auf MCP2515 steht.
+- **Tab-Umschalter** oben im Screen wählt, welcher der zwei Streifen gerade
+  angezeigt/editiert wird; beide laufen unabhängig im Hintergrund weiter,
+  auch während der jeweils andere Tab angezeigt wird.
+- Jeder Streifen ist einzeln per Schalter ein-/ausschaltbar; der GPIO wird
+  erst bei aktivem Schalter als RMT-Ausgang konfiguriert.
+- Je Streifen zwei Muster: **Solid** (eine Farbe für alle LEDs) und **Chase**
+  (Hauptfarbe als Hintergrund, Zweitfarbe läuft mit kurzem Komet-Schweif von
+  LED 0 bis zum Ende im Loop, Geschwindigkeit per Schieberegler 0–100 %).
 - Anzahl LEDs (1–100) und beide Farben (aus derselben 10-Farben-Palette wie
   Primär-/Sekundärfarbe, aber mit vollen 8-Bit-RGB-Werten statt der auf
-  RGB565 gestutzten Display-Darstellung) sind ebenfalls per Regler/
-  Farbauswahl einstellbar.
-- Alle Einstellungen (Ein/Aus, Muster, Anzahl, Geschwindigkeit, beide Farben)
-  werden wie die übrigen Einstellungen dauerhaft in NVS gespeichert.
+  RGB565 gestutzten Display-Darstellung) sind je Streifen separat per
+  Regler/Farbauswahl einstellbar.
+- Alle Einstellungen beider Streifen (Ein/Aus, Muster, Anzahl, Geschwindigkeit,
+  beide Farben) werden wie die übrigen Einstellungen dauerhaft in NVS
+  gespeichert.
+- **KFZ-Stromversorgung**: Für den Betrieb im Fahrzeug empfiehlt sich ein
+  eigener 12V→5V-Step-Down-Wandler (z. B. LM2596, min. 3A) direkt am
+  Bordnetz statt über den ESP32-Board-5V-Pin – Details und Absicherung
+  (Sicherung, Zündungsplus statt Dauerplus, gemeinsame Masse) siehe
+  Verdrahtungsplan oben.
 
 ## UI-Logik (Kurzfassung)
 

@@ -251,27 +251,34 @@ Service-Reset und das CSV-Logging.
 
 Wisch nach oben auf der Multi-Ansicht öffnet den Screen „LED CONTROL“
 (`main/LED_Control/led_ctrl.c`, RMT-Backend über die Komponente
-`espressif/led_strip`), Wisch nach unten geht zurück.
+`espressif/led_strip`), Wisch nach unten geht zurück. **Zwei unabhängig
+steuerbare Streifen**, oben im Screen per Tab umschaltbar, beide laufen im
+Hintergrund parallel weiter.
 
 ![LED-Streifen-Verdrahtung](docs/led_wiring.png)
 
 | Streifen | ESP32-S3 GPIO | Funktion |
 |---|---|---|
-| DIN (Daten) | **GPIO0** | WS2812/SK6812-Protokoll (RMT) |
-| VCC | 5V (extern, je nach LED-Anzahl) | Versorgung |
-| GND | GND | Masse |
+| Streifen 1 – DIN | **GPIO0** | WS2812/SK6812-Protokoll (RMT), immer frei |
+| Streifen 2 – DIN | **GPIO19** | WS2812/SK6812-Protokoll (RMT), **= MCP2515-MISO** |
+| VCC (beide) | 5V (extern, je nach LED-Anzahl – ab ca. 8–10 LEDs direkt vom KFZ-Bordnetz per 12V→5V-Step-Down statt vom ESP32-Board) | Versorgung |
+| GND (beide) | GND | Masse |
 
-- GPIO0 ist der einzige der 5 freien Pins, der nicht fest fürs MCP2515-Modul
-  gebraucht wird (siehe Tabelle oben) – dauerhaft frei, unabhängig von der
-  BLE/MCP-Datenquellenwahl. Ein evtl. am MCP2515-Modul angeschlossener
-  INT-Draht an GPIO0 muss für den LED-Betrieb abgezogen werden.
-- Max. 100 LEDs, Ein-/Ausschalter (RMT-Ausgang wird erst bei aktivem
-  Schalter konfiguriert), zwei Muster: **Solid** (eine Farbe) und **Chase**
-  (Hauptfarbe als Hintergrund, Zweitfarbe läuft mit kurzem Schweif im Loop,
-  Geschwindigkeit per Regler).
+- GPIO0 (Streifen 1) ist dauerhaft frei, unabhängig von der BLE/MCP-
+  Datenquellenwahl. Ein evtl. am MCP2515-Modul angeschlossener INT-Draht an
+  GPIO0 muss für den Streifen-1-Betrieb abgezogen werden.
+- GPIO19 (Streifen 2) ist identisch mit MCP2515-MISO – SPI braucht alle 4
+  Leitungen, Streifen 2 und das (verkabelte) MCP2515-Modul schließen sich
+  deshalb gegenseitig aus. Für Streifen 2 muss die Datenquelle auf BLE-OBD
+  stehen; die UI zeigt auf dem Streifen-2-Tab einen Warnhinweis, solange die
+  Datenquelle trotzdem auf MCP2515 steht.
+- Je Streifen: max. 100 LEDs, Ein-/Ausschalter (RMT-Ausgang wird erst bei
+  aktivem Schalter konfiguriert), zwei Muster: **Solid** (eine Farbe) und
+  **Chase** (Hauptfarbe als Hintergrund, Zweitfarbe läuft mit kurzem Schweif
+  im Loop, Geschwindigkeit per Regler).
 - Anzahl und beide Farben (10er-Palette, volle 8-Bit-RGB-Werte statt der
-  RGB565-Display-Darstellung) per Regler/Farbauswahl einstellbar, alle
-  Einstellungen in NVS gespeichert.
+  RGB565-Display-Darstellung) je Streifen separat per Regler/Farbauswahl
+  einstellbar, alle Einstellungen beider Streifen in NVS gespeichert.
 
 ## UI-Logik (Kurzfassung)
 
