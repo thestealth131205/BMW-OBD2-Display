@@ -48,6 +48,9 @@ void LED_Ctrl_GetSecondColor(uint8_t *r, uint8_t *g, uint8_t *b);
 // 0 (langsam) .. 100 (schnell), nur fuer LED_PATTERN_CHASE relevant.
 void LED_Ctrl_SetSpeed(uint8_t speed_pct);
 uint8_t LED_Ctrl_GetSpeed(void);
+// 0 (aus) .. 100 (volle Helligkeit), skaliert Haupt-/Zweitfarbe vor dem Senden.
+void LED_Ctrl_SetBrightness(uint8_t brightness_pct);
+uint8_t LED_Ctrl_GetBrightness(void);
 
 // --- Streifen 2 (GPIO19 - teilt sich den Pin mit MCP2515-MISO) ---
 void LED_Ctrl2_SetEnabled(bool on);
@@ -62,6 +65,8 @@ void LED_Ctrl2_GetMainColor(uint8_t *r, uint8_t *g, uint8_t *b);
 void LED_Ctrl2_GetSecondColor(uint8_t *r, uint8_t *g, uint8_t *b);
 void LED_Ctrl2_SetSpeed(uint8_t speed_pct);
 uint8_t LED_Ctrl2_GetSpeed(void);
+void LED_Ctrl2_SetBrightness(uint8_t brightness_pct);
+uint8_t LED_Ctrl2_GetBrightness(void);
 
 #ifdef __cplusplus
 }

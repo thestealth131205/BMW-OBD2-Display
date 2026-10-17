@@ -37,6 +37,7 @@ static uint32_t s_dropped = 0;
 // Format-Versuch auf (nur wenn der 300ms-Flush-Zyklus zufaellig genau
 // dann lief), passt aber zum Muster der sporadischen Abstuerze.
 static volatile bool s_write_in_progress = false;
+static bool s_init_done = false;
 
 // Schreibt den RAM-Puffer auf die Karte. SD-Zugriffe (fsync) dauern teils
 // 10-100 ms und duerfen den Bluetooth-Stack nicht blockieren - deshalb
@@ -61,13 +62,21 @@ static void sd_log_task(void *arg)
             fwrite(local, 1, n, s_file);
             if (dropped) fprintf(s_file, "[log] %lu Zeilen verworfen (Puffer voll)\r\n", (unsigned long)dropped);
             fflush(s_file);
-            fsync(fileno(s_file));
+            // Karte kann waehrend der Fahrt physisch verschwinden (Wackelkontakt,
+            // herausgerutscht) oder einen echten Schreibfehler melden - fsync()
+            // liefert dann != 0. Ohne diese Pruefung wuerde hier alle 300ms
+            // weiter blind auf einen toten Handle geschrieben, und eine danach
+            // neu eingesteckte Karte wuerde nie erkannt (SDCard_Size bliebe > 0).
+            if (fsync(fileno(s_file)) != 0) {
+                fclose(s_file);
+                s_file = NULL;
+                s_init_done = false;
+                SD_HandleIoError();
+            }
         }
         s_write_in_progress = false;
     }
 }
-
-static bool s_init_done = false;
 
 void SD_Log_Init(void)
 {

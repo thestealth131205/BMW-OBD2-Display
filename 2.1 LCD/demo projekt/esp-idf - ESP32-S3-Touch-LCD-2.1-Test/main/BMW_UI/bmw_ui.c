@@ -137,10 +137,14 @@ static lv_obj_t *led_strip1_tab_btn, *led_strip2_tab_btn;
 static lv_obj_t *led_enable_switch;
 static lv_obj_t *led_count_label;
 static lv_obj_t *led_count_slider;
+static lv_obj_t *led_brightness_label;
+static lv_obj_t *led_brightness_slider;
 static lv_obj_t *led_speed_label;
 static lv_obj_t *led_speed_slider;
 static lv_obj_t *led_pattern_solid_btn, *led_pattern_chase_btn;
 static lv_obj_t *led_speed_row; // Container (Label+Slider) nur im Chase-Muster sichtbar
+static lv_obj_t *led_main_color_swatch, *led_second_color_swatch; // zeigen die aktuelle Farbe, oeffnen per Tipp das Popup
+static lv_obj_t *led_color_popup_bg; // Vollbild-Overlay mit Farbraster, nur waehrend geoeffnet != NULL
 static lv_obj_t *led_conflict_label; // Warnung: Streifen 2 + MCP2515 teilen sich GPIO19
 
 static lv_obj_t *multi_meter;
@@ -196,13 +200,14 @@ typedef struct {
     led_pattern_t pattern;
     int count;
     uint8_t speed;
+    uint8_t brightness;
     uint8_t color_main_idx;
     uint8_t color_second_idx;
 } LedStripSettings;
 
 static LedStripSettings g_led[2] = {
-    { false, LED_PATTERN_SOLID, 30, 50, 0, 1 }, // Streifen 1 (GPIO0):   Blau/Rot
-    { false, LED_PATTERN_SOLID, 30, 50, 0, 1 }, // Streifen 2 (GPIO19):  Blau/Rot
+    { false, LED_PATTERN_SOLID, 30, 50, 100, 0, 1 }, // Streifen 1 (GPIO0):   Blau/Rot
+    { false, LED_PATTERN_SOLID, 30, 50, 100, 0, 1 }, // Streifen 2 (GPIO19):  Blau/Rot
 };
 static int g_led_active_strip = 0; // 0 = Streifen 1, 1 = Streifen 2 (nur UI-Auswahl)
 
@@ -210,6 +215,7 @@ static void led_apply_enabled(int idx, bool on)      { if (idx == 0) LED_Ctrl_Se
 static void led_apply_count(int idx, int count)      { if (idx == 0) LED_Ctrl_SetCount(count);     else LED_Ctrl2_SetCount(count); }
 static void led_apply_pattern(int idx, led_pattern_t p) { if (idx == 0) LED_Ctrl_SetPattern(p);    else LED_Ctrl2_SetPattern(p); }
 static void led_apply_speed(int idx, uint8_t speed)  { if (idx == 0) LED_Ctrl_SetSpeed(speed);     else LED_Ctrl2_SetSpeed(speed); }
+static void led_apply_brightness(int idx, uint8_t b) { if (idx == 0) LED_Ctrl_SetBrightness(b);    else LED_Ctrl2_SetBrightness(b); }
 static void led_apply_main_color(int idx, uint8_t r, uint8_t g, uint8_t b)
 {
     if (idx == 0) LED_Ctrl_SetMainColor(r, g, b); else LED_Ctrl2_SetMainColor(r, g, b);
@@ -219,10 +225,12 @@ static void led_apply_second_color(int idx, uint8_t r, uint8_t g, uint8_t b)
     if (idx == 0) LED_Ctrl_SetSecondColor(r, g, b); else LED_Ctrl2_SetSecondColor(r, g, b);
 }
 static lv_obj_t *multi_speed_label;
+static lv_obj_t *multi_unit_label; // "KM/H" unter multi_speed_label - im BMW-Style ausgeblendet
 static lv_obj_t *multi_bat_label;
 static lv_obj_t *multi_throttle_label;
 static lv_obj_t *multi_rpm_label;
 static lv_obj_t *multi_water_label;
+static lv_obj_t *multi_field_icon[4]; // Batterie/Gaspedal/Drehzahl/Wasser, je ueber dem zugehoerigen Feld
 // Schwarze Umrandung (8 versetzte Kopien) hinter jedem der 4 Zusatzfelder,
 // damit die weisse Schrift auch auf hellem Hintergrund gut lesbar bleibt
 static lv_obj_t *multi_bat_outline[8];
@@ -233,6 +241,23 @@ static lv_obj_t *multi_water_outline[8];
 static lv_obj_t *multi_rx_dot;
 static lv_obj_t *multi_tx_dot;
 #define ACT_DOT_FLASH_MS 120
+
+// --- "BMW Style": alternatives Layout fuer die Multi-Kachel, angelehnt an
+// ein Foto eines BMW-Kombiinstruments (Rundinstrument mit Skalen-Teilstrichen
+// auf dem wachsenden Farbring, Batterie/km-h/Wasser in kompakten Feldern statt
+// der grossen zentralen Geschwindigkeit, zusaetzliche kleine Analognadel nur
+// fuer Wassertemperatur unten, Schaltanzeige dazwischen). Per eigenem Schalter
+// im Funktionen-Screen umschaltbar (siehe apply_bmw_style()), unabhaengig vom
+// bestehenden Wasser-/Drehzahl-Umschalter der grossen Anzeige - letzterer
+// bleibt in beiden Stilen aktiv und bestimmt weiterhin, was die grosse
+// Nadel/der Ring zeigen.
+static bool g_bmw_style_enabled = false;
+static lv_obj_t *multi_bg_img_obj; // statisches Hintergrundbild, im BMW-Style ausgeblendet
+static lv_meter_scale_t *multi_bmw_tick_scale; // reine Teilstrich-Skala auf multi_meter, 0 Ticks = unsichtbar
+static lv_obj_t *multi_bmw_water_meter; // kleines eigenstaendiges Meter-Widget fuer die zweite Wasser-Nadel
+static lv_meter_scale_t *multi_bmw_water_needle_scale;
+static lv_meter_indicator_t *multi_bmw_water_needle;
+#define MULTI_BMW_WATER_METER_SIZE 110
 
 // --- Fehlercode-Screen (per Wisch-Geste erreichbar) ---
 static lv_obj_t *dtc_list_label;
@@ -308,6 +333,27 @@ static void get_base_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, l
     *img = &multi_needle_red_img; *pivot_x = MULTI_NEEDLE_RED_PIVOT_X; *pivot_y = MULTI_NEEDLE_RED_PIVOT_Y;
 }
 
+// Wie get_base_needle_img(), aber mit den kleinen Nadel-Bildern
+// (needle_*_img) statt der grossen Multi-Kachel-Variante - fuer die
+// eigenstaendige zweite Wasser-Nadel im BMW-Style (siehe apply_bmw_style()).
+static void get_small_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, lv_coord_t *pivot_y)
+{
+    for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
+        if (COLOR_PALETTE[i].color.full != g_color_secondary.full) continue;
+        const char *name = COLOR_PALETTE[i].name;
+        if (strcmp(name, "Blau") == 0 || strcmp(name, "Cyan") == 0) {
+            *img = &needle_teal_img; *pivot_x = NEEDLE_TEAL_PIVOT_X; *pivot_y = NEEDLE_TEAL_PIVOT_Y;
+            return;
+        }
+        if (strcmp(name, "Gelb") == 0 || strcmp(name, "Neongelb") == 0 || strcmp(name, "Orange") == 0) {
+            *img = &needle_yellow_img; *pivot_x = NEEDLE_YELLOW_PIVOT_X; *pivot_y = NEEDLE_YELLOW_PIVOT_Y;
+            return;
+        }
+        break;
+    }
+    *img = &needle_red_img; *pivot_x = NEEDLE_RED_PIVOT_X; *pivot_y = NEEDLE_RED_PIVOT_Y;
+}
+
 // --- Einstellungen dauerhaft speichern (NVS-Flash, ueberlebt Stromverluste,
 // unabhaengig von der SD-Karte): Primaer-/Sekundaerfarbe, Datenquelle (BLE/
 // MCP), Datenlogging an/aus, Anzeige-Umschalter Wasser/Drehzahl, Warnsummer
@@ -333,17 +379,20 @@ static void bmw_settings_save(void)
     nvs_set_u8(h, "src",        (uint8_t)g_data_source);
     nvs_set_u8(h, "log_en",     g_datalog_enabled ? 1 : 0);
     nvs_set_u8(h, "gauge_mode", (uint8_t)g_multi_gauge_mode);
+    nvs_set_u8(h, "bmw_style",  g_bmw_style_enabled ? 1 : 0);
     nvs_set_u8(h, "buzzer_en",  g_buzzer_enabled ? 1 : 0);
     nvs_set_u8(h, "led_en",     g_led[0].enabled ? 1 : 0);
     nvs_set_u8(h, "led_pat",    (uint8_t)g_led[0].pattern);
     nvs_set_u8(h, "led_cnt",    (uint8_t)g_led[0].count);
     nvs_set_u8(h, "led_spd",    g_led[0].speed);
+    nvs_set_u8(h, "led_bri",    g_led[0].brightness);
     nvs_set_u8(h, "led_col_m",  g_led[0].color_main_idx);
     nvs_set_u8(h, "led_col_s",  g_led[0].color_second_idx);
     nvs_set_u8(h, "led2_en",    g_led[1].enabled ? 1 : 0);
     nvs_set_u8(h, "led2_pat",   (uint8_t)g_led[1].pattern);
     nvs_set_u8(h, "led2_cnt",   (uint8_t)g_led[1].count);
     nvs_set_u8(h, "led2_spd",   g_led[1].speed);
+    nvs_set_u8(h, "led2_bri",   g_led[1].brightness);
     nvs_set_u8(h, "led2_col_m", g_led[1].color_main_idx);
     nvs_set_u8(h, "led2_col_s", g_led[1].color_second_idx);
     nvs_commit(h);
@@ -378,6 +427,9 @@ static void bmw_settings_load(void)
     if (nvs_get_u8(h, "gauge_mode", &v) == ESP_OK && v <= MULTI_GAUGE_RPM) {
         g_multi_gauge_mode = (multi_gauge_mode_t)v;
     }
+    if (nvs_get_u8(h, "bmw_style", &v) == ESP_OK) {
+        g_bmw_style_enabled = (v != 0);
+    }
     if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
         g_buzzer_enabled = (v != 0);
     }
@@ -392,6 +444,9 @@ static void bmw_settings_load(void)
     }
     if (nvs_get_u8(h, "led_spd", &v) == ESP_OK) {
         g_led[0].speed = v;
+    }
+    if (nvs_get_u8(h, "led_bri", &v) == ESP_OK && v <= 100) {
+        g_led[0].brightness = v;
     }
     if (nvs_get_u8(h, "led_col_m", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
         g_led[0].color_main_idx = v;
@@ -410,6 +465,9 @@ static void bmw_settings_load(void)
     }
     if (nvs_get_u8(h, "led2_spd", &v) == ESP_OK) {
         g_led[1].speed = v;
+    }
+    if (nvs_get_u8(h, "led2_bri", &v) == ESP_OK && v <= 100) {
+        g_led[1].brightness = v;
     }
     if (nvs_get_u8(h, "led2_col_m", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
         g_led[1].color_main_idx = v;
@@ -671,6 +729,14 @@ static void start_datalogging(void)
 static void stop_datalogging(void)
 {
     if (log_file) {
+        // Abschluss-Markierung: Ein spaeter geoeffnetes Log ohne diese Zeile
+        // am Ende wurde nicht sauber beendet (z.B. Zuendung aus waehrend des
+        // Loggens) - rein diagnostisch, verhindert keine FAT-Inkonsistenz,
+        // zeigt aber beim Nachsehen auf dem PC, ob die Datei regulaer
+        // geschlossen wurde.
+        fprintf(log_file, "# Ende sauber beendet\r\n");
+        fflush(log_file);
+        fsync(fileno(log_file));
         fclose(log_file);
         log_file = NULL;
     }
@@ -792,12 +858,113 @@ static void gauge_mode_switch_cb(lv_event_t *e)
     if (rpm_mode) {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
+        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale, 0, 8000, 270, 135);
     } else {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
+        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale,
+                                  MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
     }
+    bmw_settings_save();
+}
+
+// Wendet das BMW-Style-Layout auf die Multi-Kachel an (on=true), oder das
+// normale Layout (on=false). Alle referenzierten Widgets existieren bereits,
+// wenn dies aufgerufen wird: create_multi_tile() ruft es einmal am Ende auf
+// (Startzustand aus NVS), bmw_style_switch_cb() danach bei jedem Umschalten.
+static void apply_bmw_style(bool on)
+{
+    // Hintergrundbild (Ring/Skala/Farbverlauf fest im Bild) nur im normalen
+    // Stil - im BMW-Style uebernehmen die nativen Teilstriche
+    // (multi_bmw_tick_scale) plus der schon bestehende Farbring deren Rolle,
+    // vor rein schwarzem Hintergrund (set_dark_bg() von scr_multi).
+    if (multi_bg_img_obj) {
+        if (on) lv_obj_add_flag(multi_bg_img_obj, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(multi_bg_img_obj, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Teilstriche auf dem Farbring: 0 Ticks = unsichtbar (normaler Stil, das
+    // Hintergrundbild hat seine eigenen baked-in Teilstriche), sonst duenne
+    // weisse Striche gleichmaessig ueber die 270-Grad-Skala verteilt.
+    if (multi_bmw_tick_scale) {
+        if (on) lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 23, 2, 10, lv_color_white());
+        else    lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 0, 0, 0, lv_color_white());
+    }
+
+    // Geschwindigkeit: normal gross mittig, im BMW-Style klein oben (Stelle
+    // des mittleren gruenen Kreises im Vorbildfoto) - "KM/H" dort ausgeblendet,
+    // im Foto steht an dieser Stelle kein Einheitentext.
+    if (multi_speed_label) {
+        lv_obj_set_style_text_font(multi_speed_label, on ? &lv_font_montserrat_28 : &lv_font_montserrat_48, 0);
+        lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, on ? -140 : -60);
+    }
+    if (multi_unit_label) {
+        if (on) lv_obj_add_flag(multi_unit_label, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(multi_unit_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Batterie (Index 0) und Wasser (Index 3) bleiben sichtbar, wandern aber
+    // auf Nabenhoehe nach links/rechts (linker/rechter gruener Kreis im
+    // Vorbildfoto). Gaspedal (1) und digitale Drehzahl (2) haben dort keine
+    // Entsprechung und werden im BMW-Style ausgeblendet.
+    static const lv_coord_t field_x_normal[4] = {-165, -55, 55, 165};
+    static const lv_coord_t field_x_style[4]  = {-130, -55, 55, 130}; // [1]/[2] ungenutzt (ausgeblendet)
+    static const lv_coord_t outline_off2[8][2] = {
+        {-2, 0}, {2, 0}, {0, -2}, {0, 2}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2},
+    };
+    lv_obj_t *field_labels[4]    = {multi_bat_label, multi_throttle_label, multi_rpm_label, multi_water_label};
+    lv_obj_t **field_outlines[4] = {multi_bat_outline, multi_throttle_outline, multi_rpm_outline, multi_water_outline};
+    for (int f = 0; f < 4; f++) {
+        bool keep_visible = (f == 0 || f == 3);
+        bool visible = !on || keep_visible;
+        lv_coord_t x = on ? field_x_style[f] : field_x_normal[f];
+        lv_coord_t y = on ? 0 : 60;
+        lv_coord_t icon_y = on ? -28 : 32;
+
+        if (field_labels[f]) {
+            if (visible) lv_obj_clear_flag(field_labels[f], LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(field_labels[f], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(field_labels[f], LV_ALIGN_CENTER, x, y);
+        }
+        if (multi_field_icon[f]) {
+            if (visible) lv_obj_clear_flag(multi_field_icon[f], LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(multi_field_icon[f], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(multi_field_icon[f], LV_ALIGN_CENTER, x, icon_y);
+        }
+        for (int i = 0; i < 8; i++) {
+            lv_obj_t *o = field_outlines[f][i];
+            if (!o) continue;
+            if (visible) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(o, LV_ALIGN_CENTER, x + outline_off2[i][0], y + outline_off2[i][1]);
+        }
+    }
+
+    // Schaltanzeige: normal unterhalb des Hintergrundbild-Kastens (y=172), im
+    // BMW-Style zwischen Haupt-Nadel-Nabe und der zweiten Wasser-Nadel weiter
+    // unten platziert (vom Nutzer so gewuenscht).
+    for (int i = 0; i < 6; i++) {
+        if (rpm_boxes[i]) {
+            lv_obj_align(rpm_boxes[i], LV_ALIGN_CENTER, rpm_box_x[i], on ? 85 : 172);
+        }
+    }
+
+    // Zweite, kleine Analognadel nur fuer Wassertemperatur (unterer blauer
+    // Bereich im Vorbildfoto) - nur im BMW-Style sichtbar, unabhaengig davon,
+    // worauf die grosse Ring/Nadel-Anzeige gerade eingestellt ist.
+    if (multi_bmw_water_meter) {
+        if (on) lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void bmw_style_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    g_bmw_style_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    apply_bmw_style(g_bmw_style_enabled);
     bmw_settings_save();
 }
 
@@ -929,7 +1096,24 @@ static void create_settings_func_screen(void)
         lv_label_set_text(gauge_mode_label, "Anzeige: Drehzahl");
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
+        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale, 0, 8000, 270, 135);
     }
+
+    // Eigener Schalter fuer das alternative "BMW Style"-Layout der Multi-
+    // Kachel (siehe apply_bmw_style()) - unabhaengig vom Wasser-/Drehzahl-
+    // Umschalter darueber, in die Luecke zwischen diesem und dem Warnsummer
+    // platziert.
+    lv_obj_t *bmw_style_label = lv_label_create(scr_settings_func);
+    lv_label_set_text(bmw_style_label, "BMW Style");
+    lv_obj_align(bmw_style_label, LV_ALIGN_TOP_MID, 0, 145);
+
+    lv_obj_t *bmw_style_switch = lv_switch_create(scr_settings_func);
+    lv_obj_align(bmw_style_switch, LV_ALIGN_TOP_MID, 0, 167);
+    lv_obj_add_event_cb(bmw_style_switch, bmw_style_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    if (g_bmw_style_enabled) {
+        lv_obj_add_state(bmw_style_switch, LV_STATE_CHECKED);
+    }
+    apply_bmw_style(g_bmw_style_enabled); // aus NVS geladener Zustand, direkt beim Aufbau anwenden
 
     lv_obj_t *buzzer_label = lv_label_create(scr_settings_func);
     lv_label_set_text(buzzer_label, "Warnsummer ab 120\xC2\xB0""C");
@@ -1306,8 +1490,14 @@ static void refresh_led_screen_controls(void)
     lv_slider_set_value(led_count_slider, g_led[idx].count, LV_ANIM_OFF);
     lv_label_set_text_fmt(led_count_label, "Anzahl: %d", g_led[idx].count);
 
+    lv_slider_set_value(led_brightness_slider, g_led[idx].brightness, LV_ANIM_OFF);
+    lv_label_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
+
     lv_slider_set_value(led_speed_slider, g_led[idx].speed, LV_ANIM_OFF);
     lv_label_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led[idx].speed);
+
+    lv_obj_set_style_bg_color(led_main_color_swatch, COLOR_PALETTE[g_led[idx].color_main_idx].color, 0);
+    lv_obj_set_style_bg_color(led_second_color_swatch, COLOR_PALETTE[g_led[idx].color_second_idx].color, 0);
 
     update_led_pattern_btn_styles();
     update_led_conflict_warning();
@@ -1366,6 +1556,21 @@ static void led_count_slider_released_cb(lv_event_t *e)
     bmw_settings_save();
 }
 
+static void led_brightness_slider_changed_cb(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    int idx = g_led_active_strip;
+    g_led[idx].brightness = (uint8_t)lv_slider_get_value(slider);
+    led_apply_brightness(idx, g_led[idx].brightness);
+    lv_label_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
+}
+
+static void led_brightness_slider_released_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    bmw_settings_save();
+}
+
 static void led_speed_slider_changed_cb(lv_event_t *e)
 {
     lv_obj_t *slider = lv_event_get_target(e);
@@ -1381,70 +1586,102 @@ static void led_speed_slider_released_cb(lv_event_t *e)
     bmw_settings_save();
 }
 
-typedef struct {
-    int index;
-    bool is_second; // false = Hauptfarbe, true = Zweitfarbe
-} LedColorBtnCtx;
+// Ersetzt die fruehere 2-spaltige Farbraster-Spalte (musste in nur 115px
+// Hoehe passen, Gruen war dadurch kaum erreichbar) durch einen einzelnen
+// Farbkasten je Hauptfarbe/Zweitfarbe, der nur die aktuell gewaehlte Farbe
+// zeigt (siehe refresh_led_screen_controls()). Tippen auf den Kasten oeffnet
+// ein vollflaechiges Overlay mit allen Paletten-Farben in grosszuegigen
+// Kacheln - deutlich mehr Platz als die alte feste Spalte erlaubte.
+static bool led_popup_is_second = false; // welcher der beiden Kaesten das Popup geoeffnet hat
 
-static LedColorBtnCtx led_main_color_ctx[sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0])];
-static LedColorBtnCtx led_second_color_ctx[sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0])];
-
-// Liest g_led_active_strip zum Klickzeitpunkt (nicht zur Erzeugungszeit der
-// Buttons) - dieselben Farb-Buttons bedienen so je nach aktuellem Tab
-// wahlweise Streifen 1 oder Streifen 2.
-static void led_color_btn_clicked_cb(lv_event_t *e)
+static void led_color_popup_close(void)
 {
-    LedColorBtnCtx *ctx = (LedColorBtnCtx *)lv_event_get_user_data(e);
-    const RgbColor *c = &COLOR_PALETTE_RGB[ctx->index];
-    int idx = g_led_active_strip;
-    if (ctx->is_second) {
-        g_led[idx].color_second_idx = (uint8_t)ctx->index;
-        led_apply_second_color(idx, c->r, c->g, c->b);
-    } else {
-        g_led[idx].color_main_idx = (uint8_t)ctx->index;
-        led_apply_main_color(idx, c->r, c->g, c->b);
+    if (led_color_popup_bg) {
+        lv_obj_del(led_color_popup_bg);
+        led_color_popup_bg = NULL;
     }
-    bmw_settings_save();
 }
 
-// Schlankere Variante von create_color_picker_column() (Farben-Screen): die
-// Spalte muss hier unter Tabs/Enable-Schalter/Muster-Buttons/Anzahl/Tempo
-// passen, deshalb nur 115px Hoehe verfuegbar. Mit einer einspaltigen Liste
-// (urspruengliche Version) ergab das bei 10 Farben ca. 472px Inhaltshoehe
-// gegen nur 115px Fenster (~4x Ueberlauf) - zu viel Scroll-Weg fuer dieses
-// kleine Fenster, der Nutzer kam beim Hochscrollen nicht zuverlaessig bis
-// "Gruen" (Index 2) zurueck. Fix: 2-spaltiges Raster (ROW_WRAP) statt einer
-// einzelnen Spalte - halbiert die Inhaltshoehe auf 5 Reihen (~220px), Gruen
-// liegt dadurch bereits in Reihe 2 und ist ohne/mit minimalem Scrollen sichtbar.
-static void create_led_color_picker_column(lv_obj_t *parent, const char *title, int x_offset,
-                                            bool is_second, LedColorBtnCtx *ctx_array)
+// Tippen auf eine Farbkachel: uebernehmen, Kasten-Vorschau aktualisieren,
+// Popup schliessen - wie vom Nutzer gewuenscht ("Tippt man auf eine Farbe,
+// wird diese uebernommen und das Fenster schliesst sich").
+static void led_popup_color_btn_cb(lv_event_t *e)
 {
-    lv_obj_t *header = lv_label_create(parent);
-    lv_label_set_text(header, title);
-    lv_obj_align(header, LV_ALIGN_TOP_MID, x_offset, 302);
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    const RgbColor *c = &COLOR_PALETTE_RGB[i];
+    int idx = g_led_active_strip;
+    if (led_popup_is_second) {
+        g_led[idx].color_second_idx = (uint8_t)i;
+        led_apply_second_color(idx, c->r, c->g, c->b);
+        lv_obj_set_style_bg_color(led_second_color_swatch, COLOR_PALETTE[i].color, 0);
+    } else {
+        g_led[idx].color_main_idx = (uint8_t)i;
+        led_apply_main_color(idx, c->r, c->g, c->b);
+        lv_obj_set_style_bg_color(led_main_color_swatch, COLOR_PALETTE[i].color, 0);
+    }
+    bmw_settings_save();
+    led_color_popup_close();
+}
 
-    lv_obj_t *list = lv_obj_create(parent);
-    set_dark_bg(list);
-    lv_obj_set_size(list, 150, 115);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, x_offset, 332);
-    lv_obj_set_style_pad_all(list, 4, 0);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_style_pad_row(list, 6, 0);
-    lv_obj_set_style_pad_column(list, 6, 0);
+// Tippen auf den abgedunkelten Hintergrund ausserhalb der Kachel-Flaeche
+// schliesst das Popup ohne Auswahl (Flaeche selbst ist nicht klickbar -
+// Events von Kindern bubbeln aber nicht bis hierher durch, da die Kachel-
+// Flaeche die Klicks selbst konsumiert).
+static void led_color_popup_bg_cb(lv_event_t *e)
+{
+    if (lv_event_get_target(e) == led_color_popup_bg) {
+        led_color_popup_close();
+    }
+}
+
+static void led_open_color_popup(lv_obj_t *parent_screen, bool is_second)
+{
+    led_color_popup_close(); // Sicherheitsnetz, falls schon eines offen war
+    led_popup_is_second = is_second;
+
+    led_color_popup_bg = lv_obj_create(parent_screen);
+    lv_obj_remove_style_all(led_color_popup_bg);
+    lv_obj_set_size(led_color_popup_bg, 480, 480);
+    lv_obj_set_pos(led_color_popup_bg, 0, 0);
+    lv_obj_set_style_bg_color(led_color_popup_bg, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(led_color_popup_bg, LV_OPA_70, 0);
+    lv_obj_clear_flag(led_color_popup_bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(led_color_popup_bg, led_color_popup_bg_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *panel = lv_obj_create(led_color_popup_bg);
+    set_dark_bg(panel);
+    lv_obj_set_size(panel, 360, 340);
+    lv_obj_center(panel);
+    lv_obj_set_style_pad_all(panel, 10, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
+    lv_obj_set_style_pad_row(panel, 10, 0);
+    lv_obj_set_style_pad_column(panel, 10, 0);
+
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, is_second ? "Zweitfarbe waehlen" : "Hauptfarbe waehlen");
+    lv_obj_set_width(title, LV_PCT(100));
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
     for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
-        lv_obj_t *btn = lv_btn_create(list);
-        lv_obj_set_size(btn, 66, 36);
-        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_t *btn = lv_btn_create(panel);
+        lv_obj_set_size(btn, 95, 60);
+        lv_obj_set_style_radius(btn, 10, 0);
         lv_obj_set_style_bg_color(btn, COLOR_PALETTE[i].color, 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-
-        ctx_array[i].index = i;
-        ctx_array[i].is_second = is_second;
-        lv_obj_add_event_cb(btn, led_color_btn_clicked_cb, LV_EVENT_CLICKED, &ctx_array[i]);
+        lv_obj_add_event_cb(btn, led_popup_color_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
+}
+
+static void led_main_swatch_cb(lv_event_t *e)
+{
+    led_open_color_popup(lv_obj_get_screen(lv_event_get_target(e)), false);
+}
+
+static void led_second_swatch_cb(lv_event_t *e)
+{
+    led_open_color_popup(lv_obj_get_screen(lv_event_get_target(e)), true);
 }
 
 static void create_led_screen(void)
@@ -1510,11 +1747,23 @@ static void create_led_screen(void)
     lv_obj_add_event_cb(led_count_slider, led_count_slider_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(led_count_slider, led_count_slider_released_cb, LV_EVENT_RELEASED, NULL);
 
+    // Zwischen Anzahl- und Tempo-Regler platziert (vom Nutzer so gewuenscht).
+    led_brightness_label = lv_label_create(scr_led);
+    lv_label_set_text(led_brightness_label, "Helligkeit: 100%");
+    lv_obj_align(led_brightness_label, LV_ALIGN_TOP_MID, 0, 237);
+
+    led_brightness_slider = lv_slider_create(scr_led);
+    lv_obj_set_size(led_brightness_slider, 300, 14);
+    lv_obj_align(led_brightness_slider, LV_ALIGN_TOP_MID, 0, 261);
+    lv_slider_set_range(led_brightness_slider, 0, 100);
+    lv_obj_add_event_cb(led_brightness_slider, led_brightness_slider_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(led_brightness_slider, led_brightness_slider_released_cb, LV_EVENT_RELEASED, NULL);
+
     // Nur im Chase-Muster relevant (Geschwindigkeit des Komet-Schweifs) -
     // Sichtbarkeit wird in update_led_pattern_btn_styles() gesteuert.
     led_speed_row = lv_obj_create(scr_led);
-    lv_obj_set_size(led_speed_row, 320, 60);
-    lv_obj_align(led_speed_row, LV_ALIGN_TOP_MID, 0, 237);
+    lv_obj_set_size(led_speed_row, 320, 55);
+    lv_obj_align(led_speed_row, LV_ALIGN_TOP_MID, 0, 291);
     lv_obj_set_style_bg_opa(led_speed_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(led_speed_row, 0, 0);
     lv_obj_clear_flag(led_speed_row, LV_OBJ_FLAG_SCROLLABLE);
@@ -1530,8 +1779,32 @@ static void create_led_screen(void)
     lv_obj_add_event_cb(led_speed_slider, led_speed_slider_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(led_speed_slider, led_speed_slider_released_cb, LV_EVENT_RELEASED, NULL);
 
-    create_led_color_picker_column(scr_led, "Hauptfarbe", -115, false, led_main_color_ctx);
-    create_led_color_picker_column(scr_led, "Zweitfarbe", 115, true, led_second_color_ctx);
+    // Kompakte Farbvorschau-Kaesten statt der frueheren festen Farbraster-
+    // Spalten - Tippen oeffnet das vollflaechige Auswahl-Popup (siehe
+    // led_open_color_popup()).
+    lv_obj_t *main_hdr = lv_label_create(scr_led);
+    lv_label_set_text(main_hdr, "Hauptfarbe");
+    lv_obj_align(main_hdr, LV_ALIGN_TOP_MID, -90, 356);
+
+    led_main_color_swatch = lv_btn_create(scr_led);
+    lv_obj_set_size(led_main_color_swatch, 130, 50);
+    lv_obj_align(led_main_color_swatch, LV_ALIGN_TOP_MID, -90, 380);
+    lv_obj_set_style_radius(led_main_color_swatch, 10, 0);
+    lv_obj_set_style_border_width(led_main_color_swatch, 2, 0);
+    lv_obj_set_style_border_color(led_main_color_swatch, lv_color_white(), 0);
+    lv_obj_add_event_cb(led_main_color_swatch, led_main_swatch_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *second_hdr = lv_label_create(scr_led);
+    lv_label_set_text(second_hdr, "Zweitfarbe");
+    lv_obj_align(second_hdr, LV_ALIGN_TOP_MID, 90, 356);
+
+    led_second_color_swatch = lv_btn_create(scr_led);
+    lv_obj_set_size(led_second_color_swatch, 130, 50);
+    lv_obj_align(led_second_color_swatch, LV_ALIGN_TOP_MID, 90, 380);
+    lv_obj_set_style_radius(led_second_color_swatch, 10, 0);
+    lv_obj_set_style_border_width(led_second_color_swatch, 2, 0);
+    lv_obj_set_style_border_color(led_second_color_swatch, lv_color_white(), 0);
+    lv_obj_add_event_cb(led_second_color_swatch, led_second_swatch_cb, LV_EVENT_CLICKED, NULL);
 
     led_conflict_label = lv_label_create(scr_led);
     lv_label_set_text(led_conflict_label, "");
@@ -1554,6 +1827,7 @@ static void create_led_screen(void)
     for (int i = 0; i < 2; i++) {
         led_apply_count(i, g_led[i].count);
         led_apply_speed(i, g_led[i].speed);
+        led_apply_brightness(i, g_led[i].brightness);
         led_apply_pattern(i, g_led[i].pattern);
         led_apply_main_color(i, COLOR_PALETTE_RGB[g_led[i].color_main_idx].r,
                                  COLOR_PALETTE_RGB[g_led[i].color_main_idx].g,
@@ -1605,10 +1879,12 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     set_dark_bg(scr_multi);
     lv_obj_clear_flag(scr_multi, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Statisches Hintergrundbild (RPM-Ring, Skala, Farbverlauf) - fest im Bild
-    lv_obj_t *bg_img = lv_img_create(scr_multi);
-    lv_img_set_src(bg_img, &multi_bg_img);
-    lv_obj_center(bg_img);
+    // Statisches Hintergrundbild (RPM-Ring, Skala, Farbverlauf) - fest im Bild.
+    // Im BMW-Style ausgeblendet (siehe apply_bmw_style()), deshalb als
+    // statischer Zeiger gehalten statt als lokale Variable.
+    multi_bg_img_obj = lv_img_create(scr_multi);
+    lv_img_set_src(multi_bg_img_obj, &multi_bg_img);
+    lv_obj_center(multi_bg_img_obj);
 
     // Transparentes Meter nur fuer die Nadel-Winkelberechnung
     multi_meter = lv_meter_create(scr_multi);
@@ -1646,6 +1922,14 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 20);
     multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 20);
 
+    // Reine Teilstrich-Skala fuer den BMW-Style (gleicher Winkel/Bereich wie
+    // multi_ring_scale, damit die Striche zum wachsenden Farbring passen).
+    // 0 Ticks = unsichtbar - apply_bmw_style() schaltet sie frei/leer.
+    multi_bmw_tick_scale = lv_meter_add_scale(multi_meter);
+    lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale,
+                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
+    lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 0, 0, 0, lv_color_white());
+
     // Innere Leuchtskala (Kuehlmitteltemperatur, immer aktiv - siehe
     // Deklaration oben): gleiche Winkel/Skala wie der Haupt-Ring (rotation=135
     // kompensiert denselben Bild-Nadel-Offset), aber mit negativem r_mod weit
@@ -1677,10 +1961,10 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, -60);
     lv_label_set_text(multi_speed_label, "0");
 
-    lv_obj_t *unit_label = lv_label_create(scr_multi);
-    lv_label_set_text(unit_label, "KM/H");
-    lv_obj_set_style_text_color(unit_label, lv_color_white(), 0);
-    lv_obj_align(unit_label, LV_ALIGN_CENTER, 0, -15);
+    multi_unit_label = lv_label_create(scr_multi);
+    lv_label_set_text(multi_unit_label, "KM/H");
+    lv_obj_set_style_text_color(multi_unit_label, lv_color_white(), 0);
+    lv_obj_align(multi_unit_label, LV_ALIGN_CENTER, 0, -15);
 
     // RX (gruen) / TX (rot) Aktivitaetspunkte unter KM/H, nur bei BLE-OBD
     multi_rx_dot = lv_obj_create(scr_multi);
@@ -1735,10 +2019,10 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // Drehzahl/Wasser), passend zur jeweiligen Anzeige
     const lv_img_dsc_t *field_icons[4] = {&icon_battery_img, &icon_pedal_img, &icon_tacho_img, &icon_water_img};
     for (int i = 0; i < 4; i++) {
-        lv_obj_t *icon = lv_img_create(scr_multi);
-        lv_img_set_src(icon, field_icons[i]);
-        lv_obj_align(icon, LV_ALIGN_CENTER, field_x[i], 32);
-        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        multi_field_icon[i] = lv_img_create(scr_multi);
+        lv_img_set_src(multi_field_icon[i], field_icons[i]);
+        lv_obj_align(multi_field_icon[i], LV_ALIGN_CENTER, field_x[i], 32);
+        lv_obj_clear_flag(multi_field_icon[i], LV_OBJ_FLAG_CLICKABLE);
     }
     // Batterie-, Gaspedal-, Drehzahl- und Wasser-Feld doppelt so gross (Font 28 statt Standard 14)
     lv_obj_set_style_text_font(multi_bat_label, &lv_font_montserrat_28, 0);
@@ -1759,6 +2043,39 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
         lv_obj_clear_flag(rpm_boxes[i], LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(rpm_boxes[i], LV_OBJ_FLAG_CLICKABLE);
     }
+
+    // Zweite, kleine Analognadel ausschliesslich fuer Wassertemperatur
+    // (BMW-Style, siehe apply_bmw_style()) - eigenstaendiges Meter-Widget,
+    // da LVGL-Nadeln immer um den Mittelpunkt ihres eigenen Meter-Objekts
+    // rotieren und sich nicht an einer beliebigen Stelle innerhalb von
+    // multi_meter platzieren lassen. Nutzt dieselben kleinen Nadel-Bilder
+    // (needle_*_img), die sonst fuer die Einzel-Rundinstrumente im C6-Projekt
+    // gedacht sind, hier bislang ungenutzt. Standardmaessig ausgeblendet -
+    // apply_bmw_style() schaltet sie frei.
+    multi_bmw_water_meter = lv_meter_create(scr_multi);
+    lv_obj_set_style_bg_opa(multi_bmw_water_meter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(multi_bmw_water_meter, 0, 0);
+    lv_obj_set_size(multi_bmw_water_meter, MULTI_BMW_WATER_METER_SIZE, MULTI_BMW_WATER_METER_SIZE);
+    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 155);
+    lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
+
+    const lv_img_dsc_t *small_needle_img;
+    lv_coord_t small_pivot_x, small_pivot_y;
+    get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
+    multi_bmw_water_needle = add_image_needle(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
+                                               small_needle_img, small_pivot_x, small_pivot_y,
+                                               &multi_bmw_water_needle_scale);
+
+    lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
+    lv_obj_set_size(bmw_water_hub, 10, 10);
+    lv_obj_set_style_radius(bmw_water_hub, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(bmw_water_hub, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(bmw_water_hub, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bmw_water_hub, 0, 0);
+    lv_obj_center(bmw_water_hub);
+    lv_obj_clear_flag(bmw_water_hub, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(bmw_water_hub, LV_OBJ_FLAG_CLICKABLE);
 
     // Unsichtbares Center-Overlay: 3-Sekunden-Halten -> Demo-Seite,
     // Doppeltipp -> Einstellungs-Screen (Farben). Vergroessert (160 -> 260),
@@ -1983,7 +2300,21 @@ void BMW_UI_Update(void)
         // Zeile im FatFs-Cache, bis das Zuendungs-Abschalten den Strom ohne
         // Vorwarnung wegnimmt - dann ist sie verloren, auch wenn fopen() hier
         // als erfolgreich geloggt wurde.
-        fsync(fileno(log_file));
+        if (fsync(fileno(log_file)) != 0) {
+            // Karte waehrend der Fahrt verschwunden/defekt - Handle ist tot.
+            // Weiter alle 500ms blind draufschreiben wuerde nur Zeit kosten
+            // und eine danach neu eingesteckte Karte nie erkennen lassen
+            // (SD_HandleIoError() setzt SDCard_Size zurueck, siehe SD_MMC.c).
+            SD_Log("Datenlogging: fsync() fehlgeschlagen, errno=%d (%s) - Logging gestoppt",
+                   errno, strerror(errno));
+            fclose(log_file);
+            log_file = NULL;
+            SD_HandleIoError();
+            lv_label_set_text(log_status_label, "SD-Fehler!");
+            if (log_switch) lv_obj_clear_state(log_switch, LV_STATE_CHECKED);
+            g_datalog_enabled = false;
+            bmw_settings_save();
+        }
     }
 
     // Fehlercode-Liste auf dem DTC-Screen aktualisieren
@@ -2089,6 +2420,47 @@ void BMW_UI_Update(void)
         multi_needle->type_data.needle_img.src = needle_src;
         multi_needle->opa = needle_opa;
         lv_obj_invalidate(multi_meter);
+    }
+
+    // Zweite Wasser-Nadel (BMW-Style, siehe apply_bmw_style()): zeigt immer
+    // die Kuehlmitteltemperatur, unabhaengig von g_multi_gauge_mode - gleiche
+    // Farb-/Blink-Schwellen wie die grosse Nadel im Wasser-Modus, nur mit den
+    // kleinen Nadel-Bildern. Wird nur berechnet, solange der Stil aktiv ist.
+    if (g_bmw_style_enabled) {
+        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, (int32_t)current_water_temp);
+
+        const lv_img_dsc_t *small_base_img;
+        lv_coord_t small_base_px, small_base_py;
+        get_small_needle_img(&small_base_img, &small_base_px, &small_base_py);
+        LV_UNUSED(small_base_px);
+        LV_UNUSED(small_base_py);
+        const void *small_needle_src = small_base_img;
+        lv_opa_t small_needle_opa = LV_OPA_COVER;
+        if (current_water_temp >= 95.0f) {
+            small_needle_src = &needle_yellow_img;
+            if (current_water_temp >= 112.0f) {
+                // Eigener Blink-Takt statt needle_opa der grossen Nadel: dessen
+                // Blinken wird nur berechnet, wenn g_multi_gauge_mode gerade auf
+                // Wasser steht (siehe oben) - steht die grosse Anzeige auf
+                // Drehzahl, bliebe needle_opa trotz kritischer Temperatur auf
+                // LV_OPA_COVER haengen. Die zweite Nadel zeigt aber immer
+                // Wasser, unabhaengig vom Modus der grossen Anzeige, und muss
+                // deshalb unabhaengig blinken koennen.
+                static bool small_blink_state = false;
+                static uint32_t small_last_blink = 0;
+                if (lv_tick_elaps(small_last_blink) > 250) {
+                    small_blink_state = !small_blink_state;
+                    small_last_blink = lv_tick_get();
+                }
+                small_needle_opa = small_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+            }
+        }
+        if (multi_bmw_water_needle->type_data.needle_img.src != small_needle_src ||
+            multi_bmw_water_needle->opa != small_needle_opa) {
+            multi_bmw_water_needle->type_data.needle_img.src = small_needle_src;
+            multi_bmw_water_needle->opa = small_needle_opa;
+            lv_obj_invalidate(multi_bmw_water_meter);
+        }
     }
 
     // Innere Leuchtskala (Kuehlmitteltemperatur): immer aktiv, unabhaengig

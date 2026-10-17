@@ -40,6 +40,17 @@ void Flash_Searching(void);
 // ist.
 bool SD_EnsureMounted(void);
 
+// Sauberes Unmounten nach einem erkannten Schreib-/Sync-Fehler (fsync() liefert
+// != 0, z.B. Karte waehrend des Betriebs gezogen oder physischer Defekt) -
+// setzt SDCard_Size auf 0 zurueck, damit SD_EnsureMounted() beim naechsten
+// Zugriff einen sauberen Neu-Mount versucht, statt mit einem toten
+// Datei-Handle auf einen moeglicherweise gar nicht mehr vorhandenen/
+// ausgetauschten Datentraeger weiterzuschreiben. Ohne dieses Zuruecksetzen
+// wuerde z.B. eine danach frisch eingesteckte (andere) Karte nie erkannt,
+// weil SD_EnsureMounted() wegen SDCard_Size>0 annimmt, es sei weiterhin
+// dieselbe, bereits gemountete Karte vorhanden.
+void SD_HandleIoError(void);
+
 // Formatiert die SD-Karte (FAT). Ist die Karte bereits gemountet, wird sie
 // ueber esp_vfs_fat_sdcard_format() neu formatiert (haengt intern selbst
 // aus/ein). War sie dagegen nicht mountbar (z.B. unformatiert/beschaedigt),

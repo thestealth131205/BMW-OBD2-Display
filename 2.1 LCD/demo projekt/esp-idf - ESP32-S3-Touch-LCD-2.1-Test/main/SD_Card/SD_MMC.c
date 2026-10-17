@@ -38,7 +38,9 @@ esp_err_t s_example_write_file(const char *path, char *data)
         ESP_LOGE(SD_TAG, "Failed to open file for writing");
         return ESP_FAIL;
     }
-    fprintf(f, data);
+    fprintf(f, "%s", data);
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
     ESP_LOGI(SD_TAG, "File written");
 
@@ -147,6 +149,15 @@ bool SD_EnsureMounted(void)
         SD_Init();
     }
     return SDCard_Size > 0;
+}
+
+void SD_HandleIoError(void)
+{
+    if (s_card != NULL) {
+        esp_vfs_fat_sdcard_unmount(MOUNT_POINT, s_card);
+        s_card = NULL;
+    }
+    SDCard_Size = 0;
 }
 
 esp_err_t SD_Format(void)

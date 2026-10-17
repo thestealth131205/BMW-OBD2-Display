@@ -44,14 +44,21 @@ typedef struct {
     uint8_t main_r, main_g, main_b;
     uint8_t sec_r, sec_g, sec_b;
     uint8_t speed;
+    uint8_t brightness; // 0..100, skaliert main_*/sec_* beim Senden
 } led_strip_state_t;
 
 static led_strip_state_t s_led[2] = {
     { .gpio = LED_CTRL1_GPIO, .name = "led_ctrl1", .count = 30, .pattern = LED_PATTERN_SOLID,
-      .main_r = 0,   .main_g = 162, .main_b = 255, .sec_r = 255, .sec_g = 0, .sec_b = 0, .speed = 50 },
+      .main_r = 0,   .main_g = 162, .main_b = 255, .sec_r = 255, .sec_g = 0, .sec_b = 0, .speed = 50, .brightness = 100 },
     { .gpio = LED_CTRL2_GPIO, .name = "led_ctrl2", .count = 30, .pattern = LED_PATTERN_SOLID,
-      .main_r = 0,   .main_g = 162, .main_b = 255, .sec_r = 255, .sec_g = 0, .sec_b = 0, .speed = 50 },
+      .main_r = 0,   .main_g = 162, .main_b = 255, .sec_r = 255, .sec_g = 0, .sec_b = 0, .speed = 50, .brightness = 100 },
 };
+
+// Skaliert einen Farbkanal mit der Helligkeit (0..100%), Rundung per +50.
+static uint8_t scale_brightness(uint8_t v, uint8_t brightness_pct)
+{
+    return (uint8_t)(((uint16_t)v * brightness_pct + 50) / 100);
+}
 
 static uint8_t lerp_u8(uint8_t a, uint8_t b, uint8_t frac /* 0..255 */)
 {
@@ -69,9 +76,21 @@ static void strip_create_locked(led_strip_state_t *s)
         .led_pixel_format = LED_PIXEL_FORMAT_GRB,
         .led_model = LED_MODEL_WS2812,
     };
+    // WS2812-Bit-Timing ist strikt (~1,25us/Bit); ohne DMA muss die CPU das
+    // RMT-Speicherblock-Memory per Interrupt laufend nachfuellen, sobald mehr
+    // LEDs angesteuert werden, als in den Speicherblock passen. Auf diesem
+    // Board laeuft parallel durchgehend der Bluedroid-BLE-Stack samt LVGL-
+    // Rendering - verzoegert eine dieser Interrupt-Nachfuellungen zu lange
+    // (Interrupt-Latenz unter Last), sendet das RMT Muell fuer die restlichen
+    // LEDs: genau die beobachteten zufaelligen/wechselnden Farben trotz
+    // konstant gesendeter Werte, und bei wenigen LEDs bleibt der Streifen
+    // ganz dunkel, weil schon der erste Nachfuell-Zyklus zu spaet kommt.
+    // with_dma=true laesst die GDMA-Engine den RMT-Puffer unabhaengig von der
+    // CPU-Auslastung fuettern (vom ESP32-S3 unterstuetzt) und umgeht das.
     led_strip_rmt_config_t rmt_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = true,
     };
     esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s->strip);
     if (err != ESP_OK) {
@@ -93,25 +112,31 @@ static void strip_destroy_locked(led_strip_state_t *s)
 
 static void render_solid_locked(led_strip_state_t *s)
 {
+    uint8_t r = scale_brightness(s->main_r, s->brightness);
+    uint8_t g = scale_brightness(s->main_g, s->brightness);
+    uint8_t b = scale_brightness(s->main_b, s->brightness);
     for (int i = 0; i < s->count; i++) {
-        led_strip_set_pixel(s->strip, i, s->main_r, s->main_g, s->main_b);
+        led_strip_set_pixel(s->strip, i, r, g, b);
     }
     led_strip_refresh(s->strip);
 }
 
 static void render_chase_frame_locked(led_strip_state_t *s, int head)
 {
+    uint8_t main_r = scale_brightness(s->main_r, s->brightness);
+    uint8_t main_g = scale_brightness(s->main_g, s->brightness);
+    uint8_t main_b = scale_brightness(s->main_b, s->brightness);
     for (int i = 0; i < s->count; i++) {
-        led_strip_set_pixel(s->strip, i, s->main_r, s->main_g, s->main_b);
+        led_strip_set_pixel(s->strip, i, main_r, main_g, main_b);
     }
     for (int t = 0; t < CHASE_TAIL; t++) {
         int idx = head - t;
         if (idx < 0) idx += s->count;
         if (idx < 0 || idx >= s->count) continue;
         uint8_t fade = (uint8_t)(255 - (255 * t) / CHASE_TAIL);
-        uint8_t r = lerp_u8(s->main_r, s->sec_r, fade);
-        uint8_t g = lerp_u8(s->main_g, s->sec_g, fade);
-        uint8_t b = lerp_u8(s->main_b, s->sec_b, fade);
+        uint8_t r = scale_brightness(lerp_u8(s->main_r, s->sec_r, fade), s->brightness);
+        uint8_t g = scale_brightness(lerp_u8(s->main_g, s->sec_g, fade), s->brightness);
+        uint8_t b = scale_brightness(lerp_u8(s->main_b, s->sec_b, fade), s->brightness);
         led_strip_set_pixel(s->strip, idx, r, g, b);
     }
     led_strip_refresh(s->strip);
@@ -218,6 +243,14 @@ static void ctrl_set_speed(led_strip_state_t *s, uint8_t speed_pct)
     s->speed = speed_pct;
 }
 
+static void ctrl_set_brightness(led_strip_state_t *s, uint8_t brightness_pct)
+{
+    if (brightness_pct > 100) brightness_pct = 100;
+    xSemaphoreTake(s->lock, portMAX_DELAY);
+    s->brightness = brightness_pct;
+    xSemaphoreGive(s->lock);
+}
+
 // --- Streifen 1 (GPIO0) ---
 void LED_Ctrl_SetEnabled(bool on) { ctrl_set_enabled(&s_led[0], on); }
 bool LED_Ctrl_IsEnabled(void) { return s_led[0].enabled; }
@@ -231,6 +264,8 @@ void LED_Ctrl_GetMainColor(uint8_t *r, uint8_t *g, uint8_t *b) { *r = s_led[0].m
 void LED_Ctrl_GetSecondColor(uint8_t *r, uint8_t *g, uint8_t *b) { *r = s_led[0].sec_r; *g = s_led[0].sec_g; *b = s_led[0].sec_b; }
 void LED_Ctrl_SetSpeed(uint8_t speed_pct) { ctrl_set_speed(&s_led[0], speed_pct); }
 uint8_t LED_Ctrl_GetSpeed(void) { return s_led[0].speed; }
+void LED_Ctrl_SetBrightness(uint8_t brightness_pct) { ctrl_set_brightness(&s_led[0], brightness_pct); }
+uint8_t LED_Ctrl_GetBrightness(void) { return s_led[0].brightness; }
 
 // --- Streifen 2 (GPIO19) ---
 void LED_Ctrl2_SetEnabled(bool on) { ctrl_set_enabled(&s_led[1], on); }
@@ -245,3 +280,5 @@ void LED_Ctrl2_GetMainColor(uint8_t *r, uint8_t *g, uint8_t *b) { *r = s_led[1].
 void LED_Ctrl2_GetSecondColor(uint8_t *r, uint8_t *g, uint8_t *b) { *r = s_led[1].sec_r; *g = s_led[1].sec_g; *b = s_led[1].sec_b; }
 void LED_Ctrl2_SetSpeed(uint8_t speed_pct) { ctrl_set_speed(&s_led[1], speed_pct); }
 uint8_t LED_Ctrl2_GetSpeed(void) { return s_led[1].speed; }
+void LED_Ctrl2_SetBrightness(uint8_t brightness_pct) { ctrl_set_brightness(&s_led[1], brightness_pct); }
+uint8_t LED_Ctrl2_GetBrightness(void) { return s_led[1].brightness; }
