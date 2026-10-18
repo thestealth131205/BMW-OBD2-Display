@@ -82,6 +82,7 @@ void PCF85063_Set_Date(datetime_t date);
 void PCF85063_Set_All(datetime_t time);
 
 void PCF85063_Read_Time(datetime_t *time);
+uint8_t PCF85063_Lost_Power(void);
 
 
 void PCF85063_Enable_Alarm(void);

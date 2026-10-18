@@ -1,6 +1,9 @@
 #include "ota_web.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,6 +35,13 @@
 // ueber einen Header geteilt, da sd_log.h diesen Pfad nicht exportiert.
 #define OTA_WEB_LOG_PATH "/sdcard/obd_log.txt"
 
+// Pfad muss zu WIFI_CONFIG_PATH in sntp_sync.c passen - bewusst hier
+// dupliziert statt ueber einen Header geteilt (gleiches Muster wie
+// OTA_WEB_LOG_PATH oben). Format der Datei: Zeilen "SSID=..."/"PASSWORT=...",
+// Kommentarzeilen mit '#' - siehe load_or_create_wifi_config() in sntp_sync.c.
+#define OTA_WEB_WIFI_CONFIG_PATH "/sdcard/wifi-einstellungen.txt"
+#define OTA_WEB_WIFI_CFG_MAX_LINES 40
+
 static httpd_handle_t s_server = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_enabled = false;
@@ -59,15 +69,25 @@ static volatile bool s_cancel_requested = false;
 static volatile uint32_t s_start_requested_ms = 0;
 static char s_last_error[64] = {0};
 
+// Zeilenpuffer fuer write_wifi_config() - bewusst statisch (nicht auf dem
+// Stack), da der httpd-Worker-Task nur mit kleinem Stack laeuft.
+static char s_wifi_cfg_lines[OTA_WEB_WIFI_CFG_MAX_LINES][160];
+
 // Einfache Upload-Seite: Dateiauswahl + XHR-Upload (rohe Bytes als Body,
 // kein multipart/form-data noetig) mit Fortschrittsanzeige im Browser.
+// Dient gleichzeitig als snprintf()-Formatstring fuer root_get_handler()
+// (siehe die zwei "%s" fuer SSID/Passwort unten) - alle woertlichen '%'
+// muessen deshalb als "%%" escaped werden (z.B. in den CSS-Breitenangaben).
 static const char OTA_WEB_PAGE[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'>"
 "<meta name='viewport' content='width=device-width, initial-scale=1'>"
 "<title>BMW Display Update</title>"
 "<style>body{font-family:sans-serif;background:#111;color:#eee;text-align:center;padding:30px}"
 "button{font-size:18px;padding:10px 24px;margin-top:16px;background:#2962ff;color:#fff;border:none;border-radius:6px}"
-"progress{width:90%;height:22px;margin-top:20px}</style></head><body>"
+"input[type=text]{font-size:16px;padding:8px;margin-top:8px;width:80%%;max-width:300px;"
+"background:#222;color:#eee;border:1px solid #444;border-radius:4px}"
+"progress{width:90%%;height:22px;margin-top:20px}"
+"hr{border-color:#333;margin-top:30px}</style></head><body>"
 "<h2>BMW E90 Display &ndash; Firmware-Update</h2>"
 "<p>Nur die Datei <b>*_update.bin</b> auswaehlen und hochladen "
 "(nicht die -merged.bin, die ist nur fuer das initiale USB-Flashen).</p>"
@@ -76,6 +96,14 @@ static const char OTA_WEB_PAGE[] =
 "<button onclick='up()'>Hochladen</button>"
 "<p id='s'></p>"
 "<progress id='p' value='0' max='100' style='display:none'></progress>"
+"<hr>"
+"<h3>Hotspot-WLAN fuer Zeitabgleich</h3>"
+"<p>Zugangsdaten fuer das WLAN, mit dem sich das Display beim Schalter "
+"&quot;Hotspot verbinden&quot; einmalig fuer den Uhrzeit-Abgleich verbindet.</p>"
+"<p><input type='text' id='wssid' placeholder='SSID' value='%s'><br>"
+"<input type='text' id='wpass' placeholder='Passwort' value='%s'></p>"
+"<button onclick='saveWifi()'>WLAN-Daten speichern</button>"
+"<p id='ws'></p>"
 "<script>"
 "function up(){"
 "var f=document.getElementById('f').files[0];"
@@ -89,12 +117,227 @@ static const char OTA_WEB_PAGE[] =
 "x.send(f);"
 "document.getElementById('s').innerText='Wird hochgeladen...';"
 "}"
+"function saveWifi(){"
+"var s=document.getElementById('wssid').value;"
+"var p=document.getElementById('wpass').value;"
+"var x=new XMLHttpRequest();"
+"x.open('POST','/wifi',true);"
+"x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
+"x.onload=function(){document.getElementById('ws').innerText=x.responseText;};"
+"x.onerror=function(){document.getElementById('ws').innerText='Uebertragungsfehler';};"
+"x.send('ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p));"
+"}"
 "</script></body></html>";
+
+// Ersetzt &"'<> durch HTML-Entitaeten, damit SSID/Passwort gefahrlos als
+// value='...'-Attribut in die Seite eingesetzt werden koennen (verhindert
+// Attribut-Ausbruch/HTML-Injection, falls die Konfigurationsdatei von Hand
+// mit Sonderzeichen befuellt wurde).
+static void html_escape(const char *in, char *out, size_t out_len)
+{
+    size_t oi = 0;
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        const char *rep = NULL;
+        switch (in[i]) {
+            case '&':  rep = "&amp;";  break;
+            case '<':  rep = "&lt;";   break;
+            case '>':  rep = "&gt;";   break;
+            case '"':  rep = "&quot;"; break;
+            case '\'': rep = "&#39;";  break;
+            default: break;
+        }
+        if (rep) {
+            size_t rl = strlen(rep);
+            if (oi + rl >= out_len) break;
+            memcpy(out + oi, rep, rl);
+            oi += rl;
+        } else {
+            if (oi + 1 >= out_len) break;
+            out[oi++] = in[i];
+        }
+    }
+    out[oi] = '\0';
+}
+
+// Liest SSID=/PASSWORT= aus der Hotspot-Konfigurationsdatei, rein lesend und
+// ohne die Datei bei Fehlen anzulegen - das macht bereits sntp_sync.c beim
+// naechsten Zeitabgleich-Versuch (inkl. erklaerendem Kommentar-Vorlagetext).
+static void read_wifi_config(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
+{
+    ssid[0] = '\0';
+    pass[0] = '\0';
+    FILE *f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "r");
+    if (!f) {
+        return;
+    }
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\r' || *p == '\n' || *p == '\0') continue;
+        char *nl = strpbrk(p, "\r\n");
+        if (nl) *nl = '\0';
+        if (strncmp(p, "SSID=", 5) == 0) {
+            strlcpy(ssid, p + 5, ssid_len);
+        } else if (strncmp(p, "PASSWORT=", 9) == 0) {
+            strlcpy(pass, p + 9, pass_len);
+        }
+    }
+    fclose(f);
+}
+
+// Schreibt neue SSID/PASSWORT-Werte in die Hotspot-Konfigurationsdatei.
+// Vorhandene Zeilen (Kommentare, Beispielblock aus sntp_sync.c) bleiben
+// erhalten - nur SSID=.../PASSWORT=... werden ersetzt bzw. am Ende ergaenzt,
+// falls die Datei noch gar nicht existiert oder die Schluessel fehlen.
+static bool write_wifi_config(const char *ssid, const char *pass)
+{
+    int line_count = 0;
+    FILE *f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "r");
+    if (f) {
+        while (line_count < OTA_WEB_WIFI_CFG_MAX_LINES &&
+               fgets(s_wifi_cfg_lines[line_count], sizeof(s_wifi_cfg_lines[0]), f)) {
+            line_count++;
+        }
+        fclose(f);
+    }
+
+    f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "w");
+    if (!f) {
+        SD_Log("OTA_WEB: Hotspot-Konfigurationsdatei nicht beschreibbar (errno=%d: %s)",
+               errno, strerror(errno));
+        return false;
+    }
+
+    bool ssid_written = false, pass_written = false;
+    for (int i = 0; i < line_count; i++) {
+        char *p = s_wifi_cfg_lines[i];
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "SSID=", 5) == 0) {
+            fprintf(f, "SSID=%s\r\n", ssid);
+            ssid_written = true;
+        } else if (strncmp(p, "PASSWORT=", 9) == 0) {
+            fprintf(f, "PASSWORT=%s\r\n", pass);
+            pass_written = true;
+        } else {
+            fputs(s_wifi_cfg_lines[i], f);
+        }
+    }
+    if (!ssid_written) fprintf(f, "SSID=%s\r\n", ssid);
+    if (!pass_written) fprintf(f, "PASSWORT=%s\r\n", pass);
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    return true;
+}
+
+// Minimaler Prozent-/Plus-Dekoder fuer application/x-www-form-urlencoded -
+// der schlanke esp_http_server dieses Projekts bringt keinen eigenen
+// Formular-Parser mit.
+static void url_decode(const char *src, char *dst, size_t dst_len)
+{
+    size_t di = 0;
+    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_len; si++) {
+        char c = src[si];
+        if (c == '+') {
+            dst[di++] = ' ';
+        } else if (c == '%' && isxdigit((unsigned char)src[si + 1]) && isxdigit((unsigned char)src[si + 2])) {
+            char hex[3] = { src[si + 1], src[si + 2], '\0' };
+            dst[di++] = (char)strtol(hex, NULL, 16);
+            si += 2;
+        } else {
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
+}
+
+// Sucht key= innerhalb des urlencodierten Formular-Bodys und dekodiert den
+// zugehoerigen Wert nach out.
+static void extract_form_field(const char *body, const char *key, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    size_t key_len = strlen(key);
+    for (const char *p = body; p != NULL; ) {
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
+            const char *val_start = p + key_len + 1;
+            const char *amp = strchr(val_start, '&');
+            size_t val_len = amp ? (size_t)(amp - val_start) : strlen(val_start);
+            char raw[192];
+            if (val_len >= sizeof(raw)) val_len = sizeof(raw) - 1;
+            memcpy(raw, val_start, val_len);
+            raw[val_len] = '\0';
+            url_decode(raw, out, out_len);
+            return;
+        }
+        p = strchr(p, '&');
+        if (p) p++;
+    }
+}
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    char ssid[33];
+    char pass[65];
+    read_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
+    char ssid_esc[33 * 6];
+    char pass_esc[65 * 6];
+    html_escape(ssid, ssid_esc, sizeof(ssid_esc));
+    html_escape(pass, pass_esc, sizeof(pass_esc));
+
+    static char page_buf[sizeof(OTA_WEB_PAGE) + sizeof(ssid_esc) + sizeof(pass_esc)];
+    int n = snprintf(page_buf, sizeof(page_buf), OTA_WEB_PAGE, ssid_esc, pass_esc);
+    if (n < 0) {
+        n = 0;
+    } else if ((size_t)n >= sizeof(page_buf)) {
+        n = (int)sizeof(page_buf) - 1;
+    }
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, OTA_WEB_PAGE, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page_buf, n);
+}
+
+// Nimmt die beiden Textfelder der Update-Seite entgegen und schreibt sie in
+// dieselbe Datei, die sntp_sync.c beim "Hotspot verbinden"-Zeitabgleich
+// liest - die Karte muss dafuer also nicht mehr ausgebaut werden.
+static esp_err_t wifi_cfg_post_handler(httpd_req_t *req)
+{
+    static char body[512];
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Ungueltige Laenge");
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    while (received < len) {
+        int r = httpd_req_recv(req, body + received, len - received);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Empfang fehlgeschlagen");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    char ssid[33];
+    char pass[65];
+    extract_form_field(body, "ssid", ssid, sizeof(ssid));
+    extract_form_field(body, "pass", pass, sizeof(pass));
+
+    if (!write_wifi_config(ssid, pass)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Speichern fehlgeschlagen (SD-Karte fehlt/nicht beschreibbar?)");
+        return ESP_FAIL;
+    }
+
+    SD_Log("OTA_WEB: Hotspot-WLAN-Zugangsdaten ueber Weboberflaeche aktualisiert (SSID=%s)", ssid);
+    httpd_resp_sendstr(req, "OK - Zugangsdaten gespeichert");
+    return ESP_OK;
 }
 
 // Liefert /sdcard/obd_log.txt zum Download aus. Die Datei wird vom
@@ -346,6 +589,11 @@ static bool start_ap_and_server(void)
         .uri = "/log", .method = HTTP_GET, .handler = log_get_handler, .user_ctx = NULL
     };
     httpd_register_uri_handler(s_server, &log_uri);
+
+    httpd_uri_t wifi_cfg_uri = {
+        .uri = "/wifi", .method = HTTP_POST, .handler = wifi_cfg_post_handler, .user_ctx = NULL
+    };
+    httpd_register_uri_handler(s_server, &wifi_cfg_uri);
 
     SD_Log("OTA_WEB: Access Point aktiv (SSID=%s)", OTA_WEB_SSID);
     return true;

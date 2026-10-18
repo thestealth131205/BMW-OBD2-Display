@@ -1,5 +1,6 @@
 #include "bmw_ui.h"
 #include "multi_bg_img.h"
+#include "multi_bg_bmw_img.h"
 #include "needle_imgs.h"
 #include "field_icons.h"
 #include "can_obd2.h"
@@ -114,6 +115,23 @@ static float current_water_temp      = 105.0f;
 // 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min).
 #define MULTI_RPM_RING_ORANGE_AT  6500
 #define MULTI_RPM_RING_RED_AT     6900
+
+// Winkelbereich der unteren blauen Wasser-Leuchtskala + der zweiten kleinen
+// Wasser-Nadel (BMW-Style, Vorbild: "HIGH TEMP"-Bogen unten im Foto-
+// Hintergrund multi_bg_bmw_img): 110 Grad breiter Bogen unten (Mitte bei
+// Bildschirmwinkel 180 = 6 Uhr), WMIR() spiegelt den Temperaturwert, damit er
+// entgegen der LVGL-Standardrichtung (im Uhrzeigersinn) waechst - mit
+// steigender Temperatur wandert der Bogen von unten-links (kalt) ueber unten
+// (6 Uhr) nach unten-rechts (heiss), also gegen den Uhrzeigersinn, wie im
+// Vorbildfoto. Fuer Bogen-Indikatoren wird der gespiegelte Wert direkt als
+// Skalenwert verwendet (rotation=125, range=110 -> Skalenwinkel 125..235).
+// Fuer die Bild-Nadel kommt die bereits bestehende "+90"-Bildkorrektur dazu
+// (siehe add_image_needle()), deshalb rotation=35 statt 125 (125-90=35), damit
+// die sichtbare Nadelrichtung exakt dem Bogen folgt.
+#define MULTI_WATER_ARC_RANGE       110
+#define MULTI_WATER_ARC_ROTATION    125
+#define MULTI_WATER_NEEDLE_ROTATION  35
+#define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
 static bool anim_done = false;
@@ -252,8 +270,8 @@ static lv_obj_t *multi_tx_dot;
 // bleibt in beiden Stilen aktiv und bestimmt weiterhin, was die grosse
 // Nadel/der Ring zeigen.
 static bool g_bmw_style_enabled = false;
-static lv_obj_t *multi_bg_img_obj; // statisches Hintergrundbild, im BMW-Style ausgeblendet
-static lv_meter_scale_t *multi_bmw_tick_scale; // reine Teilstrich-Skala auf multi_meter, 0 Ticks = unsichtbar
+static lv_obj_t *multi_bg_img_obj; // statisches Hintergrundbild (normaler Stil), im BMW-Style ausgeblendet
+static lv_obj_t *multi_bg_bmw_img_obj; // Foto-Hintergrundbild (BMW-Style), im normalen Stil ausgeblendet
 static lv_obj_t *multi_bmw_water_meter; // kleines eigenstaendiges Meter-Widget fuer die zweite Wasser-Nadel
 static lv_meter_scale_t *multi_bmw_water_needle_scale;
 static lv_meter_indicator_t *multi_bmw_water_needle;
@@ -298,17 +316,27 @@ static void set_dark_blue_btn(lv_obj_t *btn)
 }
 
 // Bild-Nadel um den Meter-Mittelpunkt rotieren (in Ruhestellung nach 6 Uhr).
-// Eigene, unsichtbare Hilfsskala mit um -90 versetzter rotation (270 range,
-// 45 rotation), damit die 6-Uhr-Ruhestellung mit der Skalenluecke uebereinstimmt
-// (identische Logik wie im C6-Projekt, addImageNeedle()).
+// Eigene, unsichtbare Hilfsskala mit um -90 versetzter rotation, damit die
+// 6-Uhr-Ruhestellung mit der Skalenluecke uebereinstimmt (identische Logik
+// wie im C6-Projekt, addImageNeedle()). range/rotation parametrisiert, damit
+// dieselbe Funktion auch fuer die kleine Wasser-Nadel mit ihrem eigenen,
+// schmalen Bogen unten (siehe MULTI_WATER_ARC_*) genutzt werden kann.
+static lv_meter_indicator_t *add_image_needle_ex(lv_obj_t *meter, int32_t min_val, int32_t max_val,
+                                              const lv_img_dsc_t *img, lv_coord_t pivot_x, lv_coord_t pivot_y,
+                                              uint16_t angle_range, uint16_t rotation,
+                                              lv_meter_scale_t **out_scale)
+{
+    lv_meter_scale_t *needle_scale = lv_meter_add_scale(meter);
+    lv_meter_set_scale_range(meter, needle_scale, min_val, max_val, angle_range, rotation);
+    if (out_scale) *out_scale = needle_scale;
+    return lv_meter_add_needle_img(meter, needle_scale, img, pivot_x, pivot_y);
+}
+
 static lv_meter_indicator_t *add_image_needle(lv_obj_t *meter, int32_t min_val, int32_t max_val,
                                               const lv_img_dsc_t *img, lv_coord_t pivot_x, lv_coord_t pivot_y,
                                               lv_meter_scale_t **out_scale)
 {
-    lv_meter_scale_t *needle_scale = lv_meter_add_scale(meter);
-    lv_meter_set_scale_range(meter, needle_scale, min_val, max_val, 270, 45);
-    if (out_scale) *out_scale = needle_scale;
-    return lv_meter_add_needle_img(meter, needle_scale, img, pivot_x, pivot_y);
+    return add_image_needle_ex(meter, min_val, max_val, img, pivot_x, pivot_y, 270, 45, out_scale);
 }
 
 // Welches der 3 Nadel-Bilder (Tuerkis/Gelb/Rot) zur aktuell eingestellten
@@ -858,13 +886,10 @@ static void gauge_mode_switch_cb(lv_event_t *e)
     if (rpm_mode) {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
-        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale, 0, 8000, 270, 135);
     } else {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale,
-                                  MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
-        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale,
                                   MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
     }
     bmw_settings_save();
@@ -876,21 +901,19 @@ static void gauge_mode_switch_cb(lv_event_t *e)
 // (Startzustand aus NVS), bmw_style_switch_cb() danach bei jedem Umschalten.
 static void apply_bmw_style(bool on)
 {
-    // Hintergrundbild (Ring/Skala/Farbverlauf fest im Bild) nur im normalen
-    // Stil - im BMW-Style uebernehmen die nativen Teilstriche
-    // (multi_bmw_tick_scale) plus der schon bestehende Farbring deren Rolle,
-    // vor rein schwarzem Hintergrund (set_dark_bg() von scr_multi).
+    // Hintergrundbild: normaler Stil zeigt den alten synthetischen Hintergrund
+    // (multi_bg_img_obj, Ring/Skala/Farbverlauf fest im Bild), BMW-Style zeigt
+    // stattdessen das Foto des echten BMW-Kombiinstruments (multi_bg_bmw_img_obj,
+    // enthaelt Skala/Teilstriche/Zahlen/Farbzonen bereits fertig eingebrannt -
+    // die frueher hier zusaetzlich gezeichneten nativen Teilstriche
+    // (ehem. multi_bmw_tick_scale) sind deshalb nicht mehr noetig und entfallen).
     if (multi_bg_img_obj) {
         if (on) lv_obj_add_flag(multi_bg_img_obj, LV_OBJ_FLAG_HIDDEN);
         else    lv_obj_clear_flag(multi_bg_img_obj, LV_OBJ_FLAG_HIDDEN);
     }
-
-    // Teilstriche auf dem Farbring: 0 Ticks = unsichtbar (normaler Stil, das
-    // Hintergrundbild hat seine eigenen baked-in Teilstriche), sonst duenne
-    // weisse Striche gleichmaessig ueber die 270-Grad-Skala verteilt.
-    if (multi_bmw_tick_scale) {
-        if (on) lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 23, 2, 10, lv_color_white());
-        else    lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 0, 0, 0, lv_color_white());
+    if (multi_bg_bmw_img_obj) {
+        if (on) lv_obj_clear_flag(multi_bg_bmw_img_obj, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(multi_bg_bmw_img_obj, LV_OBJ_FLAG_HIDDEN);
     }
 
     // Geschwindigkeit: normal gross mittig, im BMW-Style klein oben (Stelle
@@ -1096,7 +1119,6 @@ static void create_settings_func_screen(void)
         lv_label_set_text(gauge_mode_label, "Anzeige: Drehzahl");
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
-        lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale, 0, 8000, 270, 135);
     }
 
     // Eigener Schalter fuer das alternative "BMW Style"-Layout der Multi-
@@ -1886,6 +1908,18 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_img_set_src(multi_bg_img_obj, &multi_bg_img);
     lv_obj_center(multi_bg_img_obj);
 
+    // Foto-Hintergrundbild fuer den BMW-Style (echtes Kombiinstrument) - nur im
+    // BMW-Style sichtbar (siehe apply_bmw_style()), sonst ausgeblendet.
+    multi_bg_bmw_img_obj = lv_img_create(scr_multi);
+    lv_img_set_src(multi_bg_bmw_img_obj, &multi_bg_bmw_img);
+    // Foto ist nicht exakt mittig im Bildformat eingepasst - leicht
+    // vergroessert (~5px je Richtung) und etwas nach unten verschoben, um
+    // optisch zum Rundinstrument/Nadelzentrum zu passen (per Augenmass
+    // justiert, Feinabgleich am Board steht noch aus).
+    lv_img_set_zoom(multi_bg_bmw_img_obj, 262); // 256 = 1.0x, 262 ~= +5px auf 466px
+    lv_obj_align(multi_bg_bmw_img_obj, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_add_flag(multi_bg_bmw_img_obj, LV_OBJ_FLAG_HIDDEN);
+
     // Transparentes Meter nur fuer die Nadel-Winkelberechnung
     multi_meter = lv_meter_create(scr_multi);
     lv_obj_set_style_bg_opa(multi_meter, LV_OPA_TRANSP, 0);
@@ -1922,27 +1956,23 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     multi_ring_orange = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_ORANGE), 20);
     multi_ring_red     = lv_meter_add_arc(multi_meter, multi_ring_scale, 8, lv_palette_main(LV_PALETTE_RED), 20);
 
-    // Reine Teilstrich-Skala fuer den BMW-Style (gleicher Winkel/Bereich wie
-    // multi_ring_scale, damit die Striche zum wachsenden Farbring passen).
-    // 0 Ticks = unsichtbar - apply_bmw_style() schaltet sie frei/leer.
-    multi_bmw_tick_scale = lv_meter_add_scale(multi_meter);
-    lv_meter_set_scale_range(multi_meter, multi_bmw_tick_scale,
-                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
-    lv_meter_set_scale_ticks(multi_meter, multi_bmw_tick_scale, 0, 0, 0, lv_color_white());
-
     // Innere Leuchtskala (Kuehlmitteltemperatur, immer aktiv - siehe
-    // Deklaration oben): gleiche Winkel/Skala wie der Haupt-Ring (rotation=135
-    // kompensiert denselben Bild-Nadel-Offset), aber mit negativem r_mod weit
-    // nach innen verschoben (Radius ~115 statt ~245 beim Haupt-Ring), damit
-    // sie nicht mit den 4 Zusatzfeldern/Icons (Radius ~64-174) ueberlappt.
+    // Deklaration oben): anders als der volle Haupt-Ring nur noch ein 110 Grad
+    // breiter Bogen unten (Vorbild: "HIGH TEMP"-Bogen im Foto-Hintergrund
+    // multi_bg_bmw_img), der mit steigender Temperatur gegen den Uhrzeigersinn
+    // von unten-links nach unten-rechts waechst (siehe MULTI_WATER_ARC_* und
+    // WMIR() oben sowie BMW_UI_Update()). r_mod=-60 (Radius ~165 statt vormals
+    // ~115 bei der fruiheren vollen Kreis-Variante) platziert den Bogen knapp
+    // unterhalb der Schaltanzeige-Kaestchen, oberhalb der zweiten Wasser-Nadel.
     // Blau als Grundfarbe statt Neongelb (Vorbild: Foto der BMW-Segmentanzeige),
     // dieselben Schwellen wie beim Haupt-Ring (ab 100 Grad Orange, ab 115 Grad Rot).
     multi_water_inner_scale = lv_meter_add_scale(multi_meter);
     lv_meter_set_scale_range(multi_meter, multi_water_inner_scale,
-                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX, 270, 135);
-    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -110);
-    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -110);
-    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -110);
+                              MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
+                              MULTI_WATER_ARC_RANGE, MULTI_WATER_ARC_ROTATION);
+    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -60);
+    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -60);
+    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -60);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
@@ -2051,20 +2081,29 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // multi_meter platzieren lassen. Nutzt dieselben kleinen Nadel-Bilder
     // (needle_*_img), die sonst fuer die Einzel-Rundinstrumente im C6-Projekt
     // gedacht sind, hier bislang ungenutzt. Standardmaessig ausgeblendet -
-    // apply_bmw_style() schaltet sie frei.
+    // apply_bmw_style() schaltet sie frei. y-Offset von vormals 155 auf 135
+    // verringert (Zentrum etwas hoeher), naeher am "HIGH TEMP"-Bogen im Foto.
     multi_bmw_water_meter = lv_meter_create(scr_multi);
     lv_obj_set_style_bg_opa(multi_bmw_water_meter, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(multi_bmw_water_meter, 0, 0);
     lv_obj_set_size(multi_bmw_water_meter, MULTI_BMW_WATER_METER_SIZE, MULTI_BMW_WATER_METER_SIZE);
-    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 155);
+    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 135);
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
 
+    // rotation=MULTI_WATER_NEEDLE_ROTATION (35 statt 45) + range=MULTI_WATER_ARC_RANGE
+    // (110 statt 270): dieselbe "+90"-Bildkorrektur wie bei der grossen Nadel
+    // (sichtbare Richtung = Skalenwinkel+90), aber auf den schmalen 110-Grad-
+    // Bogen unten zugeschnitten, damit die sichtbare Nadelrichtung exakt dem
+    // blauen Bogen (multi_water_inner_*) folgt. BMW_UI_Update() speist dafuer
+    // den gespiegelten Temperaturwert (WMIR()) statt des Rohwerts ein, damit
+    // die Nadel wie der Bogen gegen den Uhrzeigersinn waechst.
     const lv_img_dsc_t *small_needle_img;
     lv_coord_t small_pivot_x, small_pivot_y;
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
-    multi_bmw_water_needle = add_image_needle(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
+    multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
+                                               MULTI_WATER_ARC_RANGE, MULTI_WATER_NEEDLE_ROTATION,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
@@ -2427,7 +2466,10 @@ void BMW_UI_Update(void)
     // Farb-/Blink-Schwellen wie die grosse Nadel im Wasser-Modus, nur mit den
     // kleinen Nadel-Bildern. Wird nur berechnet, solange der Stil aktiv ist.
     if (g_bmw_style_enabled) {
-        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, (int32_t)current_water_temp);
+        // WMIR(): die Nadel-Hilfsskala wurde mit vertauschter Richtung aufgebaut
+        // (siehe MULTI_WATER_NEEDLE_ROTATION oben), deshalb hier der gespiegelte
+        // statt der rohe Temperaturwert, damit sie gegen den Uhrzeigersinn waechst.
+        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, WMIR(current_water_temp));
 
         const lv_img_dsc_t *small_base_img;
         lv_coord_t small_base_px, small_base_py;
@@ -2467,23 +2509,26 @@ void BMW_UI_Update(void)
     // von g_multi_gauge_mode - zeigt die Wassertemperatur auch dann, wenn die
     // grosse Ring/Nadel-Anzeige gerade auf Drehzahl steht. Gleiche
     // Schwellen-Logik wie der Haupt-Ring im Wasser-Modus, nur auf die drei
-    // blau/orange/rot-Indikatoren der inneren Skala angewendet.
+    // blau/orange/rot-Indikatoren der inneren Skala angewendet. Start-/End-Werte
+    // mit WMIR() gespiegelt und vertauscht (WMIR() kehrt die Reihenfolge um),
+    // damit der Bogen wie die Skala (MULTI_WATER_ARC_ROTATION) gegen den
+    // Uhrzeigersinn von unten-links (kalt) nach unten-rechts (heiss) waechst.
     {
         float t = current_water_temp;
         float blue_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
         if (blue_end < MULTI_WATER_SCALE_MIN) blue_end = MULTI_WATER_SCALE_MIN;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_blue, MULTI_WATER_SCALE_MIN);
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_blue, (int32_t)blue_end);
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_blue, WMIR(blue_end));
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_blue, WMIR(MULTI_WATER_SCALE_MIN));
 
         float orange_end = t < (float)MULTI_WATER_RING_RED_AT ? t : (float)MULTI_WATER_RING_RED_AT;
         if (orange_end < (float)MULTI_WATER_RING_ORANGE_AT) orange_end = (float)MULTI_WATER_RING_ORANGE_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_orange, MULTI_WATER_RING_ORANGE_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_orange, (int32_t)orange_end);
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_orange, WMIR(orange_end));
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_orange, WMIR(MULTI_WATER_RING_ORANGE_AT));
 
         float red_end = t > MULTI_WATER_SCALE_MAX ? MULTI_WATER_SCALE_MAX : t;
         if (red_end < (float)MULTI_WATER_RING_RED_AT) red_end = (float)MULTI_WATER_RING_RED_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_red, MULTI_WATER_RING_RED_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_red, (int32_t)red_end);
+        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_red, WMIR(red_end));
+        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_red, WMIR(MULTI_WATER_RING_RED_AT));
     }
 
     // Farbring: waechst von aussen entlang der Skalenteilstriche mit.

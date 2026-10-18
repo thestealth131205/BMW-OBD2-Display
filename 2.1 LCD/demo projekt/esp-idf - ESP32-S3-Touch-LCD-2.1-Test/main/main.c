@@ -133,6 +133,18 @@ void app_main(void)
     SD_Log_Init();
     log_and_clear_coredump();
 
+    // OS-Flag (Bit 7 Sekunden-Register) des PCF85063: wird vom Chip selbst
+    // gesetzt, wenn die Pufferversorgung (RTC-Batterie) mal eingebrochen ist
+    // und die Zeit dadurch ungueltig wurde (Pendant zu lostPower() bei
+    // anderen RTC-Libs). Bleibt gesetzt, bis der naechste erfolgreiche
+    // SNTP-Abgleich (write_time_to_rtc() in sntp_sync.c) die Zeit neu
+    // schreibt - erst DANN ist eine Aussage ueber die Batterie moeglich.
+    if (PCF85063_Lost_Power()) {
+        SD_Log("RTC: Pufferversorgung ausgefallen (OS-Flag gesetzt) - Zeit nach Stromverlust ungueltig, Batterie pruefen!");
+    } else {
+        SD_Log("RTC: OS-Flag nicht gesetzt - Pufferversorgung hat seit letztem Zeitabgleich durchgehalten");
+    }
+
     // Legt nur den SNTP-Hintergrund-Task an (blockiert sofort auf eine
     // Freigabe) - loest noch KEINEN Verbindungsversuch aus. Das passiert erst
     // gezielt per "Hotspot verbinden"-Schalter im Funktionen-Screen

@@ -16,6 +16,7 @@ idf_component_register(
                               "BAT_Driver/BAT_Driver.c"
                               "BMW_UI/bmw_ui.c"
                               "BMW_UI/multi_bg_img.c"
+                              "BMW_UI/multi_bg_bmw_img.c"
                               "BMW_UI/needle_imgs.c"
                               "BMW_UI/field_icons.c"
                               "BMW_UI/img_lvgl_logo.c"

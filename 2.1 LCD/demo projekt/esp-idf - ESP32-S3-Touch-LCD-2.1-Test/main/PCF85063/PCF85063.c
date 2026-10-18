@@ -118,6 +118,22 @@ void PCF85063_Read_Time(datetime_t *time)
 }
 
 /******************************************************************************
+function:	Check Oscillator-Stop flag (Bit 7 of seconds register) - set by
+            the PCF85063 itself whenever VDD/backup power dropped low enough
+            for the clock to lose integrity (Pendant zu "lostPower()" bei
+            anderen RTC-Libraries). Wird NICHT automatisch geloescht - das
+            passiert erst beim naechsten Set_Time/Set_All (Byte ohne Bit 7).
+parameter:
+Info:
+******************************************************************************/
+uint8_t PCF85063_Lost_Power(void)
+{
+	uint8_t seconds = 0;
+	ESP_ERROR_CHECK(I2C_Read(PCF85063_ADDRESS, RTC_SECOND_ADDR, &seconds, 1));
+	return (seconds & 0x80) ? 1 : 0;
+}
+
+/******************************************************************************
 function:	Enable Alarm and Clear Alarm flag
 parameter:			
 Info:		
