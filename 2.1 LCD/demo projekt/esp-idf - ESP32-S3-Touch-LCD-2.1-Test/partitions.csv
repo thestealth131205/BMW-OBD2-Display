@@ -12,7 +12,7 @@
 # angepasst).
 nvs,        data, nvs,      0x9000,   0x6000,
 otadata,    data, ota,      0xf000,   0x2000,
-ota_0,      app,  ota_0,    0x20000,  3M,
-ota_1,      app,  ota_1,    0x320000, 3M,
-flash_test, data, fat,      0x620000, 528K,
-coredump,   data, coredump, 0x6A4000, 64K,
+ota_0,      app,  ota_0,    0x20000,  4M,
+ota_1,      app,  ota_1,    0x420000, 4M,
+flash_test, data, fat,      0x820000, 528K,
+coredump,   data, coredump, 0x8A4000, 64K,
