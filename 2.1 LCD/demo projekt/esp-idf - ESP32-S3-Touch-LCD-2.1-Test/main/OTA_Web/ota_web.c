@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_wifi.h"
