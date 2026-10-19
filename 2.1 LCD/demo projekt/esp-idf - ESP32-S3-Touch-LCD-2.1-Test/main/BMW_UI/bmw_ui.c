@@ -2087,7 +2087,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_bg_opa(multi_bmw_water_meter, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(multi_bmw_water_meter, 0, 0);
     lv_obj_set_size(multi_bmw_water_meter, MULTI_BMW_WATER_METER_SIZE, MULTI_BMW_WATER_METER_SIZE);
-    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 135);
+    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 120);
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
 
@@ -2103,7 +2103,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
     multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, -10,
+                                               MULTI_WATER_ARC_RANGE, -15,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
