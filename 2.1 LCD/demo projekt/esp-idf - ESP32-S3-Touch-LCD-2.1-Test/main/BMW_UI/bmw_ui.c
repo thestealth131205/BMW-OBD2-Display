@@ -129,8 +129,8 @@ static float current_water_temp      = 105.0f;
 // (siehe add_image_needle()), deshalb rotation=35 statt 125 (125-90=35), damit
 // die sichtbare Nadelrichtung exakt dem Bogen folgt.
 #define MULTI_WATER_ARC_RANGE       110
-#define MULTI_WATER_ARC_ROTATION    120
-#define MULTI_WATER_NEEDLE_ROTATION 35
+#define MULTI_WATER_ARC_ROTATION    125
+#define MULTI_WATER_NEEDLE_ROTATION  35
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
@@ -2466,10 +2466,13 @@ void BMW_UI_Update(void)
     // Farb-/Blink-Schwellen wie die grosse Nadel im Wasser-Modus, nur mit den
     // kleinen Nadel-Bildern. Wird nur berechnet, solange der Stil aktiv ist.
     if (g_bmw_style_enabled) {
-        // WMIR(): die Nadel-Hilfsskala wurde mit vertauschter Richtung aufgebaut
-        // (siehe MULTI_WATER_NEEDLE_ROTATION oben), deshalb hier der gespiegelte
-        // statt der rohe Temperaturwert, damit sie gegen den Uhrzeigersinn waechst.
-        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, WMIR(current_water_temp));
+        // Begrenze die Temperatur auf das Minimum (40) und Maximum (119)
+        float temp_clamped = current_water_temp;
+        if (temp_clamped < (float)MULTI_WATER_SCALE_MIN) temp_clamped = (float)MULTI_WATER_SCALE_MIN;
+        if (temp_clamped > (float)MULTI_WATER_SCALE_MAX) temp_clamped = (float)MULTI_WATER_SCALE_MAX;
+
+        // Direkt den Temperaturwert übergeben, damit sie im Uhrzeigersinn von 7 bis 4:30 Uhr wandert
+        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, (int32_t)temp_clamped);
 
         const lv_img_dsc_t *small_base_img;
         lv_coord_t small_base_px, small_base_py;
@@ -2481,13 +2484,6 @@ void BMW_UI_Update(void)
         if (current_water_temp >= 95.0f) {
             small_needle_src = &needle_yellow_img;
             if (current_water_temp >= 112.0f) {
-                // Eigener Blink-Takt statt needle_opa der grossen Nadel: dessen
-                // Blinken wird nur berechnet, wenn g_multi_gauge_mode gerade auf
-                // Wasser steht (siehe oben) - steht die grosse Anzeige auf
-                // Drehzahl, bliebe needle_opa trotz kritischer Temperatur auf
-                // LV_OPA_COVER haengen. Die zweite Nadel zeigt aber immer
-                // Wasser, unabhaengig vom Modus der grossen Anzeige, und muss
-                // deshalb unabhaengig blinken koennen.
                 static bool small_blink_state = false;
                 static uint32_t small_last_blink = 0;
                 if (lv_tick_elaps(small_last_blink) > 250) {
@@ -2504,7 +2500,6 @@ void BMW_UI_Update(void)
             lv_obj_invalidate(multi_bmw_water_meter);
         }
     }
-
     // Innere Leuchtskala (Kuehlmitteltemperatur): immer aktiv, unabhaengig
     // von g_multi_gauge_mode - zeigt die Wassertemperatur auch dann, wenn die
     // grosse Ring/Nadel-Anzeige gerade auf Drehzahl steht. Gleiche
