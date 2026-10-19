@@ -129,8 +129,8 @@ static float current_water_temp      = 105.0f;
 // (siehe add_image_needle()), deshalb rotation=35 statt 125 (125-90=35), damit
 // die sichtbare Nadelrichtung exakt dem Bogen folgt.
 #define MULTI_WATER_ARC_RANGE       110
-#define MULTI_WATER_ARC_ROTATION    125
-#define MULTI_WATER_NEEDLE_ROTATION  35
+#define MULTI_WATER_ARC_ROTATION    120
+#define MULTI_WATER_NEEDLE_ROTATION 35
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
