@@ -2103,7 +2103,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
     multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, 100,
+                                               MULTI_WATER_ARC_RANGE, -10,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
