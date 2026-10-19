@@ -2103,7 +2103,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
     multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, MULTI_WATER_NEEDLE_ROTATION,
+                                               MULTI_WATER_ARC_RANGE, 42,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
@@ -2466,13 +2466,8 @@ void BMW_UI_Update(void)
     // Farb-/Blink-Schwellen wie die grosse Nadel im Wasser-Modus, nur mit den
     // kleinen Nadel-Bildern. Wird nur berechnet, solange der Stil aktiv ist.
     if (g_bmw_style_enabled) {
-        // Begrenze die Temperatur auf das Minimum (40) und Maximum (119)
-        float temp_clamped = current_water_temp;
-        if (temp_clamped < (float)MULTI_WATER_SCALE_MIN) temp_clamped = (float)MULTI_WATER_SCALE_MIN;
-        if (temp_clamped > (float)MULTI_WATER_SCALE_MAX) temp_clamped = (float)MULTI_WATER_SCALE_MAX;
-
-        // Direkt den Temperaturwert übergeben, damit sie im Uhrzeigersinn von 7 bis 4:30 Uhr wandert
-        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, (int32_t)temp_clamped);
+        // WMIR() spiegelt den Wert, damit die Nadel auf der bestehenden Skala gegen den Uhrzeigersinn wandert
+        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, WMIR(current_water_temp));
 
         const lv_img_dsc_t *small_base_img;
         lv_coord_t small_base_px, small_base_py;
@@ -2500,6 +2495,7 @@ void BMW_UI_Update(void)
             lv_obj_invalidate(multi_bmw_water_meter);
         }
     }
+
     // Innere Leuchtskala (Kuehlmitteltemperatur): immer aktiv, unabhaengig
     // von g_multi_gauge_mode - zeigt die Wassertemperatur auch dann, wenn die
     // grosse Ring/Nadel-Anzeige gerade auf Drehzahl steht. Gleiche
