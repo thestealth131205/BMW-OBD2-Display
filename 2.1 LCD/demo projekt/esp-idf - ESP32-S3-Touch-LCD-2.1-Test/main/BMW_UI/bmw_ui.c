@@ -149,6 +149,7 @@ static lv_obj_t *sens_lambda1_val, *sens_lambda2_val;
 static lv_obj_t *sens_lambda1_volt_val, *sens_lambda2_volt_val;
 static lv_obj_t *sens_map_val, *sens_boost_val;
 static lv_obj_t *sens_cam_in_val, *sens_cam_ex_val;
+static lv_obj_t *sens_oil_val, *sens_mil_val;
 static lv_obj_t *scr_led;
 static lv_obj_t *led_title_label;
 static lv_obj_t *led_strip1_tab_btn, *led_strip2_tab_btn;
@@ -1392,14 +1393,17 @@ static void create_service_screen(void)
 // --- Sensoren-Screen: reine Digitalwert-Anzeige fuer Werte, die auf keiner
 // der 6 Hauptkacheln Platz haben. Erreichbar per Wisch nach rechts auf dem
 // Service-Screen (also "hinter" Multi-Ansicht -> Service), Wisch nach links
-// geht zurueck. Lambda/Ansaugdruck kommen live per Standard-OBD2-PID von der
-// eingestellten Datenquelle (siehe BMW_UI_Update()). Ladedruck und
-// Nockenwellen-Position zeigen immer "n/v": Fuer Ladedruck gibt es keine
-// standardisierte Mode-01-PID (und der N43B20A hat laut CLAUDE.md ohnehin
-// keinen Turbo), fuer die VANOS-Nockenwellenposition existiert ueberhaupt
-// kein Standard-OBD2-PID - das waere nur per BMW-spezifischem UDS-Identifier
-// auslesbar, was hier bewusst nicht blind nachgebaut wurde (vgl. die
-// ungeklaerten NOx-Regeneration-/Bremsenentlueften-Service-Funktionen).
+// geht zurueck. Lambda/Ansaugdruck/Ladedruck/Oel-Temp/MIL kommen live per
+// OBD2 von der eingestellten Datenquelle (siehe BMW_UI_Update()); Ladedruck
+// = MAP - Baro (siehe can_obd2.h/ble_obd.h) - der N43B20A hat laut CLAUDE.md
+// keinen Turbo, daher sind hier nur Werte um/leicht unter 0 kPa zu erwarten,
+// kein echter Ladedruck. Oel-Temp nutzt die BMW-spezifische Service-0x22-PID
+// 0x4402 (kein Standard-Mode-01-PID vorhanden), siehe can_obd2.h/ble_obd.h -
+// Quelle: github.com/TomWis97/bmw-obd2-display. Die VANOS-Nockenwellenposition
+// zeigt weiterhin immer "n/v": dafuer existiert ueberhaupt kein Standard-
+// OBD2-PID - das waere nur per BMW-spezifischem UDS-Identifier auslesbar,
+// was hier bewusst nicht blind nachgebaut wurde (vgl. die ungeklaerten
+// NOx-Regeneration-/Bremsenentlueften-Service-Funktionen).
 static lv_obj_t *create_sensor_cell(lv_obj_t *parent, const char *caption, int x, int y)
 {
     lv_obj_t *cap = lv_label_create(parent);
@@ -1432,10 +1436,11 @@ static void create_sensors_screen(void)
     sens_boost_val        = create_sensor_cell(scr_sensors, "Ladedruck",     110, 230);
     sens_cam_in_val       = create_sensor_cell(scr_sensors, "NW Einlass",   -110, 310);
     sens_cam_ex_val       = create_sensor_cell(scr_sensors, "NW Auslass",    110, 310);
+    sens_oil_val          = create_sensor_cell(scr_sensors, "Oel-Temp",     -110, 390);
+    sens_mil_val          = create_sensor_cell(scr_sensors, "Motorlampe",    110, 390);
 
     // Werden nie per OBD2 beantwortet (siehe Kommentar oben) - einmalig fest
     // auf "n/v" setzen statt bei jedem BMW_UI_Update()-Tick neu zu schreiben.
-    lv_label_set_text(sens_boost_val, "n/v");
     lv_label_set_text(sens_cam_in_val, "n/v");
     lv_label_set_text(sens_cam_ex_val, "n/v");
 
@@ -2103,7 +2108,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
     multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, -40,
+                                               MULTI_WATER_ARC_RANGE, -50,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
@@ -2373,10 +2378,11 @@ void BMW_UI_Update(void)
         lv_label_set_text(dtc_list_label, buf);
     }
 
-    // Sensoren-Screen: Lambda/Ansaugdruck leben, solange die Quelle online
-    // ist, sonst bleiben die Felder auf "---" stehen. Ladedruck/Nockenwellen-
-    // Position sind bereits einmalig in create_sensors_screen() auf "n/v"
-    // gesetzt und werden hier nicht mehr angefasst (sie aendern sich nie).
+    // Sensoren-Screen: Lambda/Ansaugdruck/Ladedruck/Oel-Temp/MIL leben,
+    // solange die Quelle online ist, sonst bleiben die Felder auf "---"
+    // stehen. Nockenwellen-Position ist bereits einmalig in
+    // create_sensors_screen() auf "n/v" gesetzt und wird hier nicht mehr
+    // angefasst (sie aendert sich nie).
     {
         bool sensors_online = use_ble_src ? BLE_OBD_online() : CAN_OBD2_online();
         char sbuf[16];
@@ -2386,6 +2392,9 @@ void BMW_UI_Update(void)
             float l2r = use_ble_src ? BLE_OBD_lambda2_ratio()   : CAN_OBD2_lambda2_ratio();
             float l2v = use_ble_src ? BLE_OBD_lambda2_voltage() : CAN_OBD2_lambda2_voltage();
             float map_kpa = use_ble_src ? BLE_OBD_intake_pressure() : CAN_OBD2_intake_pressure();
+            float boost_kpa = use_ble_src ? BLE_OBD_boost_pressure() : CAN_OBD2_boost_pressure();
+            float oil_c = use_ble_src ? BLE_OBD_oil_temp() : CAN_OBD2_oil_temp();
+            bool mil_on = use_ble_src ? BLE_OBD_mil_on() : CAN_OBD2_mil_on();
 
             snprintf(sbuf, sizeof(sbuf), "%.2f", l1r);
             lv_label_set_text(sens_lambda1_val, sbuf);
@@ -2397,12 +2406,34 @@ void BMW_UI_Update(void)
             lv_label_set_text(sens_lambda2_volt_val, sbuf);
             snprintf(sbuf, sizeof(sbuf), "%.0f kPa", map_kpa);
             lv_label_set_text(sens_map_val, sbuf);
+
+            if (boost_kpa <= -1.0f) {
+                lv_label_set_text(sens_boost_val, "n/v");
+            } else {
+                snprintf(sbuf, sizeof(sbuf), "%+.0f kPa", boost_kpa);
+                lv_label_set_text(sens_boost_val, sbuf);
+            }
+
+            if (oil_c <= -900.0f) {
+                lv_label_set_text(sens_oil_val, "n/v");
+            } else {
+                snprintf(sbuf, sizeof(sbuf), "%d\xC2\xB0""C", (int)oil_c);
+                lv_label_set_text(sens_oil_val, sbuf);
+            }
+
+            lv_label_set_text(sens_mil_val, mil_on ? "AN" : "AUS");
+            lv_obj_set_style_text_color(sens_mil_val,
+                mil_on ? lv_color_make(230, 50, 50) : lv_color_make(80, 200, 100), 0);
         } else {
             lv_label_set_text(sens_lambda1_val, "---");
             lv_label_set_text(sens_lambda2_val, "---");
             lv_label_set_text(sens_lambda1_volt_val, "---");
             lv_label_set_text(sens_lambda2_volt_val, "---");
             lv_label_set_text(sens_map_val, "---");
+            lv_label_set_text(sens_boost_val, "---");
+            lv_label_set_text(sens_oil_val, "---");
+            lv_label_set_text(sens_mil_val, "---");
+            lv_obj_set_style_text_color(sens_mil_val, lv_color_white(), 0);
         }
     }
 

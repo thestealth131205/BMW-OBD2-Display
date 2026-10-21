@@ -138,6 +138,9 @@ static volatile float s_lambda1_voltage = 0.0f;
 static volatile float s_lambda2_ratio   = 0.0f;
 static volatile float s_lambda2_voltage = 0.0f;
 static volatile float s_intake_pressure = 0.0f;
+static volatile float s_baro_pressure   = -1.0f;   // kPa, -1 = noch keine Antwort auf PID 0x33
+static volatile bool  s_mil_on          = false;   // PID 0x01, Byte A Bit 7
+static volatile float s_oil_temp        = -999.0f; // Service 0x22 PID 0x4402, -999 = noch keine Antwort
 
 static volatile int s_dtc_count = -1;
 static char s_dtc_codes[MAX_DTC][6];
@@ -717,7 +720,15 @@ static bool elm_init_sequence(char *resp, size_t resp_size)
     }
     send_at_cmd("ATE0", resp, resp_size, pdMS_TO_TICKS(1000));
     send_at_cmd("ATH0", resp, resp_size, pdMS_TO_TICKS(1000));
-    send_at_cmd("ATSP6", resp, resp_size, pdMS_TO_TICKS(1000));
+    // ATSP0 = automatische Protokollerkennung statt fest ATSP6 (ISO 15765-4
+    // CAN 11bit/500kbaud). Der ELM327 probiert beim ersten PID-Query selbst
+    // alle Protokolle durch (SAE J1850/ISO 9141-2/ISO 14230 KWP/ISO 15765-4
+    // CAN 11/29bit) und merkt sich das erkannte Protokoll - genau wie
+    // ELM327::initializeELM() mit dem Default-Parameter protocol='0' im
+    // Referenzprojekt github.com/TomWis97/bmw-obd2-display (ELMduino-Bibliothek).
+    // Der direkte MCP2515-Pfad (can_obd2.c) braucht das nicht, da dort die
+    // PT-CAN-Rohframes ohnehin fest auf ISO 15765-4/500kbaud eingestellt sind.
+    send_at_cmd("ATSP0", resp, resp_size, pdMS_TO_TICKS(1000));
     set_status(elm_ok ? "Warte Daten" : "ELM stumm");
     return elm_ok;
 }
@@ -879,8 +890,36 @@ static void ble_obd_task(void *arg)
                 }
             }
             break;
+        case 6:
+            // Absoluter Luftdruck (Baro), fuer Ladedruck = MAP - Baro
+            if (s_sensors_active && send_at_cmd("0133", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x33) {
+                    s_baro_pressure = (float)bytes[2];
+                }
+            }
+            break;
+        case 7:
+            // Monitor-Status seit DTC-Loeschen -> Byte A Bit 7 = MIL an/aus
+            if (s_sensors_active && send_at_cmd("0101", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 3 && bytes[0] == 0x41 && bytes[1] == 0x01) {
+                    s_mil_on = (bytes[2] & 0x80) != 0;
+                }
+            }
+            break;
+        case 8:
+            // BMW-Oeltemperatur per Service 0x22 (ReadDataByIdentifier),
+            // PID 0x4402 - Antwort "62 44 02 XX", Rohwert*0.75-48 = Grad C.
+            if (s_sensors_active && send_at_cmd("224402", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
+                n = hex_tokenize(resp, bytes, sizeof(bytes));
+                if (n >= 4 && bytes[0] == 0x62 && bytes[1] == 0x44 && bytes[2] == 0x02) {
+                    s_oil_temp = (float)bytes[3] * 0.75f - 48.0f;
+                }
+            }
+            break;
         }
-        poll_step = (poll_step + 1) % 6;
+        poll_step = (poll_step + 1) % 9;
 
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         if (now - last_bat_poll >= 1000) {
@@ -1007,9 +1046,18 @@ float BLE_OBD_lambda1_voltage(void) { return s_lambda1_voltage; }
 float BLE_OBD_lambda2_ratio(void)   { return s_lambda2_ratio; }
 float BLE_OBD_lambda2_voltage(void) { return s_lambda2_voltage; }
 float BLE_OBD_intake_pressure(void) { return s_intake_pressure; }
-float BLE_OBD_boost_pressure(void)  { return -1.0f; }
+
+float BLE_OBD_boost_pressure(void)
+{
+    if (s_baro_pressure < 0.0f) return -1.0f; // Baro (PID 0x33) noch nicht beantwortet
+    return s_intake_pressure - s_baro_pressure;
+}
+
 float BLE_OBD_cam_intake_pos(void)  { return -1.0f; }
 float BLE_OBD_cam_exhaust_pos(void) { return -1.0f; }
+
+bool  BLE_OBD_mil_on(void)   { return s_mil_on; }
+float BLE_OBD_oil_temp(void) { return s_oil_temp; }
 
 void BLE_OBD_read_dtc(void)
 {

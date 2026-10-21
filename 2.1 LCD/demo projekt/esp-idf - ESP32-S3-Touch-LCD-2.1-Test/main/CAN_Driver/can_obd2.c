@@ -41,6 +41,9 @@ static volatile float s_lambda1_voltage = 0.0f;
 static volatile float s_lambda2_ratio   = 0.0f;
 static volatile float s_lambda2_voltage = 0.0f;
 static volatile float s_intake_pressure = 0.0f;
+static volatile float s_baro_pressure   = -1.0f;   // kPa, -1 = noch keine Antwort auf PID 0x33
+static volatile bool  s_mil_on          = false;   // PID 0x01, Byte A Bit 7
+static volatile float s_oil_temp        = -999.0f; // Service 0x22 PID 0x4402, -999 = noch keine Antwort
 
 #define MAX_DTC 8
 static volatile int s_dtc_count = -1;   // -1 = noch nicht ausgelesen
@@ -84,6 +87,18 @@ static void decode_frame(const mcp2515_frame_t *f)
         } else if (f->dlc >= 4 && f->data[1] == 0x41 && f->data[2] == 0x0B) {
             // Mode 01, PID 0x0B (Ansaugkruemmerdruck/MAP): A in kPa
             s_intake_pressure = (float)f->data[3];
+        } else if (f->dlc >= 4 && f->data[1] == 0x41 && f->data[2] == 0x33) {
+            // Mode 01, PID 0x33 (absoluter Luftdruck/Baro): A in kPa
+            s_baro_pressure = (float)f->data[3];
+        } else if (f->dlc >= 4 && f->data[1] == 0x41 && f->data[2] == 0x01) {
+            // Mode 01, PID 0x01 (Monitor Status seit DTC-Loeschen): Byte A
+            // Bit 7 = MIL an/aus, Bits 0-6 = Anzahl gespeicherter DTCs
+            // (hier nicht ausgewertet, dafuer gibt es bereits Mode 03).
+            s_mil_on = (f->data[3] & 0x80) != 0;
+        } else if (f->dlc >= 5 && f->data[1] == 0x62 && f->data[2] == 0x44 && f->data[3] == 0x02) {
+            // Service 0x22 (ReadDataByIdentifier), BMW-PID 0x4402 (Oeltemperatur):
+            // Rohwert*0.75-48 = Grad C, siehe can_obd2.h.
+            s_oil_temp = (float)f->data[4] * 0.75f - 48.0f;
         } else if (f->dlc >= 2 && f->data[1] == 0x43) {
             // Mode 03, positive Antwort: Fehlercodes ab Byte 2, je 2 Byte
             int n = 0;
@@ -127,14 +142,28 @@ static void decode_frame(const mcp2515_frame_t *f)
     }
 }
 
+typedef struct {
+    uint8_t len;      // ISO-TP Single-Frame-Laenge (Service-Byte + Datenbytes)
+    uint8_t data[3];  // Service, PID-High[, PID-Low]
+} obd2_extra_req_t;
+
 static void can_task(void *arg)
 {
     mcp2515_frame_t f;
     uint32_t last_extra_poll = 0;
-    // Rundlauf: Batteriespannung (0x42) plus die drei neuen Sensoren-Screen-
-    // PIDs, je 250ms -> kompletter Zyklus weiterhin alle 1s wie zuvor nur
-    // fuer die Batteriespannung allein.
-    static const uint8_t extra_pids[] = {0x42, 0x24, 0x25, 0x0B};
+    // Rundlauf: Batteriespannung (0x42) plus die Sensoren-Screen-PIDs
+    // (Lambda 1/2, MAP, Baro, MIL-Status, BMW-Oeltemperatur), je 250ms ->
+    // kompletter Zyklus weiterhin alle 1s wie zuvor nur fuer die
+    // Batteriespannung allein.
+    static const obd2_extra_req_t extra_reqs[] = {
+        {2, {0x01, 0x42}},       // Batteriespannung (immer im Rundlauf)
+        {2, {0x01, 0x24}},       // Lambda 1 (Ratio+Spannung)
+        {2, {0x01, 0x25}},       // Lambda 2 (Ratio+Spannung)
+        {2, {0x01, 0x0B}},       // Ansaugkruemmerdruck (MAP)
+        {2, {0x01, 0x33}},       // absoluter Luftdruck (Baro, fuer Ladedruck)
+        {2, {0x01, 0x01}},       // Monitor-Status (MIL)
+        {3, {0x22, 0x44, 0x02}}, // BMW-Oeltemperatur (Service 0x22)
+    };
     int extra_idx = 0;
     while (1) {
         int drained = 0;
@@ -148,13 +177,14 @@ static void can_task(void *arg)
         if (now - last_extra_poll >= EXTRA_POLL_INTERVAL_MS) {
             last_extra_poll = now;
             // Ohne sichtbaren Sensoren-Screen nur die Batteriespannung (0x42)
-            // abfragen - Lambda/MAP (0x24/0x25/0x0B) kosten sonst unnoetig
-            // Buszeit, obwohl niemand hinschaut.
-            uint8_t pid = s_sensors_active ? extra_pids[extra_idx] : extra_pids[0];
-            uint8_t req[8] = {0x02, 0x01, pid, 0x00, 0x00, 0x00, 0x00, 0x00};
+            // abfragen - die uebrigen Werte kosten sonst unnoetig Buszeit,
+            // obwohl niemand hinschaut.
+            const obd2_extra_req_t *r = s_sensors_active ? &extra_reqs[extra_idx] : &extra_reqs[0];
+            uint8_t req[8] = {r->len, 0, 0, 0, 0, 0, 0, 0};
+            memcpy(&req[1], r->data, r->len);
             mcp2515_send(ID_OBD2_FUNC, req, 8);
             extra_idx = s_sensors_active
-                ? (extra_idx + 1) % (int)(sizeof(extra_pids) / sizeof(extra_pids[0]))
+                ? (extra_idx + 1) % (int)(sizeof(extra_reqs) / sizeof(extra_reqs[0]))
                 : 0;
         }
 
@@ -227,6 +257,15 @@ float CAN_OBD2_lambda1_voltage(void) { return s_lambda1_voltage; }
 float CAN_OBD2_lambda2_ratio(void)   { return s_lambda2_ratio; }
 float CAN_OBD2_lambda2_voltage(void) { return s_lambda2_voltage; }
 float CAN_OBD2_intake_pressure(void) { return s_intake_pressure; }
-float CAN_OBD2_boost_pressure(void)  { return -1.0f; }
+
+float CAN_OBD2_boost_pressure(void)
+{
+    if (s_baro_pressure < 0.0f) return -1.0f; // Baro (PID 0x33) noch nicht beantwortet
+    return s_intake_pressure - s_baro_pressure;
+}
+
 float CAN_OBD2_cam_intake_pos(void)  { return -1.0f; }
 float CAN_OBD2_cam_exhaust_pos(void) { return -1.0f; }
+
+bool  CAN_OBD2_mil_on(void)   { return s_mil_on; }
+float CAN_OBD2_oil_temp(void) { return s_oil_temp; }

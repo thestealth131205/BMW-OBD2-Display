@@ -64,15 +64,32 @@ float CAN_OBD2_lambda2_ratio(void);
 float CAN_OBD2_lambda2_voltage(void);
 // Ansaugkruemmerdruck (MAP), PID 0x0B, kPa.
 float CAN_OBD2_intake_pressure(void);
-// Ladedruck (Turbo): Der N43B20A ist laut CLAUDE.md ein Saugmotor (kein
-// Turbo), zudem gibt es dafuer keine standardisierte Mode-01-PID - liefert
-// immer -1.0 (= "n/v" in der UI), es wird nichts geraten/abgefragt.
+// Ladedruck = Ansaugkruemmerdruck (PID 0x0B) minus absoluter Luftdruck
+// (PID 0x33), wie im Referenzprojekt github.com/TomWis97/bmw-obd2-display
+// (bmw-obd2-display.ino: "boost_pressure = manifold_pressure - baro_pressure").
+// Der N43B20A ist laut CLAUDE.md ein Saugmotor (kein Turbo) - hier sind daher
+// nur leicht negative/um 0 kPa liegende Werte (Drosselklappen-Unterdruck) zu
+// erwarten, kein echter Ladedruck. Liefert -1.0 (= "n/v" in der UI), solange
+// PID 0x33 noch nicht beantwortet wurde.
 float CAN_OBD2_boost_pressure(void);
 // Nockenwellen-Position Einlass/Auslass (VANOS-Winkel): kein Standard-OBD2-
 // PID, nur per BMW-spezifischem UDS-Identifier auslesbar (nicht verifiziert,
 // nicht implementiert) - liefert immer -1.0 (= "n/v" in der UI).
 float CAN_OBD2_cam_intake_pos(void);
 float CAN_OBD2_cam_exhaust_pos(void);
+
+// MIL ("Motorkontrollleuchte"/Check-Engine), Mode 01 PID 0x01 (Monitor
+// Status since DTCs cleared), Bit 7 von Byte A. Default false, bis die
+// erste Antwort da ist (nur abgefragt, solange der Sensoren-Screen
+// sichtbar ist, siehe CAN_OBD2_set_sensors_active()).
+bool CAN_OBD2_mil_on(void);
+
+// Oeltemperatur: kein Standard-Mode-01-PID vorhanden - BMW beantwortet
+// stattdessen Service 0x22 ("ReadDataByIdentifier"), PID 0x4402, Formel
+// Rohwert*0.75-48 = Grad C (identisch zum Referenzprojekt
+// github.com/TomWis97/bmw-obd2-display: "oil = tempOil*191.25/255-48").
+// Liefert -999.0 (= "n/v" in der UI), solange noch keine Antwort da war.
+float CAN_OBD2_oil_temp(void);
 
 #ifdef __cplusplus
 }
