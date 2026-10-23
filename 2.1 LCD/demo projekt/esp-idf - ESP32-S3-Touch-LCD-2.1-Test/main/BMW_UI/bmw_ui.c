@@ -929,6 +929,15 @@ static void apply_bmw_style(bool on)
         else    lv_obj_add_flag(multi_bg_bmw_img_obj, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // Beide Hintergrundbilder explizit nach hinten, beide Nadel-Meter
+    // explizit nach vorne schieben - unabhaengig von der Erzeugungsreihenfolge
+    // muss die Nadel immer ueber dem (je nach Stil sichtbaren) Hintergrundbild
+    // liegen, sonst wuerde sie dahinter verschwinden.
+    if (multi_bg_img_obj)     lv_obj_move_background(multi_bg_img_obj);
+    if (multi_bg_bmw_img_obj) lv_obj_move_background(multi_bg_bmw_img_obj);
+    if (multi_meter)          lv_obj_move_foreground(multi_meter);
+    if (multi_bmw_water_meter) lv_obj_move_foreground(multi_bmw_water_meter);
+
     // Geschwindigkeit: normal gross mittig, im BMW-Style klein oben (Stelle
     // des mittleren gruenen Kreises im Vorbildfoto) - "KM/H" dort ausgeblendet,
     // im Foto steht an dieser Stelle kein Einheitentext.
