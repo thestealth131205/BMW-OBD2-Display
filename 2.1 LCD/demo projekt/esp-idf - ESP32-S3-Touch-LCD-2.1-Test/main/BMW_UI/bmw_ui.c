@@ -119,18 +119,24 @@ static float current_water_temp      = 105.0f;
 // Winkelbereich der unteren blauen Wasser-Leuchtskala + der zweiten kleinen
 // Wasser-Nadel (BMW-Style, Vorbild: "HIGH TEMP"-Bogen unten im Foto-
 // Hintergrund multi_bg_bmw_img): 110 Grad breiter Bogen unten (Mitte bei
-// Bildschirmwinkel 180 = 6 Uhr), WMIR() spiegelt den Temperaturwert, damit er
-// entgegen der LVGL-Standardrichtung (im Uhrzeigersinn) waechst - mit
-// steigender Temperatur wandert der Bogen von unten-links (kalt) ueber unten
-// (6 Uhr) nach unten-rechts (heiss), also gegen den Uhrzeigersinn, wie im
+// LVGL-Skalenwinkel 90 = 6 Uhr; LVGL-Winkel 0 liegt bei 3 Uhr und zaehlt im
+// Uhrzeigersinn), WMIR() spiegelt den Temperaturwert, damit er entgegen der
+// LVGL-Standardrichtung (im Uhrzeigersinn) waechst - mit steigender
+// Temperatur wandert der Bogen von unten-links (kalt) ueber unten (6 Uhr)
+// nach unten-rechts (heiss), also gegen den Uhrzeigersinn, wie im
 // Vorbildfoto. Fuer Bogen-Indikatoren wird der gespiegelte Wert direkt als
-// Skalenwert verwendet (rotation=125, range=110 -> Skalenwinkel 125..235).
-// Fuer die Bild-Nadel kommt die bereits bestehende "+90"-Bildkorrektur dazu
-// (siehe add_image_needle()), deshalb rotation=35 statt 125 (125-90=35), damit
-// die sichtbare Nadelrichtung exakt dem Bogen folgt.
+// Skalenwert verwendet (rotation=35, range=110 -> Skalenwinkel 35..145,
+// Mitte bei 90 = 6 Uhr). Zuvor stand hier rotation=125 (Mitte bei
+// Skalenwinkel 180 = 9 Uhr, also links statt unten) - sichtbar als Bogen
+// zwischen 7 und 11 Uhr links der Bildschirmmitte, vom Nutzer gemeldet und
+// hier auf die im Kommentar immer schon beschriebene untere Position
+// korrigiert. MULTI_WATER_NEEDLE_ROTATION folgt mit demselben Versatz
+// (-90 Grad gegenueber der vorherigen, durch mehrere "Needle corrections"-
+// Commits von Hand am Geraet eingemessenen Nadel-Rotation -50, also
+// -50-90=-140), damit die kleine Nadel weiterhin exakt auf den Bogen zeigt.
 #define MULTI_WATER_ARC_RANGE       110
-#define MULTI_WATER_ARC_ROTATION    125
-#define MULTI_WATER_NEEDLE_ROTATION  35
+#define MULTI_WATER_ARC_ROTATION     35
+#define MULTI_WATER_NEEDLE_ROTATION -140
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
@@ -362,25 +368,31 @@ static void get_base_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, l
     *img = &multi_needle_red_img; *pivot_x = MULTI_NEEDLE_RED_PIVOT_X; *pivot_y = MULTI_NEEDLE_RED_PIVOT_Y;
 }
 
-// Wie get_base_needle_img(), aber mit den kleinen Nadel-Bildern
-// (needle_*_img) statt der grossen Multi-Kachel-Variante - fuer die
-// eigenstaendige zweite Wasser-Nadel im BMW-Style (siehe apply_bmw_style()).
+// Wie get_base_needle_img(), aber mit den kleinen BMW-Style-Nadel-Bildern
+// (needle_small_*_img, dunkler Rundknopf + farbiger Schaft) statt der
+// grossen Multi-Kachel-Variante - fuer die eigenstaendige zweite Wasser-Nadel
+// im BMW-Style (siehe apply_bmw_style()). Vormals wurden hier faelschlich die
+// grossen needle_*_img (87x276px, fuer die C6-Rundinstrumente gedacht) in
+// einem nur 110px grossen Meter-Widget verwendet - das vergroesserte den von
+// LVGL fuer die Nadel reservierten Redraw-Bereich weit ueber das Widget
+// hinaus und machte den gesamten BMW-Style-Screen spuerbar langsam
+// (u.a. verzoegerte/verschluckte Doppeltipps in der Bildschirmmitte).
 static void get_small_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, lv_coord_t *pivot_y)
 {
     for (int i = 0; i < COLOR_PALETTE_SIZE; i++) {
         if (COLOR_PALETTE[i].color.full != g_color_secondary.full) continue;
         const char *name = COLOR_PALETTE[i].name;
         if (strcmp(name, "Blau") == 0 || strcmp(name, "Cyan") == 0) {
-            *img = &needle_teal_img; *pivot_x = NEEDLE_TEAL_PIVOT_X; *pivot_y = NEEDLE_TEAL_PIVOT_Y;
+            *img = &needle_small_teal_img; *pivot_x = NEEDLE_SMALL_TEAL_PIVOT_X; *pivot_y = NEEDLE_SMALL_TEAL_PIVOT_Y;
             return;
         }
         if (strcmp(name, "Gelb") == 0 || strcmp(name, "Neongelb") == 0 || strcmp(name, "Orange") == 0) {
-            *img = &needle_yellow_img; *pivot_x = NEEDLE_YELLOW_PIVOT_X; *pivot_y = NEEDLE_YELLOW_PIVOT_Y;
+            *img = &needle_small_yellow_img; *pivot_x = NEEDLE_SMALL_YELLOW_PIVOT_X; *pivot_y = NEEDLE_SMALL_YELLOW_PIVOT_Y;
             return;
         }
         break;
     }
-    *img = &needle_red_img; *pivot_x = NEEDLE_RED_PIVOT_X; *pivot_y = NEEDLE_RED_PIVOT_Y;
+    *img = &needle_small_red_img; *pivot_x = NEEDLE_SMALL_RED_PIVOT_X; *pivot_y = NEEDLE_SMALL_RED_PIVOT_Y;
 }
 
 // --- Einstellungen dauerhaft speichern (NVS-Flash, ueberlebt Stromverluste,
@@ -2083,11 +2095,14 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // (BMW-Style, siehe apply_bmw_style()) - eigenstaendiges Meter-Widget,
     // da LVGL-Nadeln immer um den Mittelpunkt ihres eigenen Meter-Objekts
     // rotieren und sich nicht an einer beliebigen Stelle innerhalb von
-    // multi_meter platzieren lassen. Nutzt dieselben kleinen Nadel-Bilder
-    // (needle_*_img), die sonst fuer die Einzel-Rundinstrumente im C6-Projekt
-    // gedacht sind, hier bislang ungenutzt. Standardmaessig ausgeblendet -
-    // apply_bmw_style() schaltet sie frei. y-Offset von vormals 155 auf 135
-    // verringert (Zentrum etwas hoeher), naeher am "HIGH TEMP"-Bogen im Foto.
+    // multi_meter platzieren lassen. Nutzt eigene, kleine BMW-Style-Nadel-
+    // Bilder (needle_small_*_img, aus Fotos des echten BMW-Tachozeigers
+    // generiert, siehe get_small_needle_img()) statt der grossen
+    // needle_*_img-Rundinstrument-Nadeln, die hier zuvor stark ueberdimensioniert
+    // waren (87x276px in einem 110px-Widget) und den BMW-Style-Screen spuerbar
+    // ausgebremst hatten. Standardmaessig ausgeblendet - apply_bmw_style()
+    // schaltet sie frei. y-Offset von vormals 155 auf 135 verringert (Zentrum
+    // etwas hoeher), naeher am "HIGH TEMP"-Bogen im Foto.
     multi_bmw_water_meter = lv_meter_create(scr_multi);
     lv_obj_set_style_bg_opa(multi_bmw_water_meter, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(multi_bmw_water_meter, 0, 0);
@@ -2096,8 +2111,8 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
 
-    // rotation=MULTI_WATER_NEEDLE_ROTATION (35 statt 45) + range=MULTI_WATER_ARC_RANGE
-    // (110 statt 270): dieselbe "+90"-Bildkorrektur wie bei der grossen Nadel
+    // rotation=MULTI_WATER_NEEDLE_ROTATION + range=MULTI_WATER_ARC_RANGE (110
+    // statt 270): dieselbe "+90"-Bildkorrektur wie bei der grossen Nadel
     // (sichtbare Richtung = Skalenwinkel+90), aber auf den schmalen 110-Grad-
     // Bogen unten zugeschnitten, damit die sichtbare Nadelrichtung exakt dem
     // blauen Bogen (multi_water_inner_*) folgt. BMW_UI_Update() speist dafuer
@@ -2108,7 +2123,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
     multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, -50,
+                                               MULTI_WATER_ARC_RANGE, MULTI_WATER_NEEDLE_ROTATION,
                                                &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
@@ -2508,7 +2523,7 @@ void BMW_UI_Update(void)
         const void *small_needle_src = small_base_img;
         lv_opa_t small_needle_opa = LV_OPA_COVER;
         if (current_water_temp >= 95.0f) {
-            small_needle_src = &needle_yellow_img;
+            small_needle_src = &needle_small_yellow_img;
             if (current_water_temp >= 112.0f) {
                 static bool small_blink_state = false;
                 static uint32_t small_last_blink = 0;

@@ -37,3 +37,21 @@ extern const lv_img_dsc_t multi_needle_teal_img;
 #define MULTI_NEEDLE_TEAL_PIVOT_X 7
 #define MULTI_NEEDLE_TEAL_PIVOT_Y -138
 
+// Kleine BMW-Style-Nadel (dunkler Rundknopf + farbiger Schaft, aus vom Nutzer
+// bereitgestellten Fotos des echten BMW-Tachozeigers) - ausschliesslich fuer
+// die zweite Wassertemperatur-Nadel (multi_bmw_water_needle in bmw_ui.c).
+extern const uint8_t needle_small_teal_map[7326];
+extern const lv_img_dsc_t needle_small_teal_img;
+#define NEEDLE_SMALL_TEAL_PIVOT_X 20
+#define NEEDLE_SMALL_TEAL_PIVOT_Y 17
+
+extern const uint8_t needle_small_yellow_map[7326];
+extern const lv_img_dsc_t needle_small_yellow_img;
+#define NEEDLE_SMALL_YELLOW_PIVOT_X 20
+#define NEEDLE_SMALL_YELLOW_PIVOT_Y 17
+
+extern const uint8_t needle_small_red_map[7326];
+extern const lv_img_dsc_t needle_small_red_img;
+#define NEEDLE_SMALL_RED_PIVOT_X 20
+#define NEEDLE_SMALL_RED_PIVOT_Y 17
+
