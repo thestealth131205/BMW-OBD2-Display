@@ -134,9 +134,16 @@ static float current_water_temp      = 105.0f;
 // (-90 Grad gegenueber der vorherigen, durch mehrere "Needle corrections"-
 // Commits von Hand am Geraet eingemessenen Nadel-Rotation -50, also
 // -50-90=-140), damit die kleine Nadel weiterhin exakt auf den Bogen zeigt.
+// Feinjustierung (Nutzer-Rueckmeldung am Board, Foto v1.0.68): Der blaue Bogen
+// soll etwas gegen den Uhrzeigersinn gedreht werden -> ARC_ROTATION 35 -> 27
+// (kleinere Startwinkel = Bogen rueckt CCW). Die kleine Wasser-Nadel drehte
+// zu weit gegen den Uhrzeigersinn aus der Skala heraus -> NEEDLE_ROTATION
+// im Uhrzeigersinn zurueckgeholt (-140 -> -112). Beide Werte sind weiterhin
+// per Augenmass gesetzt (Nadel-Meter und Bogen-Meter haben unterschiedliche
+// Mittelpunkte), der exakte Feinabgleich erfolgt wie bisher iterativ am Geraet.
 #define MULTI_WATER_ARC_RANGE       110
-#define MULTI_WATER_ARC_ROTATION     35
-#define MULTI_WATER_NEEDLE_ROTATION -140
+#define MULTI_WATER_ARC_ROTATION     27
+#define MULTI_WATER_NEEDLE_ROTATION -112
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
@@ -1005,11 +1012,27 @@ static void apply_bmw_style(bool on)
     }
 }
 
+// Es gibt zwei BMW-Style-Schalter (Funktionen-Screen + Langdruck-/Demo-Screen,
+// vom Nutzer gewuenscht, damit der Umschalter auch dann erreichbar ist, wenn
+// der BMW-Style-Screen gerade traege reagiert). Beide zeigen denselben Zustand
+// g_bmw_style_enabled; nach jedem Umschalten werden beide synchronisiert.
+static lv_obj_t *g_bmw_style_sw[2] = {NULL, NULL};
+
+static void sync_bmw_style_switches(void)
+{
+    for (int i = 0; i < 2; i++) {
+        if (!g_bmw_style_sw[i]) continue;
+        if (g_bmw_style_enabled) lv_obj_add_state(g_bmw_style_sw[i], LV_STATE_CHECKED);
+        else                     lv_obj_clear_state(g_bmw_style_sw[i], LV_STATE_CHECKED);
+    }
+}
+
 static void bmw_style_switch_cb(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
     g_bmw_style_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
     apply_bmw_style(g_bmw_style_enabled);
+    sync_bmw_style_switches();
     bmw_settings_save();
 }
 
@@ -1154,6 +1177,7 @@ static void create_settings_func_screen(void)
     lv_obj_t *bmw_style_switch = lv_switch_create(scr_settings_func);
     lv_obj_align(bmw_style_switch, LV_ALIGN_TOP_MID, 0, 167);
     lv_obj_add_event_cb(bmw_style_switch, bmw_style_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    g_bmw_style_sw[0] = bmw_style_switch;
     if (g_bmw_style_enabled) {
         lv_obj_add_state(bmw_style_switch, LV_STATE_CHECKED);
     }
@@ -1938,11 +1962,19 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // BMW-Style sichtbar (siehe apply_bmw_style()), sonst ausgeblendet.
     multi_bg_bmw_img_obj = lv_img_create(scr_multi);
     lv_img_set_src(multi_bg_bmw_img_obj, &multi_bg_bmw_img);
-    // Foto ist nicht exakt mittig im Bildformat eingepasst - leicht
-    // vergroessert (~5px je Richtung) und etwas nach unten verschoben, um
-    // optisch zum Rundinstrument/Nadelzentrum zu passen (per Augenmass
-    // justiert, Feinabgleich am Board steht noch aus).
-    lv_img_set_zoom(multi_bg_bmw_img_obj, 262); // 256 = 1.0x, 262 ~= +5px auf 466px
+    // WICHTIG (Performance): KEIN lv_img_set_zoom() hier. Das Foto ist bereits
+    // exakt 466x466 (= volle Bildschirmgroesse), ein Zoom ist also gar nicht
+    // noetig. Zuvor stand hier zoom=262 (~+2.3%, rein kosmetische ~5px-
+    // Vergroesserung) - das zwang LVGL aber bei JEDEM Teil-Redraw ueber dem
+    // Hintergrund in den teuren Transformations-Renderpfad (Pixel einzeln
+    // skalieren + wahlfreier Flash-Zugriff auf die Quelldaten) statt in den
+    // schnellen 1:1-Blit. Da die Nadel-Updates (100 ms-Timer) staendig kleine
+    // Bereiche ueber diesem Bild neu zeichnen, wurde der gesamte BMW-Style-
+    // Screen dadurch spuerbar traege (Wischen kaum moeglich, Drehzahl-/Nadel-
+    // Aenderungen stark verzoegert) - der normale Multiview-Hintergrund
+    // (multi_bg_img) wird ohne Zoom gezeichnet und ist deshalb fluessig. Ohne
+    // Zoom fuellt das Foto den Schirm 1:1 und alle Redraws nehmen den schnellen
+    // Pfad. Kleiner y-Versatz bleibt (kostet nichts, verschiebt nur die Position).
     lv_obj_align(multi_bg_bmw_img_obj, LV_ALIGN_CENTER, 0, 4);
     lv_obj_add_flag(multi_bg_bmw_img_obj, LV_OBJ_FLAG_HIDDEN);
 
@@ -1996,9 +2028,12 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_meter_set_scale_range(multi_meter, multi_water_inner_scale,
                               MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
                               MULTI_WATER_ARC_RANGE, MULTI_WATER_ARC_ROTATION);
-    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -60);
-    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -60);
-    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -60);
+    // r_mod -48 (vormals -60): Bogen ~12px weiter nach aussen/unten, damit er
+    // naeher an der unteren gelben "HIGH TEMP"-Skala des Foto-Hintergrunds
+    // liegt (Nutzer-Rueckmeldung Foto v1.0.68).
+    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -48);
+    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -48);
+    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -48);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
@@ -2205,6 +2240,24 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_center(src_ble_lbl);
 
     update_source_btn_styles(); // Standard: BLE OBD (gruen) aktiv markieren
+
+    // Zweiter BMW-Style-Umschalter direkt auf dem Langdruck-/Demo-Screen (vom
+    // Nutzer gewuenscht): der Demo-Screen reagiert zuverlaessig, auch wenn der
+    // BMW-Style-Hauptscreen gerade traege ist - so laesst sich der Stil immer
+    // wieder abschalten, ohne erst per Doppeltipp in die Einstellungen zu muessen.
+    // Mittig unter der Button-Reihe, innerhalb der runden Displayaussparung.
+    lv_obj_t *demo_style_label = lv_label_create(scr_demo);
+    lv_label_set_text(demo_style_label, "BMW Style");
+    lv_obj_set_style_text_color(demo_style_label, lv_color_white(), 0);
+    lv_obj_align(demo_style_label, LV_ALIGN_TOP_MID, -34, 95);
+
+    lv_obj_t *demo_style_switch = lv_switch_create(scr_demo);
+    lv_obj_align(demo_style_switch, LV_ALIGN_TOP_MID, 45, 93);
+    lv_obj_add_event_cb(demo_style_switch, bmw_style_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    g_bmw_style_sw[1] = demo_style_switch;
+    if (g_bmw_style_enabled) {
+        lv_obj_add_state(demo_style_switch, LV_STATE_CHECKED);
+    }
 
     create_settings_screen();
     create_settings_func_screen();
