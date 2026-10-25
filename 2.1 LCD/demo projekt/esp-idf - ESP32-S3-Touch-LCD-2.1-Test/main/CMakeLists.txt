@@ -10,6 +10,7 @@ idf_component_register(
                               "QMI8658/QMI8658.c"
                               "SD_Card/SD_MMC.c"
                               "SD_Card/sd_log.c"
+                              "SD_Card/sd_update.c"
                               "LVGL_UI/LVGL_Example.c"
                               "Wireless/Wireless.c"
                               "Buzzer/Buzzer.c"

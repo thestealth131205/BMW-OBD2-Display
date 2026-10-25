@@ -11,6 +11,7 @@
 #include "CST820.h"
 #include "SD_MMC.h"
 #include "sd_log.h"
+#include "sd_update.h"
 #include "LVGL_Driver.h"
 #include "LVGL_Example.h"
 #include "Wireless.h"
@@ -132,6 +133,13 @@ void app_main(void)
     SD_Init();
     SD_Log_Init();
     log_and_clear_coredump();
+
+    // Liegt eine update.bin im Root der SD-Karte, wird sie hier als neue
+    // Firmware eingespielt und danach in update.backup umbenannt - bei Erfolg
+    // startet das Geraet selbst neu und kehrt aus app_main() nicht zurueck.
+    // Deshalb so frueh wie moeglich (direkt nach SD-Mount/Log-Init), bevor
+    // LVGL/CAN/BLE unnoetig initialisiert werden.
+    SD_Update_CheckAndApply();
 
     // OS-Flag (Bit 7 Sekunden-Register) des PCF85063: wird vom Chip selbst
     // gesetzt, wenn die Pufferversorgung (RTC-Batterie) mal eingebrochen ist
