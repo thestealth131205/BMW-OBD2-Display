@@ -409,6 +409,97 @@ static void get_small_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, 
 // bevor BMW_UI_Init() aufgerufen wird. ---
 #define BMW_SETTINGS_NVS_NS "bmw_set"
 
+// Pfad muss zu WIFI_CONFIG_PATH in sntp_sync.c / OTA_WEB_WIFI_CONFIG_PATH in
+// ota_web.c passen - bewusst hier dupliziert statt ueber einen Header geteilt
+// (gleiches Muster wie dort). Das Standard-Layout (g_bmw_style_enabled) wird
+// zusaetzlich zu NVS als "LAYOUT=NORMAL"/"LAYOUT=BMW" in dieser Datei
+// gespiegelt, damit es sich auch ueber die OTA-Weboberflaeche (Dropdown +
+// Speichern-Button) aendern laesst, ohne das Geraet anzufassen.
+#define BMW_UI_WIFI_CONFIG_PATH "/sdcard/wifi-einstellungen.txt"
+#define BMW_UI_WIFI_CFG_MAX_LINES 40
+
+// Zeilenpuffer fuer save_startup_layout_to_sd() - bewusst statisch (nicht auf
+// dem Stack), analog zu s_wifi_cfg_lines in ota_web.c.
+static char s_layout_cfg_lines[BMW_UI_WIFI_CFG_MAX_LINES][160];
+
+// Schreibt den aktuellen g_bmw_style_enabled-Zustand als LAYOUT=NORMAL/BMW in
+// die Hotspot-Konfigurationsdatei auf der SD-Karte. Vorhandene Zeilen (SSID/
+// PASSWORT/Kommentare) bleiben erhalten - nur LAYOUT=... wird ersetzt bzw. am
+// Ende ergaenzt, analog zu write_wifi_config() in ota_web.c.
+static void save_startup_layout_to_sd(void)
+{
+    if (!SD_EnsureMounted()) {
+        return; // keine Karte - NVS (siehe bmw_settings_save()) bleibt die einzige Quelle
+    }
+
+    int line_count = 0;
+    FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
+    if (f) {
+        while (line_count < BMW_UI_WIFI_CFG_MAX_LINES &&
+               fgets(s_layout_cfg_lines[line_count], sizeof(s_layout_cfg_lines[0]), f)) {
+            line_count++;
+        }
+        fclose(f);
+    }
+
+    f = fopen(BMW_UI_WIFI_CONFIG_PATH, "w");
+    if (!f) {
+        SD_Log("BMW_UI: Konfigurationsdatei fuer Standard-Layout nicht beschreibbar (errno=%d: %s)",
+               errno, strerror(errno));
+        return;
+    }
+
+    const char *layout = g_bmw_style_enabled ? "BMW" : "NORMAL";
+    bool layout_written = false;
+    for (int i = 0; i < line_count; i++) {
+        char *p = s_layout_cfg_lines[i];
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "LAYOUT=", 7) == 0) {
+            fprintf(f, "LAYOUT=%s\r\n", layout);
+            layout_written = true;
+        } else {
+            fputs(s_layout_cfg_lines[i], f);
+        }
+    }
+    if (!layout_written) fprintf(f, "LAYOUT=%s\r\n", layout);
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+}
+
+// Liest LAYOUT=NORMAL/BMW aus derselben Konfigurationsdatei, rein lesend und
+// ohne sie bei Fehlen anzulegen (das macht sntp_sync.c bereits beim ersten
+// "Hotspot verbinden"-Versuch). Ueberschreibt bei vorhandenem, gueltigem Wert
+// den aus NVS geladenen Zustand - so wird eine ueber die OTA-Weboberflaeche
+// geaenderte Layout-Auswahl auch wirksam, wenn nie am Touch umgeschaltet wurde.
+static void load_startup_layout_from_sd(void)
+{
+    if (!SD_EnsureMounted()) {
+        return;
+    }
+    FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
+    if (!f) {
+        return;
+    }
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "LAYOUT=", 7) != 0) continue;
+        p += 7;
+        char *nl = strpbrk(p, "\r\n");
+        if (nl) *nl = '\0';
+        if (strcmp(p, "BMW") == 0) {
+            g_bmw_style_enabled = true;
+        } else if (strcmp(p, "NORMAL") == 0) {
+            g_bmw_style_enabled = false;
+        }
+        break;
+    }
+    fclose(f);
+}
+
 static void bmw_settings_save(void)
 {
     nvs_handle_t h;
@@ -478,6 +569,10 @@ static void bmw_settings_load(void)
     if (nvs_get_u8(h, "bmw_style", &v) == ESP_OK) {
         g_bmw_style_enabled = (v != 0);
     }
+    // Ueberschreibt den NVS-Wert, falls die SD-Karte eine explizite LAYOUT=
+    // Zeile enthaelt (z.B. ueber die OTA-Weboberflaeche gesetzt) - siehe
+    // Kommentar an load_startup_layout_from_sd().
+    load_startup_layout_from_sd();
     if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
         g_buzzer_enabled = (v != 0);
     }
@@ -1034,6 +1129,7 @@ static void bmw_style_switch_cb(lv_event_t *e)
     apply_bmw_style(g_bmw_style_enabled);
     sync_bmw_style_switches();
     bmw_settings_save();
+    save_startup_layout_to_sd();
 }
 
 // Warnsummer bei Kuehlmitteltemperatur >= 120 Grad (siehe BMW_UI_Update()),

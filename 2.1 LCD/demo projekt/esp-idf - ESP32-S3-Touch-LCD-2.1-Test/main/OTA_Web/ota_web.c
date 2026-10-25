@@ -43,6 +43,12 @@
 #define OTA_WEB_WIFI_CONFIG_PATH "/sdcard/wifi-einstellungen.txt"
 #define OTA_WEB_WIFI_CFG_MAX_LINES 40
 
+// Werte des neuen "LAYOUT="-Schluessels in derselben Datei - muss zu den
+// Strings in bmw_ui.c (g_bmw_style_enabled, load_startup_layout_from_sd()/
+// save_startup_layout_to_sd()) passen.
+#define OTA_WEB_LAYOUT_NORMAL "NORMAL"
+#define OTA_WEB_LAYOUT_BMW    "BMW"
+
 static httpd_handle_t s_server = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_enabled = false;
@@ -77,15 +83,16 @@ static char s_wifi_cfg_lines[OTA_WEB_WIFI_CFG_MAX_LINES][160];
 // Einfache Upload-Seite: Dateiauswahl + XHR-Upload (rohe Bytes als Body,
 // kein multipart/form-data noetig) mit Fortschrittsanzeige im Browser.
 // Dient gleichzeitig als snprintf()-Formatstring fuer root_get_handler()
-// (siehe die zwei "%s" fuer SSID/Passwort unten) - alle woertlichen '%'
-// muessen deshalb als "%%" escaped werden (z.B. in den CSS-Breitenangaben).
+// (siehe die vier "%s" fuer SSID/Passwort und die beiden "selected"-Attribute
+// des Layout-Dropdowns unten) - alle woertlichen '%' muessen deshalb als "%%"
+// escaped werden (z.B. in den CSS-Breitenangaben).
 static const char OTA_WEB_PAGE[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'>"
 "<meta name='viewport' content='width=device-width, initial-scale=1'>"
 "<title>BMW Display Update</title>"
 "<style>body{font-family:sans-serif;background:#111;color:#eee;text-align:center;padding:30px}"
 "button{font-size:18px;padding:10px 24px;margin-top:16px;background:#2962ff;color:#fff;border:none;border-radius:6px}"
-"input[type=text]{font-size:16px;padding:8px;margin-top:8px;width:80%%;max-width:300px;"
+"input[type=text],select{font-size:16px;padding:8px;margin-top:8px;width:80%%;max-width:300px;"
 "background:#222;color:#eee;border:1px solid #444;border-radius:4px}"
 "progress{width:90%%;height:22px;margin-top:20px}"
 "hr{border-color:#333;margin-top:30px}</style></head><body>"
@@ -105,6 +112,16 @@ static const char OTA_WEB_PAGE[] =
 "<input type='text' id='wpass' placeholder='Passwort' value='%s'></p>"
 "<button onclick='saveWifi()'>WLAN-Daten speichern</button>"
 "<p id='ws'></p>"
+"<hr>"
+"<h3>Standard-Layout</h3>"
+"<p>Welche Multi-Kachel-Darstellung beim Einschalten des Displays geladen "
+"wird (entspricht dem Schalter &quot;BMW Style&quot; im Funktionen-Screen).</p>"
+"<p><select id='layout'>"
+"<option value='NORMAL'%s>Normal (Multi-Kachel)</option>"
+"<option value='BMW'%s>BMW Style (Foto-Tacho)</option>"
+"</select></p>"
+"<button onclick='saveLayout()'>Layout speichern</button>"
+"<p id='ls'></p>"
 "<script>"
 "function up(){"
 "var f=document.getElementById('f').files[0];"
@@ -127,6 +144,15 @@ static const char OTA_WEB_PAGE[] =
 "x.onload=function(){document.getElementById('ws').innerText=x.responseText;};"
 "x.onerror=function(){document.getElementById('ws').innerText='Uebertragungsfehler';};"
 "x.send('ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p));"
+"}"
+"function saveLayout(){"
+"var l=document.getElementById('layout').value;"
+"var x=new XMLHttpRequest();"
+"x.open('POST','/layout',true);"
+"x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
+"x.onload=function(){document.getElementById('ls').innerText=x.responseText;};"
+"x.onerror=function(){document.getElementById('ls').innerText='Uebertragungsfehler';};"
+"x.send('layout='+encodeURIComponent(l));"
 "}"
 "</script></body></html>";
 
@@ -233,6 +259,71 @@ static bool write_wifi_config(const char *ssid, const char *pass)
     return true;
 }
 
+// Liest LAYOUT= aus derselben Konfigurationsdatei (siehe read_wifi_config()
+// oben) - rein lesend, Default "NORMAL" falls Zeile fehlt/Datei nicht existiert.
+static void read_layout_config(char *layout, size_t layout_len)
+{
+    strlcpy(layout, OTA_WEB_LAYOUT_NORMAL, layout_len);
+    FILE *f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "r");
+    if (!f) {
+        return;
+    }
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "LAYOUT=", 7) != 0) continue;
+        p += 7;
+        char *nl = strpbrk(p, "\r\n");
+        if (nl) *nl = '\0';
+        strlcpy(layout, p, layout_len);
+        break;
+    }
+    fclose(f);
+}
+
+// Schreibt LAYOUT=NORMAL/BMW in die Hotspot-Konfigurationsdatei. Vorhandene
+// Zeilen (SSID/PASSWORT/Kommentare) bleiben erhalten - analog zu
+// write_wifi_config() oben, nutzt denselben Zeilenpuffer (nie gleichzeitig
+// mit write_wifi_config() aufgerufen, da pro HTTP-Request sequenziell).
+static bool write_layout_config(const char *layout)
+{
+    int line_count = 0;
+    FILE *f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "r");
+    if (f) {
+        while (line_count < OTA_WEB_WIFI_CFG_MAX_LINES &&
+               fgets(s_wifi_cfg_lines[line_count], sizeof(s_wifi_cfg_lines[0]), f)) {
+            line_count++;
+        }
+        fclose(f);
+    }
+
+    f = fopen(OTA_WEB_WIFI_CONFIG_PATH, "w");
+    if (!f) {
+        SD_Log("OTA_WEB: Konfigurationsdatei fuer Standard-Layout nicht beschreibbar (errno=%d: %s)",
+               errno, strerror(errno));
+        return false;
+    }
+
+    bool layout_written = false;
+    for (int i = 0; i < line_count; i++) {
+        char *p = s_wifi_cfg_lines[i];
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "LAYOUT=", 7) == 0) {
+            fprintf(f, "LAYOUT=%s\r\n", layout);
+            layout_written = true;
+        } else {
+            fputs(s_wifi_cfg_lines[i], f);
+        }
+    }
+    if (!layout_written) fprintf(f, "LAYOUT=%s\r\n", layout);
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    return true;
+}
+
 // Minimaler Prozent-/Plus-Dekoder fuer application/x-www-form-urlencoded -
 // der schlanke esp_http_server dieses Projekts bringt keinen eigenen
 // Formular-Parser mit.
@@ -287,8 +378,14 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     html_escape(ssid, ssid_esc, sizeof(ssid_esc));
     html_escape(pass, pass_esc, sizeof(pass_esc));
 
-    static char page_buf[sizeof(OTA_WEB_PAGE) + sizeof(ssid_esc) + sizeof(pass_esc)];
-    int n = snprintf(page_buf, sizeof(page_buf), OTA_WEB_PAGE, ssid_esc, pass_esc);
+    char layout[16];
+    read_layout_config(layout, sizeof(layout));
+    bool layout_is_bmw = (strcmp(layout, OTA_WEB_LAYOUT_BMW) == 0);
+    const char *sel_normal = layout_is_bmw ? "" : " selected";
+    const char *sel_bmw    = layout_is_bmw ? " selected" : "";
+
+    static char page_buf[sizeof(OTA_WEB_PAGE) + sizeof(ssid_esc) + sizeof(pass_esc) + 32];
+    int n = snprintf(page_buf, sizeof(page_buf), OTA_WEB_PAGE, ssid_esc, pass_esc, sel_normal, sel_bmw);
     if (n < 0) {
         n = 0;
     } else if ((size_t)n >= sizeof(page_buf)) {
@@ -338,6 +435,49 @@ static esp_err_t wifi_cfg_post_handler(httpd_req_t *req)
 
     SD_Log("OTA_WEB: Hotspot-WLAN-Zugangsdaten ueber Weboberflaeche aktualisiert (SSID=%s)", ssid);
     httpd_resp_sendstr(req, "OK - Zugangsdaten gespeichert");
+    return ESP_OK;
+}
+
+// Nimmt die Dropdown-Auswahl der Update-Seite entgegen und schreibt sie als
+// LAYOUT= in dieselbe Datei, die bmw_ui.c beim naechsten Start liest (siehe
+// load_startup_layout_from_sd()) - wirkt also erst nach einem Neustart des
+// Displays, nicht sofort auf dem laufenden Bildschirm.
+static esp_err_t layout_cfg_post_handler(httpd_req_t *req)
+{
+    static char body[128];
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Ungueltige Laenge");
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    while (received < len) {
+        int r = httpd_req_recv(req, body + received, len - received);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Empfang fehlgeschlagen");
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    body[received] = '\0';
+
+    char layout[16];
+    extract_form_field(body, "layout", layout, sizeof(layout));
+    const char *layout_norm = (strcmp(layout, OTA_WEB_LAYOUT_BMW) == 0)
+                                  ? OTA_WEB_LAYOUT_BMW : OTA_WEB_LAYOUT_NORMAL;
+
+    if (!write_layout_config(layout_norm)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Speichern fehlgeschlagen (SD-Karte fehlt/nicht beschreibbar?)");
+        return ESP_FAIL;
+    }
+
+    SD_Log("OTA_WEB: Standard-Layout ueber Weboberflaeche aktualisiert (LAYOUT=%s)", layout_norm);
+    httpd_resp_sendstr(req, "OK - Layout gespeichert (wirkt nach Neustart)");
     return ESP_OK;
 }
 
@@ -566,7 +706,7 @@ static bool start_ap_and_server(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    config.max_uri_handlers = 5;
+    config.max_uri_handlers = 6;
     config.lru_purge_enable = true;
 
     err = httpd_start(&s_server, &config);
@@ -595,6 +735,11 @@ static bool start_ap_and_server(void)
         .uri = "/wifi", .method = HTTP_POST, .handler = wifi_cfg_post_handler, .user_ctx = NULL
     };
     httpd_register_uri_handler(s_server, &wifi_cfg_uri);
+
+    httpd_uri_t layout_cfg_uri = {
+        .uri = "/layout", .method = HTTP_POST, .handler = layout_cfg_post_handler, .user_ctx = NULL
+    };
+    httpd_register_uri_handler(s_server, &layout_cfg_uri);
 
     SD_Log("OTA_WEB: Access Point aktiv (SSID=%s)", OTA_WEB_SSID);
     return true;

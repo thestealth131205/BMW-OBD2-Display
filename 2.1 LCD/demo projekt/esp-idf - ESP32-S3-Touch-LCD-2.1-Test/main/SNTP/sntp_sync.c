@@ -125,7 +125,12 @@ static wifi_cfg_result_t load_or_create_wifi_config(char *ssid, size_t ssid_len,
             "# PASSWORT=MeinPasswort123\r\n"
             "\r\n"
             "SSID=\r\n"
-            "PASSWORT=\r\n");
+            "PASSWORT=\r\n"
+            "\r\n"
+            "# Standard-Layout der Multi-Kachel beim Einschalten: NORMAL oder BMW\r\n"
+            "# (entspricht dem Schalter 'BMW Style' im Funktionen-Screen bzw. dem\r\n"
+            "# Dropdown auf der Update-Weboberflaeche).\r\n"
+            "LAYOUT=NORMAL\r\n");
         fflush(f);
         fsync(fileno(f));
         fclose(f);
