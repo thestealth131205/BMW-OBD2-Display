@@ -36,10 +36,16 @@ jobs:
         run: |
           BUILD_DIR="$PROJECT_DIR/build"
           pip install --upgrade esptool
+          # otadata (0xf000, 0x2000) blank/0xFF erzeugen: der Bootloader interpretiert eine
+          # ungültige/leere otadata-Partition als "starte ota_0" - ohne das würde ein PC-Flash
+          # dieser merged-bin den zuvor per OTA (SD-Karte/WLAN) gesetzten Boot-Slot (ota_1)
+          # unverändert lassen und die frisch geflashte ota_0-Firmware nie booten.
+          python3 -c "open('otadata-blank.bin','wb').write(b'\xff' * 0x2000)"
           esptool --chip esp32s3 merge_bin -o s3-artifacts/firmware-s3-merged.bin \
             --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0     "$BUILD_DIR/bootloader/bootloader.bin" \
             0x8000  "$BUILD_DIR/partition_table/partition-table.bin" \
+            0xf000  otadata-blank.bin \
             0x20000 "$BUILD_DIR/ESP32-S3-Touch-LCD-2.1.bin"
 
       - name: Read firmware version
