@@ -673,6 +673,8 @@ static void clear_datalog_boot_counter(void)
 
 // 3-Sekunden-Halten in der Bildschirmmitte -> Demo-Seite anzeigen,
 // Doppeltipp in der Mitte -> Einstellungs-Screen (Farben) anzeigen.
+static lv_obj_t *center_hold;
+
 static void center_touch_cb(lv_event_t *e)
 {
     static uint32_t press_start = 0;
@@ -1039,6 +1041,11 @@ static void apply_bmw_style(bool on)
     if (multi_bg_bmw_img_obj) lv_obj_move_background(multi_bg_bmw_img_obj);
     if (multi_meter)          lv_obj_move_foreground(multi_meter);
     if (multi_bmw_water_meter) lv_obj_move_foreground(multi_bmw_water_meter);
+    // Das unsichtbare Center-Overlay (3s-Halten/Doppeltipp) muss trotzdem
+    // immer ganz oben bleiben - seit v1.0.68 lagen die Nadel-Meter (450x450,
+    // in LVGL standardmaessig klickbar) darueber und haben alle Touches in
+    // der Mitte abgefangen. Es ist transparent, verdeckt optisch also nichts.
+    if (center_hold)          lv_obj_move_foreground(center_hold);
 
     // Geschwindigkeit: normal gross mittig, im BMW-Style klein oben (Stelle
     // des mittleren gruenen Kreises im Vorbildfoto) - "KM/H" dort ausgeblendet,
@@ -2081,6 +2088,9 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_center(multi_meter);
     lv_obj_set_size(multi_meter, 450, 450);
     lv_obj_clear_flag(multi_meter, LV_OBJ_FLAG_SCROLLABLE);
+    // Reine Anzeige - nicht klickbar, damit Touches/Wischgesten nie vom
+    // Meter abgefangen werden (siehe center_hold / apply_bmw_style()).
+    lv_obj_clear_flag(multi_meter, LV_OBJ_FLAG_CLICKABLE);
 
     // Multi-Nadel in der eingestellten Sekundaerfarbe (Standard: Rot) + weisses Hub-Cap
     const lv_img_dsc_t *init_needle_img;
@@ -2249,6 +2259,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_size(multi_bmw_water_meter, MULTI_BMW_WATER_METER_SIZE, MULTI_BMW_WATER_METER_SIZE);
     lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 120);
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
 
     // rotation=MULTI_WATER_NEEDLE_ROTATION + range=MULTI_WATER_ARC_RANGE (110
@@ -2277,16 +2288,18 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_clear_flag(bmw_water_hub, LV_OBJ_FLAG_CLICKABLE);
 
     // Unsichtbares Center-Overlay: 3-Sekunden-Halten -> Demo-Seite,
-    // Doppeltipp -> Einstellungs-Screen (Farben). Vergroessert (160 -> 260),
-    // da der Treffbereich dem Nutzer zu klein war.
-    lv_obj_t *center_hold = lv_obj_create(scr_multi);
-    lv_obj_set_size(center_hold, 260, 260);
+    // Doppeltipp -> Einstellungs-Screen (Farben). Vergroessert (160 -> 260
+    // -> 360), da der Treffbereich dem Nutzer zu klein war. Wischgesten
+    // funktionieren weiterhin, da sie zu scr_multi hochblubbern.
+    center_hold = lv_obj_create(scr_multi);
+    lv_obj_set_size(center_hold, 360, 360);
     lv_obj_center(center_hold);
     lv_obj_set_style_bg_opa(center_hold, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(center_hold, 0, 0);
     lv_obj_clear_flag(center_hold, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(center_hold, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(center_hold, center_touch_cb, LV_EVENT_ALL, NULL);
+    lv_obj_move_foreground(center_hold);
 
     // Wisch nach links -> Fehlercode-Screen
     lv_obj_add_event_cb(scr_multi, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
