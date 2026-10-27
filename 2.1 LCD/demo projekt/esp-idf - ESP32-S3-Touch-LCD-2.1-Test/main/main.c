@@ -134,6 +134,14 @@ void app_main(void)
     SD_Log_Init();
     log_and_clear_coredump();
 
+    // Legt /sdcard/wifi-einstellungen.txt (SSID/PASSWORT/LAYOUT/DATALOGGING)
+    // an, falls sie auf dieser Karte noch fehlt - bisher entstand sie erst
+    // beim ersten "Hotspot verbinden"-Versuch, wurde also auf einer nie dafuer
+    // genutzten Karte nie angelegt. So frueh wie moeglich (direkt nach
+    // SD_Log_Init()), damit Layout/Datenlogging von der allerersten Boot-
+    // Sitzung an per SD-Karte vorkonfigurierbar sind.
+    SNTP_Sync_EnsureConfigFile();
+
     // Liegt eine update.bin im Root der SD-Karte, wird sie hier als neue
     // Firmware eingespielt und danach in update.backup umbenannt - bei Erfolg
     // startet das Geraet selbst neu und kehrt aus app_main() nicht zurueck.

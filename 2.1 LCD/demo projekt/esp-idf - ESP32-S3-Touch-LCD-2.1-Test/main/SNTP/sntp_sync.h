@@ -34,6 +34,13 @@
 // sntp_sync.c).
 void SNTP_Sync_Init(void);
 
+// Legt /sdcard/wifi-einstellungen.txt inkl. Vorlage (SSID/PASSWORT/LAYOUT/
+// DATALOGGING) an, falls die Karte gemountet ist und die Datei noch fehlt -
+// OHNE einen Verbindungsversuch auszuloesen. Frueh in app_main() aufrufen
+// (nach SD_Log_Init()), damit die Datei unabhaengig vom "Hotspot verbinden"-
+// Schalter von Anfang an existiert und bearbeitet werden kann.
+void SNTP_Sync_EnsureConfigFile(void);
+
 // Loest einen Verbindungs-/Zeitabgleichsversuch im bereits laufenden
 // Hintergrund-Task aus, sofern nicht schon einer laeuft. Nicht blockierend.
 void SNTP_Sync_Start(void);

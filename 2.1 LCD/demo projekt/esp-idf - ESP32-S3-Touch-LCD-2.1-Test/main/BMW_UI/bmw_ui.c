@@ -418,8 +418,10 @@ static void get_small_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, 
 #define BMW_UI_WIFI_CONFIG_PATH "/sdcard/wifi-einstellungen.txt"
 #define BMW_UI_WIFI_CFG_MAX_LINES 40
 
-// Zeilenpuffer fuer save_startup_layout_to_sd() - bewusst statisch (nicht auf
-// dem Stack), analog zu s_wifi_cfg_lines in ota_web.c.
+// Zeilenpuffer fuer save_startup_layout_to_sd()/save_startup_datalogging_to_sd()
+// - bewusst statisch (nicht auf dem Stack), analog zu s_wifi_cfg_lines in
+// ota_web.c. Nicht gleichzeitig genutzt (beide laufen nur synchron im
+// LVGL-Event-Callback), daher unbedenklich geteilt.
 static char s_layout_cfg_lines[BMW_UI_WIFI_CFG_MAX_LINES][160];
 
 // Schreibt den aktuellen g_bmw_style_enabled-Zustand als LAYOUT=NORMAL/BMW in
@@ -500,6 +502,81 @@ static void load_startup_layout_from_sd(void)
     fclose(f);
 }
 
+// Schreibt den aktuellen g_datalog_enabled-Zustand als DATALOGGING=1/0 in die
+// Hotspot-Konfigurationsdatei auf der SD-Karte - analog zu
+// save_startup_layout_to_sd() oben, nur mit dem anderen Schluessel.
+static void save_startup_datalogging_to_sd(void)
+{
+    if (!SD_EnsureMounted()) {
+        return; // keine Karte - NVS (siehe bmw_settings_save()) bleibt die einzige Quelle
+    }
+
+    int line_count = 0;
+    FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
+    if (f) {
+        while (line_count < BMW_UI_WIFI_CFG_MAX_LINES &&
+               fgets(s_layout_cfg_lines[line_count], sizeof(s_layout_cfg_lines[0]), f)) {
+            line_count++;
+        }
+        fclose(f);
+    }
+
+    f = fopen(BMW_UI_WIFI_CONFIG_PATH, "w");
+    if (!f) {
+        SD_Log("BMW_UI: Konfigurationsdatei fuer Datenlogging nicht beschreibbar (errno=%d: %s)",
+               errno, strerror(errno));
+        return;
+    }
+
+    bool datalog_written = false;
+    for (int i = 0; i < line_count; i++) {
+        char *p = s_layout_cfg_lines[i];
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "DATALOGGING=", 12) == 0) {
+            fprintf(f, "DATALOGGING=%d\r\n", g_datalog_enabled ? 1 : 0);
+            datalog_written = true;
+        } else {
+            fputs(s_layout_cfg_lines[i], f);
+        }
+    }
+    if (!datalog_written) fprintf(f, "DATALOGGING=%d\r\n", g_datalog_enabled ? 1 : 0);
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+}
+
+// Liest DATALOGGING=1/0 aus derselben Konfigurationsdatei, rein lesend und
+// ohne sie bei Fehlen anzulegen (das macht SNTP_Sync_EnsureConfigFile() beim
+// Boot bereits, siehe main.c). Ueberschreibt bei vorhandenem, gueltigem Wert
+// den aus NVS geladenen Zustand - analog zu load_startup_layout_from_sd().
+static void load_startup_datalogging_from_sd(void)
+{
+    if (!SD_EnsureMounted()) {
+        return;
+    }
+    FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
+    if (!f) {
+        return;
+    }
+    char line[160];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "DATALOGGING=", 12) != 0) continue;
+        p += 12;
+        char *nl = strpbrk(p, "\r\n");
+        if (nl) *nl = '\0';
+        if (strcmp(p, "1") == 0) {
+            g_datalog_enabled = true;
+        } else if (strcmp(p, "0") == 0) {
+            g_datalog_enabled = false;
+        }
+        break;
+    }
+    fclose(f);
+}
+
 static void bmw_settings_save(void)
 {
     nvs_handle_t h;
@@ -573,6 +650,8 @@ static void bmw_settings_load(void)
     // Zeile enthaelt (z.B. ueber die OTA-Weboberflaeche gesetzt) - siehe
     // Kommentar an load_startup_layout_from_sd().
     load_startup_layout_from_sd();
+    // Dasselbe fuer DATALOGGING= - siehe load_startup_datalogging_from_sd().
+    load_startup_datalogging_from_sd();
     if (nvs_get_u8(h, "buzzer_en", &v) == ESP_OK) {
         g_buzzer_enabled = (v != 0);
     }
@@ -913,6 +992,7 @@ static void log_switch_cb(lv_event_t *e)
         stop_datalogging();
     }
     bmw_settings_save();
+    save_startup_datalogging_to_sd();
 }
 
 // --- SD-Karte formatieren: fuer den Fall, dass die Karte unformatiert/

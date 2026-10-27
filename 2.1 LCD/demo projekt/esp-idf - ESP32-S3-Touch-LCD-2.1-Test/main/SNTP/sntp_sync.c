@@ -130,7 +130,11 @@ static wifi_cfg_result_t load_or_create_wifi_config(char *ssid, size_t ssid_len,
             "# Standard-Layout der Multi-Kachel beim Einschalten: NORMAL oder BMW\r\n"
             "# (entspricht dem Schalter 'BMW Style' im Funktionen-Screen bzw. dem\r\n"
             "# Dropdown auf der Update-Weboberflaeche).\r\n"
-            "LAYOUT=NORMAL\r\n");
+            "LAYOUT=NORMAL\r\n"
+            "\r\n"
+            "# Datenlogging auf CSV-Dateien beim Einschalten: 1=an, 0=aus\r\n"
+            "# (entspricht dem Schalter 'Datenlogging' im Funktionen-Screen).\r\n"
+            "DATALOGGING=0\r\n");
         fflush(f);
         fsync(fileno(f));
         fclose(f);
@@ -341,6 +345,22 @@ static void sntp_sync_task(void *arg)
         xSemaphoreTake(s_start_sem, portMAX_DELAY);
         do_sync_attempt();
     }
+}
+
+// Legt die Vorlage von /sdcard/wifi-einstellungen.txt an, falls sie noch
+// fehlt - OHNE einen Verbindungsversuch auszuloesen. Bisher entstand diese
+// Datei erst beim ERSTEN "Hotspot verbinden"-Versuch (siehe
+// load_or_create_wifi_config() oben); auf einer frisch eingelegten Karte, die
+// nie fuer den Zeitabgleich genutzt wird, fehlte sie dadurch dauerhaft, obwohl
+// sie auch die LAYOUT=/DATALOGGING=-Schluessel enthaelt. Wird einmalig frueh
+// in app_main() aufgerufen, direkt nach SD_Log_Init(), damit die Datei (und
+// damit die Moeglichkeit, Layout/Datenlogging per SD-Karte vorzukonfigurieren)
+// unabhaengig vom Hotspot-Schalter von Anfang an existiert.
+void SNTP_Sync_EnsureConfigFile(void)
+{
+    char ssid[33];
+    char pass[65];
+    load_or_create_wifi_config(ssid, sizeof(ssid), pass, sizeof(pass));
 }
 
 void SNTP_Sync_Init(void)
