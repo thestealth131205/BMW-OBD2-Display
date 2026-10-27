@@ -143,6 +143,8 @@ static wifi_cfg_result_t load_or_create_wifi_config(char *ssid, size_t ssid_len,
     }
 
     char line[160];
+    bool has_layout = false;
+    bool has_datalogging = false;
     while (fgets(line, sizeof(line), f)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -155,9 +157,47 @@ static wifi_cfg_result_t load_or_create_wifi_config(char *ssid, size_t ssid_len,
             strlcpy(ssid, p + 5, ssid_len);
         } else if (strncmp(p, "PASSWORT=", 9) == 0) {
             strlcpy(pass, p + 9, pass_len);
+        } else if (strncmp(p, "LAYOUT=", 7) == 0) {
+            has_layout = true;
+        } else if (strncmp(p, "DATALOGGING=", 12) == 0) {
+            has_datalogging = true;
         }
     }
     fclose(f);
+
+    // Datei stammt evtl. noch aus einer aelteren Version (vor LAYOUT=/
+    // DATALOGGING= wurden erst in v1.0.70 bzw. v1.0.74 eingefuehrt) und kennt
+    // nur SSID=/PASSWORT=. Fehlende Schluessel hier per Anhaengen ("a", NICHT
+    // "w") ergaenzen, damit bereits eingetragene WLAN-Zugangsdaten nicht durch
+    // ein Ueberschreiben verloren gehen.
+    if (!has_layout || !has_datalogging) {
+        f = fopen(WIFI_CONFIG_PATH, "a");
+        if (!f) {
+            SD_Log("SNTP: %s konnte nicht um fehlende Schluessel erweitert werden (errno=%d: %s)",
+                   WIFI_CONFIG_PATH, errno, strerror(errno));
+        } else {
+            if (!has_layout) {
+                fprintf(f,
+                    "\r\n"
+                    "# Standard-Layout der Multi-Kachel beim Einschalten: NORMAL oder BMW\r\n"
+                    "# (entspricht dem Schalter 'BMW Style' im Funktionen-Screen bzw. dem\r\n"
+                    "# Dropdown auf der Update-Weboberflaeche).\r\n"
+                    "LAYOUT=NORMAL\r\n");
+            }
+            if (!has_datalogging) {
+                fprintf(f,
+                    "\r\n"
+                    "# Datenlogging auf CSV-Dateien beim Einschalten: 1=an, 0=aus\r\n"
+                    "# (entspricht dem Schalter 'Datenlogging' im Funktionen-Screen).\r\n"
+                    "DATALOGGING=0\r\n");
+            }
+            fflush(f);
+            fsync(fileno(f));
+            fclose(f);
+            SD_Log("SNTP: %s um fehlende Schluessel ergaenzt (LAYOUT neu=%d, DATALOGGING neu=%d)",
+                   WIFI_CONFIG_PATH, !has_layout, !has_datalogging);
+        }
+    }
 
     SD_Log("SNTP: %s gelesen, SSID %s", WIFI_CONFIG_PATH, strlen(ssid) > 0 ? "vorhanden" : "LEER");
     return strlen(ssid) > 0 ? WIFI_CFG_OK : WIFI_CFG_NEEDS_INPUT;
