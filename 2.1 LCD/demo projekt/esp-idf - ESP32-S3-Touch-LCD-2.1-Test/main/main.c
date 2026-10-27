@@ -134,6 +134,21 @@ void app_main(void)
     SD_Log_Init();
     log_and_clear_coredump();
 
+    // LVGL/Boot-Logo bewusst VOR die beiden SD-Schritte unten vorgezogen (bis
+    // v1.0.75 liefen sie erst danach, siehe LVGL_Init()/show_boot_logo() weiter
+    // unten im Original): Seit v1.0.69-71 blieb der Bildschirm bei manchen
+    // Boots komplett schwarz, ohne dass ein neuer Log-Eintrag dazukam - der
+    // naechste SD-Zugriff (SNTP_Sync_EnsureConfigFile()/SD_Update_CheckAndApply())
+    // ist der einzige main.c-Unterschied zur zuletzt sicher funktionierenden
+    // v1.0.68. Mit dem Boot-Logo zuerst zeigt das Display jetzt IMMER
+    // mindestens das Logo, selbst falls einer der beiden SD-Schritte danach
+    // haengt - das grenzt beim naechsten Vorfall sofort ein (Logo sichtbar =
+    // Haenger danach, schwarz = Haenger noch frueher) und verschlimmert das
+    // eigentliche Problem nicht, da beide Funktionen ohnehin unabhaengig von
+    // LVGL sind.
+    LVGL_Init();
+    lv_obj_t *scr_boot = show_boot_logo();
+
     // Legt /sdcard/wifi-einstellungen.txt (SSID/PASSWORT/LAYOUT/DATALOGGING)
     // an, falls sie auf dieser Karte noch fehlt - bisher entstand sie erst
     // beim ersten "Hotspot verbinden"-Versuch, wurde also auf einer nie dafuer
@@ -171,10 +186,6 @@ void app_main(void)
     // SD_Log_Init(), damit die Init-Log-Zeile tatsaechlich auf der Karte
     // landet statt vor dessen Start zu verfallen.
     SNTP_Sync_Init();
-
-    LVGL_Init();
-
-    lv_obj_t *scr_boot = show_boot_logo();
 
     // OBD2 per MCP2515 (SPI) starten - liest PT-CAN-Broadcasts im Hintergrund
     CAN_OBD2_Init();

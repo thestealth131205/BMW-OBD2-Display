@@ -35,7 +35,11 @@ static void rename_to_backup(void)
 
 void SD_Update_CheckAndApply(void)
 {
-    if (!SD_Init_Done) {
+    // SD_Init_Done wird auch bei einem FEHLGESCHLAGENEN Mount auf true
+    // gesetzt (siehe SD_MMC.c: SD_Init()) - nur SDCard_Size > 0 zeigt einen
+    // tatsaechlich erfolgreichen Mount. Ohne diese Pruefung wuerde hier bei
+    // nicht gemounteter Karte trotzdem fopen() auf /sdcard versucht.
+    if (!SD_Init_Done || SDCard_Size == 0) {
         return;
     }
 
