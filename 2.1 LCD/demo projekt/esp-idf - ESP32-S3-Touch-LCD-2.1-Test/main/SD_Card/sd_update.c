@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include "freertos/FreeRTOS.h"
@@ -67,13 +68,28 @@ void SD_Update_CheckAndApply(void)
         return;
     }
 
-    static uint8_t buf[4096];
+    // Bewusst dynamisch statt "static": ein statischer Puffer würde diese
+    // 4 KB dauerhaft ab dem allerersten Boot im .bss-Segment reservieren,
+    // noch bevor WiFi/BLE/LCD überhaupt laufen - das hat zusammen mit dem
+    // ebenfalls neuen s_layout_cfg_lines in bmw_ui.c das interne RAM beim
+    // Boot um ~10,5 KB geschrumpft und den LCD-Treiber beim Anlegen seiner
+    // DMA-Puffer in ESP_ERR_NO_MEM/abort() laufen lassen (schwarzer
+    // Bildschirm seit v1.0.71). malloc()/free() gibt den Speicher sofort
+    // nach dieser einmaligen Nutzung wieder frei.
+    uint8_t *buf = malloc(4096);
+    if (!buf) {
+        SD_Log("SD_UPDATE: kein Speicher fuer Lesepuffer, Abbruch");
+        esp_ota_abort(ota_handle);
+        fclose(f);
+        rename_to_backup();
+        return;
+    }
     size_t received_total = 0;
     bool desc_checked = false;
     bool failed = false;
     size_t n;
 
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    while ((n = fread(buf, 1, 4096, f)) > 0) {
         err = esp_ota_write(ota_handle, buf, n);
         if (err != ESP_OK) {
             SD_Log("SD_UPDATE: esp_ota_write fehlgeschlagen: %s", esp_err_to_name(err));
@@ -96,6 +112,7 @@ void SD_Update_CheckAndApply(void)
             }
         }
     }
+    free(buf);
     if (!failed && ferror(f)) {
         SD_Log("SD_UPDATE: Lesefehler auf der SD-Karte beim Einlesen von update.bin");
         failed = true;

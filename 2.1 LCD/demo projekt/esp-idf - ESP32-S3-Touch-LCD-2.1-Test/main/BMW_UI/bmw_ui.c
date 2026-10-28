@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include "esp_timer.h"
 #include "esp_app_desc.h"
@@ -419,10 +420,16 @@ static void get_small_needle_img(const lv_img_dsc_t **img, lv_coord_t *pivot_x, 
 #define BMW_UI_WIFI_CFG_MAX_LINES 40
 
 // Zeilenpuffer fuer save_startup_layout_to_sd()/save_startup_datalogging_to_sd()
-// - bewusst statisch (nicht auf dem Stack), analog zu s_wifi_cfg_lines in
-// ota_web.c. Nicht gleichzeitig genutzt (beide laufen nur synchron im
-// LVGL-Event-Callback), daher unbedenklich geteilt.
-static char s_layout_cfg_lines[BMW_UI_WIFI_CFG_MAX_LINES][160];
+// - bewusst dynamisch (malloc/free) statt wie zuvor "static": ein statischer
+// 40x160-Puffer (6,4 KB) reserviert diesen Speicher dauerhaft ab dem
+// allerersten Boot im .bss-Segment, noch bevor WiFi/BLE/LCD ueberhaupt
+// laufen. Zusammen mit dem ebenfalls neuen "static"-Puffer in sd_update.c
+// hat das das verfuegbare interne RAM beim Boot um ~10,5 KB geschrumpft und
+// den LCD-Treiber beim Anlegen seiner DMA-Puffer in ESP_ERR_NO_MEM/abort()
+// laufen lassen (schwarzer Bildschirm seit v1.0.71) - diese Funktionen
+// laufen ohnehin nur kurz und synchron im LVGL-Event-Callback, der Speicher
+// wird direkt danach wieder freigegeben.
+#define BMW_UI_WIFI_CFG_LINE_LEN 160
 
 // Schreibt den aktuellen g_bmw_style_enabled-Zustand als LAYOUT=NORMAL/BMW in
 // die Hotspot-Konfigurationsdatei auf der SD-Karte. Vorhandene Zeilen (SSID/
@@ -434,11 +441,17 @@ static void save_startup_layout_to_sd(void)
         return; // keine Karte - NVS (siehe bmw_settings_save()) bleibt die einzige Quelle
     }
 
+    char (*lines)[BMW_UI_WIFI_CFG_LINE_LEN] = malloc(BMW_UI_WIFI_CFG_MAX_LINES * BMW_UI_WIFI_CFG_LINE_LEN);
+    if (!lines) {
+        SD_Log("BMW_UI: kein Speicher fuer Konfigurationsdatei-Zeilenpuffer");
+        return;
+    }
+
     int line_count = 0;
     FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
     if (f) {
         while (line_count < BMW_UI_WIFI_CFG_MAX_LINES &&
-               fgets(s_layout_cfg_lines[line_count], sizeof(s_layout_cfg_lines[0]), f)) {
+               fgets(lines[line_count], sizeof(lines[0]), f)) {
             line_count++;
         }
         fclose(f);
@@ -448,19 +461,20 @@ static void save_startup_layout_to_sd(void)
     if (!f) {
         SD_Log("BMW_UI: Konfigurationsdatei fuer Standard-Layout nicht beschreibbar (errno=%d: %s)",
                errno, strerror(errno));
+        free(lines);
         return;
     }
 
     const char *layout = g_bmw_style_enabled ? "BMW" : "NORMAL";
     bool layout_written = false;
     for (int i = 0; i < line_count; i++) {
-        char *p = s_layout_cfg_lines[i];
+        char *p = lines[i];
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "LAYOUT=", 7) == 0) {
             fprintf(f, "LAYOUT=%s\r\n", layout);
             layout_written = true;
         } else {
-            fputs(s_layout_cfg_lines[i], f);
+            fputs(lines[i], f);
         }
     }
     if (!layout_written) fprintf(f, "LAYOUT=%s\r\n", layout);
@@ -468,6 +482,7 @@ static void save_startup_layout_to_sd(void)
     fflush(f);
     fsync(fileno(f));
     fclose(f);
+    free(lines);
 }
 
 // Liest LAYOUT=NORMAL/BMW aus derselben Konfigurationsdatei, rein lesend und
@@ -511,11 +526,17 @@ static void save_startup_datalogging_to_sd(void)
         return; // keine Karte - NVS (siehe bmw_settings_save()) bleibt die einzige Quelle
     }
 
+    char (*lines)[BMW_UI_WIFI_CFG_LINE_LEN] = malloc(BMW_UI_WIFI_CFG_MAX_LINES * BMW_UI_WIFI_CFG_LINE_LEN);
+    if (!lines) {
+        SD_Log("BMW_UI: kein Speicher fuer Konfigurationsdatei-Zeilenpuffer");
+        return;
+    }
+
     int line_count = 0;
     FILE *f = fopen(BMW_UI_WIFI_CONFIG_PATH, "r");
     if (f) {
         while (line_count < BMW_UI_WIFI_CFG_MAX_LINES &&
-               fgets(s_layout_cfg_lines[line_count], sizeof(s_layout_cfg_lines[0]), f)) {
+               fgets(lines[line_count], sizeof(lines[0]), f)) {
             line_count++;
         }
         fclose(f);
@@ -525,18 +546,19 @@ static void save_startup_datalogging_to_sd(void)
     if (!f) {
         SD_Log("BMW_UI: Konfigurationsdatei fuer Datenlogging nicht beschreibbar (errno=%d: %s)",
                errno, strerror(errno));
+        free(lines);
         return;
     }
 
     bool datalog_written = false;
     for (int i = 0; i < line_count; i++) {
-        char *p = s_layout_cfg_lines[i];
+        char *p = lines[i];
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "DATALOGGING=", 12) == 0) {
             fprintf(f, "DATALOGGING=%d\r\n", g_datalog_enabled ? 1 : 0);
             datalog_written = true;
         } else {
-            fputs(s_layout_cfg_lines[i], f);
+            fputs(lines[i], f);
         }
     }
     if (!datalog_written) fprintf(f, "DATALOGGING=%d\r\n", g_datalog_enabled ? 1 : 0);
@@ -544,6 +566,7 @@ static void save_startup_datalogging_to_sd(void)
     fflush(f);
     fsync(fileno(f));
     fclose(f);
+    free(lines);
 }
 
 // Liest DATALOGGING=1/0 aus derselben Konfigurationsdatei, rein lesend und
