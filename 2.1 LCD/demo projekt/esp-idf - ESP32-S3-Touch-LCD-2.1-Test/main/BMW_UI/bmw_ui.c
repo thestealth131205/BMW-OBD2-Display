@@ -113,9 +113,16 @@ static float current_water_temp      = 105.0f;
 #define MULTI_WATER_RING_RED_AT    115
 
 // Derselbe Farbring im Drehzahl-Modus der grossen Anzeige: Neongelb bis
-// 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min).
+// 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min). Ab Erreichen
+// von MULTI_RPM_RING_ORANGE_AT blinkt der komplette Ring stattdessen rot
+// (statt der gestaffelten Segmente) - der Blinktakt wird dabei linear
+// schneller, je naeher die Drehzahl an MULTI_RPM_LIMITER (Drehzahlbegrenzer)
+// liegt.
 #define MULTI_RPM_RING_ORANGE_AT  6500
 #define MULTI_RPM_RING_RED_AT     6900
+#define MULTI_RPM_LIMITER         7000
+#define MULTI_RPM_RING_BLINK_MS_SLOW 400
+#define MULTI_RPM_RING_BLINK_MS_FAST  80
 
 // Winkelbereich der unteren blauen Wasser-Leuchtskala + der zweiten kleinen
 // Wasser-Nadel (BMW-Style, Vorbild: "HIGH TEMP"-Bogen unten im Foto-
@@ -2862,6 +2869,8 @@ void BMW_UI_Update(void)
     // davor), ab 115 Grad Rot. Drehzahl-Modus: dieselbe Logik auf die
     // 0-8000 U/min-Skala uebertragen, Orange ab 6500, Rot ab 6900 U/min.
     if (g_multi_gauge_mode == MULTI_GAUGE_WATER) {
+        multi_ring_red->opa = LV_OPA_COVER;  // evtl. vom RPM-Ringblinken uebrig
+
         float t = current_water_temp;
         float yellow_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
         if (yellow_end < MULTI_WATER_SCALE_MIN) yellow_end = MULTI_WATER_SCALE_MIN;
@@ -2879,21 +2888,50 @@ void BMW_UI_Update(void)
         lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
     } else if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
         float t = current_rpm;
-        float yellow_end = t < (float)MULTI_RPM_RING_ORANGE_AT ? t : (float)MULTI_RPM_RING_ORANGE_AT;
-        if (yellow_end < 0.0f) yellow_end = 0.0f;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+        if (t >= (float)MULTI_RPM_RING_ORANGE_AT) {
+            // Ab der Orange-Schwelle blinkt der komplette Ring rot statt der
+            // gestaffelten Gelb/Orange/Rot-Segmente zu zeigen; Gelb/Orange
+            // werden dafuer auf Null-Laenge gesetzt, Rot deckt den ganzen
+            // Skalenbereich ab und wird ein-/ausgeblendet. Blinktakt sinkt
+            // linear von MULTI_RPM_RING_BLINK_MS_SLOW an der Schwelle bis
+            // MULTI_RPM_RING_BLINK_MS_FAST am Drehzahlbegrenzer.
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, 0);
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, 0);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, 0);
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, 0);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, 8000);
 
-        float orange_end = t < (float)MULTI_RPM_RING_RED_AT ? t : (float)MULTI_RPM_RING_RED_AT;
-        if (orange_end < (float)MULTI_RPM_RING_ORANGE_AT) orange_end = (float)MULTI_RPM_RING_ORANGE_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, (int32_t)orange_end);
+            float frac = (t - (float)MULTI_RPM_RING_ORANGE_AT) /
+                         (float)(MULTI_RPM_LIMITER - MULTI_RPM_RING_ORANGE_AT);
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            uint32_t blink_period = (uint32_t)(MULTI_RPM_RING_BLINK_MS_SLOW -
+                frac * (float)(MULTI_RPM_RING_BLINK_MS_SLOW - MULTI_RPM_RING_BLINK_MS_FAST));
 
-        float red_end = t > 8000.0f ? 8000.0f : t;
-        if (red_end < (float)MULTI_RPM_RING_RED_AT) red_end = (float)MULTI_RPM_RING_RED_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
+            static bool ring_blink_state = true;
+            static uint32_t ring_last_blink = 0;
+            if (lv_tick_elaps(ring_last_blink) > blink_period) {
+                ring_blink_state = !ring_blink_state;
+                ring_last_blink = lv_tick_get();
+            }
+            multi_ring_red->opa = ring_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+        } else {
+            multi_ring_red->opa = LV_OPA_COVER;
+
+            float yellow_end = t < 0.0f ? 0.0f : t;
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
+
+            lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
+            lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
+        }
     } else {
+        multi_ring_red->opa = LV_OPA_COVER;  // evtl. vom RPM-Ringblinken uebrig
+
         lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
         lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
         lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
