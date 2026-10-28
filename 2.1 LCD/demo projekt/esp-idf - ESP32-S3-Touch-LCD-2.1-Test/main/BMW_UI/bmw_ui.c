@@ -142,9 +142,19 @@ static float current_water_temp      = 105.0f;
 // im Uhrzeigersinn zurueckgeholt (-140 -> -112). Beide Werte sind weiterhin
 // per Augenmass gesetzt (Nadel-Meter und Bogen-Meter haben unterschiedliche
 // Mittelpunkte), der exakte Feinabgleich erfolgt wie bisher iterativ am Geraet.
-#define MULTI_WATER_ARC_RANGE       110
-#define MULTI_WATER_ARC_ROTATION     27
-#define MULTI_WATER_NEEDLE_ROTATION -112
+// Weitere Korrektur (Nutzer-Foto v1.0.78): Der 110-Grad-Bogen war deutlich
+// breiter als die im Foto-Hintergrund gedruckte "HIGH TEMP"-Skala (der blaue
+// Bogen reichte bis hinauf zu den Schaltanzeige-Kaestchen/"0" der RPM-Skala) -
+// RANGE auf 90 verkleinert. Damit der Bogen bei 6 Uhr zentriert bleibt
+// (Mitte = ROTATION + RANGE/2 soll ~82 Grad bleiben wie zuvor: 27+110/2=82),
+// ROTATION entsprechend auf 37 angehoben (37+90/2=82). NEEDLE_ROTATION folgt
+// mit demselben Versatz (+10, wie beim urspruenglichen 90-Grad-Versatz oben
+// bereits 1:1 mitgezogen): -112 -> -102. Radius siehe r_mod an den
+// multi_water_inner_*-Indikatoren weiter unten (dort ebenfalls nach aussen
+// korrigiert, derselbe Grund: Bogen sass zu nah am Zentrum/zu eng).
+#define MULTI_WATER_ARC_RANGE        90
+#define MULTI_WATER_ARC_ROTATION     37
+#define MULTI_WATER_NEEDLE_ROTATION -102
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
@@ -2239,10 +2249,14 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
                               MULTI_WATER_ARC_RANGE, MULTI_WATER_ARC_ROTATION);
     // r_mod -48 (vormals -60): Bogen ~12px weiter nach aussen/unten, damit er
     // naeher an der unteren gelben "HIGH TEMP"-Skala des Foto-Hintergrunds
-    // liegt (Nutzer-Rueckmeldung Foto v1.0.68).
-    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -48);
-    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -48);
-    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -48);
+    // liegt (Nutzer-Rueckmeldung Foto v1.0.68). Weitere Korrektur (Foto
+    // v1.0.78): sass immer noch deutlich zu nah am Zentrum, naeher an den
+    // Schaltanzeige-Kaestchen als an der gedruckten Skala - auf -20 erhoeht
+    // (~28px weiter nach aussen/unten), damit er wie gewuenscht unterhalb der
+    // gedruckten gelben Skala liegt statt sie zu ueberlappen.
+    multi_water_inner_blue   = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_BLUE), -20);
+    multi_water_inner_orange = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_ORANGE), -20);
+    multi_water_inner_red     = lv_meter_add_arc(multi_meter, multi_water_inner_scale, 10, lv_palette_main(LV_PALETTE_RED), -20);
 
     lv_obj_t *hub = lv_obj_create(multi_meter);
     lv_obj_set_size(hub, 14, 14);
