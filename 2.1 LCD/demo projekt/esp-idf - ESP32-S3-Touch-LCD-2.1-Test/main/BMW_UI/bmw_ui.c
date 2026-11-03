@@ -1172,8 +1172,9 @@ static void apply_bmw_style(bool on)
     // des mittleren gruenen Kreises im Vorbildfoto) - "KM/H" dort ausgeblendet,
     // im Foto steht an dieser Stelle kein Einheitentext.
     if (multi_speed_label) {
-        lv_obj_set_style_text_font(multi_speed_label, on ? &lv_font_montserrat_28 : &lv_font_montserrat_48, 0);
-        lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, on ? -140 : -60);
+        // BMW-Style: montserrat 36 im Innenkreis zwischen Kreisring und M-Logo.
+        lv_obj_set_style_text_font(multi_speed_label, on ? &lv_font_montserrat_36 : &lv_font_montserrat_48, 0);
+        lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, on ? -112 : -60);
     }
     if (multi_unit_label) {
         if (on) lv_obj_add_flag(multi_unit_label, LV_OBJ_FLAG_HIDDEN);
@@ -1185,10 +1186,11 @@ static void apply_bmw_style(bool on)
     // Vorbildfoto). Gaspedal (1) und digitale Drehzahl (2) haben dort keine
     // Entsprechung und werden im BMW-Style ausgeblendet.
     static const lv_coord_t field_x_normal[4] = {-165, -55, 55, 165};
-    // BMW-Style: Batterie/Wasser um ca. eine eigene Feldbreite nach innen
-    // (Batterie nach rechts, Wasser nach links) und mit groesserer Schrift
-    // (montserrat 36 statt 28), vom Nutzer so gewuenscht.
-    static const lv_coord_t field_x_style[4]  = {-60, -55, 55, 60}; // [1]/[2] ungenutzt (ausgeblendet)
+    // BMW-Style: Batterie/Wasser mit groesserer Schrift (montserrat 36 statt
+    // 28) im freien schwarzen Innenkreis des Hintergrundbilds (Radius ~125 px).
+    // Weiter aussen als +-75/78 wuerde "14.2V" bzw. "90°C" den Kreisring und
+    // die Ziffern 1/7 ueberdecken.
+    static const lv_coord_t field_x_style[4]  = {-75, -55, 55, 78}; // [1]/[2] ungenutzt (ausgeblendet)
     const lv_font_t *field_font = on ? &lv_font_montserrat_36 : &lv_font_montserrat_28;
     static const lv_coord_t outline_off2[8][2] = {
         {-2, 0}, {2, 0}, {0, -2}, {0, 2}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2},
