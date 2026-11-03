@@ -113,14 +113,16 @@ static float current_water_temp      = 105.0f;
 #define MULTI_WATER_RING_RED_AT    115
 
 // Derselbe Farbring im Drehzahl-Modus der grossen Anzeige: Neongelb bis
-// 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min). Ab Erreichen
-// von MULTI_RPM_RING_ORANGE_AT blinkt der komplette Ring stattdessen rot
-// (statt der gestaffelten Segmente) - der Blinktakt wird dabei linear
-// schneller, je naeher die Drehzahl an MULTI_RPM_LIMITER (Drehzahlbegrenzer)
-// liegt.
+// 6500 U/min, ab 6500 Orange, ab 6900 Rot (Skala 0-8000 U/min). Ab
+// MULTI_RPM_BLINK_START (200 U/min vor der Orange-Schwelle) blinkt der
+// komplette Ring stattdessen rot (statt der gestaffelten Segmente), synchron
+// dazu alle gefuellten Kaestchen der Schaltanzeige - der Blinktakt wird dabei
+// linear schneller, je naeher die Drehzahl an MULTI_RPM_LIMITER
+// (Drehzahlbegrenzer) liegt.
 #define MULTI_RPM_RING_ORANGE_AT  6500
 #define MULTI_RPM_RING_RED_AT     6900
 #define MULTI_RPM_LIMITER         7000
+#define MULTI_RPM_BLINK_START     (MULTI_RPM_RING_ORANGE_AT - 200)
 #define MULTI_RPM_RING_BLINK_MS_SLOW 400
 #define MULTI_RPM_RING_BLINK_MS_FAST  80
 
@@ -315,10 +317,9 @@ static lv_obj_t *dtc_status_label;
 
 // --- Schaltanzeige (6 Fuell-Kaestchen ueber den im Hintergrundbild
 // gezeichneten Kaesten): fuellen sich mit steigender Drehzahl (je Kaestchen
-// eine eigene Schwelle), ab RPM_SHIFT_BLINK blinken alle gemeinsam wie eine
-// digitale Schaltanzeige. Fuellfarben = Umrandungsfarben aus dem
+// eine eigene Schwelle), ab MULTI_RPM_BLINK_START blinken alle gefuellten
+// Kaestchen gemeinsam rot, synchron zum Farbring. Fuellfarben = Umrandungsfarben aus dem
 // Hintergrundbild (1-4 weiss/grau, 5 hell-lila, 6 blau). ---
-#define RPM_SHIFT_BLINK 6800
 static lv_obj_t *rpm_boxes[6];
 static const lv_coord_t rpm_box_x[6]  = {-117, -73, -28, 17, 62, 109};
 static const int32_t    rpm_box_thr[6] = {1500, 2500, 3500, 4500, 5500, 6500};
@@ -1184,7 +1185,11 @@ static void apply_bmw_style(bool on)
     // Vorbildfoto). Gaspedal (1) und digitale Drehzahl (2) haben dort keine
     // Entsprechung und werden im BMW-Style ausgeblendet.
     static const lv_coord_t field_x_normal[4] = {-165, -55, 55, 165};
-    static const lv_coord_t field_x_style[4]  = {-130, -55, 55, 130}; // [1]/[2] ungenutzt (ausgeblendet)
+    // BMW-Style: Batterie/Wasser um ca. eine eigene Feldbreite nach innen
+    // (Batterie nach rechts, Wasser nach links) und mit groesserer Schrift
+    // (montserrat 36 statt 28), vom Nutzer so gewuenscht.
+    static const lv_coord_t field_x_style[4]  = {-60, -55, 55, 60}; // [1]/[2] ungenutzt (ausgeblendet)
+    const lv_font_t *field_font = on ? &lv_font_montserrat_36 : &lv_font_montserrat_28;
     static const lv_coord_t outline_off2[8][2] = {
         {-2, 0}, {2, 0}, {0, -2}, {0, 2}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2},
     };
@@ -1195,11 +1200,12 @@ static void apply_bmw_style(bool on)
         bool visible = !on || keep_visible;
         lv_coord_t x = on ? field_x_style[f] : field_x_normal[f];
         lv_coord_t y = on ? 0 : 60;
-        lv_coord_t icon_y = on ? -28 : 32;
+        lv_coord_t icon_y = on ? -34 : 32;
 
         if (field_labels[f]) {
             if (visible) lv_obj_clear_flag(field_labels[f], LV_OBJ_FLAG_HIDDEN);
             else         lv_obj_add_flag(field_labels[f], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_font(field_labels[f], field_font, 0);
             lv_obj_align(field_labels[f], LV_ALIGN_CENTER, x, y);
         }
         if (multi_field_icon[f]) {
@@ -1212,6 +1218,7 @@ static void apply_bmw_style(bool on)
             if (!o) continue;
             if (visible) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
             else         lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_font(o, field_font, 0);
             lv_obj_align(o, LV_ALIGN_CENTER, x + outline_off2[i][0], y + outline_off2[i][1]);
         }
     }
@@ -2747,29 +2754,41 @@ void BMW_UI_Update(void)
         }
     }
 
-    // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)
-    // erst ab seiner eigenen Drehzahlschwelle (rpm_box_thr). Ab RPM_SHIFT_BLINK
-    // (6800 U/min) leuchten alle gemeinsam blinkend im 250-ms-Takt auf wie eine
-    // digitale Schaltanzeige.
-    bool shift_blink = (current_rpm >= RPM_SHIFT_BLINK);
-    lv_opa_t blink_opa = LV_OPA_COVER;
-    if (shift_blink) {
-        static bool box_blink_state = true;
-        static uint32_t box_last_blink = 0;
-        if (lv_tick_elaps(box_last_blink) > 250) {
-            box_blink_state = !box_blink_state;
-            box_last_blink = lv_tick_get();
+    // Gemeinsamer Rot-Blinktakt fuer Farbring und Schaltanzeige: ab
+    // MULTI_RPM_BLINK_START, Takt sinkt linear von MULTI_RPM_RING_BLINK_MS_SLOW
+    // an der Schwelle bis MULTI_RPM_RING_BLINK_MS_FAST am Drehzahlbegrenzer.
+    bool rpm_blink = (current_rpm >= (float)MULTI_RPM_BLINK_START);
+    static bool rpm_blink_state = true;
+    static uint32_t rpm_last_blink = 0;
+    if (rpm_blink) {
+        float frac = (current_rpm - (float)MULTI_RPM_BLINK_START) /
+                     (float)(MULTI_RPM_LIMITER - MULTI_RPM_BLINK_START);
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        uint32_t blink_period = (uint32_t)(MULTI_RPM_RING_BLINK_MS_SLOW -
+            frac * (float)(MULTI_RPM_RING_BLINK_MS_SLOW - MULTI_RPM_RING_BLINK_MS_FAST));
+        if (lv_tick_elaps(rpm_last_blink) > blink_period) {
+            rpm_blink_state = !rpm_blink_state;
+            rpm_last_blink = lv_tick_get();
         }
-        blink_opa = box_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+    } else {
+        rpm_blink_state = true;
     }
+
+    // Schaltanzeige: jedes Kaestchen fuellt sich (in seiner Umrandungsfarbe)
+    // erst ab seiner eigenen Drehzahlschwelle (rpm_box_thr). Ab
+    // MULTI_RPM_BLINK_START blinken alle gefuellten Kaestchen gemeinsam rot.
     for (int i = 0; i < 6; i++) {
-        lv_opa_t opa;
-        if (shift_blink) {
-            opa = blink_opa;
-        } else {
-            opa = (current_rpm >= (float)rpm_box_thr[i]) ? LV_OPA_COVER : LV_OPA_TRANSP;
-        }
-        lv_obj_set_style_bg_opa(rpm_boxes[i], opa, 0);
+        bool filled = (current_rpm >= (float)rpm_box_thr[i]);
+        lv_opa_t opa = LV_OPA_TRANSP;
+        if (filled) opa = (rpm_blink && !rpm_blink_state) ? LV_OPA_TRANSP : LV_OPA_COVER;
+        // Nur bei tatsaechlicher Aenderung setzen - jeder Style-Setter
+        // invalidiert das Objekt und loest einen Redraw aus.
+        lv_color_t col = rpm_blink ? lv_palette_main(LV_PALETTE_RED) : rpm_box_col[i];
+        if (lv_obj_get_style_bg_color(rpm_boxes[i], 0).full != col.full)
+            lv_obj_set_style_bg_color(rpm_boxes[i], col, 0);
+        if (lv_obj_get_style_bg_opa(rpm_boxes[i], 0) != opa)
+            lv_obj_set_style_bg_opa(rpm_boxes[i], opa, 0);
     }
 
     // Nadelfarbe + Farbring: nur relevant im Wasser-Modus der grossen Anzeige
@@ -2888,13 +2907,12 @@ void BMW_UI_Update(void)
         lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
     } else if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
         float t = current_rpm;
-        if (t >= (float)MULTI_RPM_RING_ORANGE_AT) {
-            // Ab der Orange-Schwelle blinkt der komplette Ring rot statt der
+        if (rpm_blink) {
+            // Ab MULTI_RPM_BLINK_START blinkt der komplette Ring rot statt der
             // gestaffelten Gelb/Orange/Rot-Segmente zu zeigen; Gelb/Orange
             // werden dafuer auf Null-Laenge gesetzt, Rot deckt den ganzen
-            // Skalenbereich ab und wird ein-/ausgeblendet. Blinktakt sinkt
-            // linear von MULTI_RPM_RING_BLINK_MS_SLOW an der Schwelle bis
-            // MULTI_RPM_RING_BLINK_MS_FAST am Drehzahlbegrenzer.
+            // Skalenbereich ab und wird im gemeinsamen Takt (rpm_blink_state,
+            // siehe Schaltanzeige oben) ein-/ausgeblendet.
             lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
             lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, 0);
             lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, 0);
@@ -2902,20 +2920,7 @@ void BMW_UI_Update(void)
             lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, 0);
             lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, 8000);
 
-            float frac = (t - (float)MULTI_RPM_RING_ORANGE_AT) /
-                         (float)(MULTI_RPM_LIMITER - MULTI_RPM_RING_ORANGE_AT);
-            if (frac < 0.0f) frac = 0.0f;
-            if (frac > 1.0f) frac = 1.0f;
-            uint32_t blink_period = (uint32_t)(MULTI_RPM_RING_BLINK_MS_SLOW -
-                frac * (float)(MULTI_RPM_RING_BLINK_MS_SLOW - MULTI_RPM_RING_BLINK_MS_FAST));
-
-            static bool ring_blink_state = true;
-            static uint32_t ring_last_blink = 0;
-            if (lv_tick_elaps(ring_last_blink) > blink_period) {
-                ring_blink_state = !ring_blink_state;
-                ring_last_blink = lv_tick_get();
-            }
-            multi_ring_red->opa = ring_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+            multi_ring_red->opa = rpm_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
         } else {
             multi_ring_red->opa = LV_OPA_COVER;
 
