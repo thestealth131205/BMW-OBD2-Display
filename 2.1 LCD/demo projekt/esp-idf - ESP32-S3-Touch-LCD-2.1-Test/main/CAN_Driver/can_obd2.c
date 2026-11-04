@@ -19,7 +19,8 @@ static const char *TAG = "CAN_OBD2";
 // OBD2 / UDS
 #define ID_OBD2_FUNC  0x7DF   // funktionale Broadcast-Adresse
 #define ID_OBD2_RESP  0x7E8   // Antwort-ID des Motorsteuergeraets
-#define ID_KOMBI      0x611   // Kombiinstrument (CBS-Reset, UDS 0x31)
+// BMW-spezifische Dienste (Oeltemperatur, CBS-Reset) laufen ueber die
+// E-Serien-Adressierung 0x6F1 + Adressbyte, siehe service_funcs.h.
 
 #define EXTRA_POLL_INTERVAL_MS 250  // Rundlauf-Intervall je PID (4 PIDs -> 1s/Zyklus, wie zuvor nur fuer 0x42)
 
@@ -95,10 +96,6 @@ static void decode_frame(const mcp2515_frame_t *f)
             // Bit 7 = MIL an/aus, Bits 0-6 = Anzahl gespeicherter DTCs
             // (hier nicht ausgewertet, dafuer gibt es bereits Mode 03).
             s_mil_on = (f->data[3] & 0x80) != 0;
-        } else if (f->dlc >= 5 && f->data[1] == 0x62 && f->data[2] == 0x44 && f->data[3] == 0x02) {
-            // Service 0x22 (ReadDataByIdentifier), BMW-PID 0x4402 (Oeltemperatur):
-            // Rohwert*0.75-48 = Grad C, siehe can_obd2.h.
-            s_oil_temp = (float)f->data[4] * 0.75f - 48.0f;
         } else if (f->dlc >= 2 && f->data[1] == 0x43) {
             // Mode 03, positive Antwort: Fehlercodes ab Byte 2, je 2 Byte
             int n = 0;
@@ -112,6 +109,21 @@ static void decode_frame(const mcp2515_frame_t *f)
             // Mode 04, positive Antwort: Fehlercodes geloescht
             s_dtc_count = 0;
         }
+        break;
+    case BMW_RESP_BASE + BMW_ECU_DME:
+        // DME-Antwort (E-Serien-Adressierung): Byte0 = 0xF1, Byte1 = PCI,
+        // ab Byte2 die Nutzdaten. Service 0x22, DID 0x4402 (Oeltemperatur):
+        // Rohwert*0.75-48 = Grad C - am E90/MSV80 unverifiziert.
+        if (f->dlc >= 6 && f->data[0] == 0xF1 && f->data[2] == 0x62 && f->data[3] == 0x44 && f->data[4] == 0x02) {
+            s_oil_temp = (float)f->data[5] * 0.75f - 48.0f;
+        } else if (f->dlc >= 3 && f->data[0] == 0xF1 && f->data[2] == 0x62) {
+            ESP_LOGI(TAG, "DME 0x22-Antwort: %02X %02X %02X %02X %02X %02X", f->data[1], f->data[2],
+                     f->data[3], f->data[4], f->data[5], f->data[6]);
+        }
+        break;
+    case BMW_RESP_BASE + BMW_ECU_KOMBI:
+        ESP_LOGI(TAG, "Kombi-Antwort: %02X %02X %02X %02X %02X", f->data[1], f->data[2],
+                 f->data[3], f->data[4], f->data[5]);
         break;
     case ID_RPM:
         if (f->dlc >= 4) {
@@ -162,7 +174,7 @@ static void can_task(void *arg)
         {2, {0x01, 0x0B}},       // Ansaugkruemmerdruck (MAP)
         {2, {0x01, 0x33}},       // absoluter Luftdruck (Baro, fuer Ladedruck)
         {2, {0x01, 0x01}},       // Monitor-Status (MIL)
-        {3, {0x22, 0x44, 0x02}}, // BMW-Oeltemperatur (Service 0x22)
+        {3, {0x22, 0x44, 0x02}}, // BMW-Oeltemperatur (Service 0x22, an DME 0x12)
     };
     int extra_idx = 0;
     while (1) {
@@ -180,9 +192,16 @@ static void can_task(void *arg)
             // abfragen - die uebrigen Werte kosten sonst unnoetig Buszeit,
             // obwohl niemand hinschaut.
             const obd2_extra_req_t *r = s_sensors_active ? &extra_reqs[extra_idx] : &extra_reqs[0];
-            uint8_t req[8] = {r->len, 0, 0, 0, 0, 0, 0, 0};
-            memcpy(&req[1], r->data, r->len);
-            mcp2515_send(ID_OBD2_FUNC, req, 8);
+            if (r->data[0] == 0x22) {
+                // BMW-Dienst: an 0x6F1, Byte0 = DME-Adresse, dann PCI + Daten
+                uint8_t req[8] = {BMW_ECU_DME, r->len, 0, 0, 0, 0, 0, 0};
+                memcpy(&req[2], r->data, r->len);
+                mcp2515_send(BMW_TESTER_ID, req, 8);
+            } else {
+                uint8_t req[8] = {r->len, 0, 0, 0, 0, 0, 0, 0};
+                memcpy(&req[1], r->data, r->len);
+                mcp2515_send(ID_OBD2_FUNC, req, 8);
+            }
             extra_idx = s_sensors_active
                 ? (extra_idx + 1) % (int)(sizeof(extra_reqs) / sizeof(extra_reqs[0]))
                 : 0;
@@ -225,9 +244,8 @@ void CAN_OBD2_clear_dtc(void)
 
 void CAN_OBD2_reset_service_oil(void)
 {
-    // UDS Routine Control (0x31) an Kombiinstrument, Service-Typ 0x01 = Motoroel
-    uint8_t req[8] = {0x04, 0x31, 0x01, 0xFF, 0x01, 0x00, 0x00, 0x00};
-    mcp2515_send(ID_KOMBI, req, 8);
+    // Routine Control (0x31) an Kombiinstrument, Service-Typ 0x01 = Motoroel
+    CAN_OBD2_service_func(0);
 }
 
 bool CAN_OBD2_service_func(int idx)
@@ -235,9 +253,10 @@ bool CAN_OBD2_service_func(int idx)
     if (idx < 0 || idx >= SERVICE_FUNC_COUNT || SERVICE_FUNCS[idx].len == 0) return false;
     const service_func_t *f = &SERVICE_FUNCS[idx];
     uint8_t req[8] = {0};
-    req[0] = f->len; // ISO-TP Single Frame
-    memcpy(&req[1], f->data, f->len);
-    return mcp2515_send(f->can_id, req, 8) == ESP_OK;
+    req[0] = f->ecu; // E-Serien-Adressierung: Zieladresse vor dem ISO-TP-PCI
+    req[1] = f->len; // ISO-TP Single Frame
+    memcpy(&req[2], f->data, f->len);
+    return mcp2515_send(BMW_TESTER_ID, req, 8) == ESP_OK;
 }
 
 int CAN_OBD2_dtc_count(void) { return s_dtc_count; }

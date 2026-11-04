@@ -733,6 +733,75 @@ static bool elm_init_sequence(char *resp, size_t resp_size)
     return elm_ok;
 }
 
+// --- BMW E-Serie: Anfrage per "extended addressing" an ein Steuergeraet ---
+// Der E90 beantwortet BMW-spezifische Dienste (0x22 Oeltemperatur, 0x31
+// CBS-Reset) NICHT ueber die OBD2-Funktionsadresse 0x7DF, sondern nur so:
+// CAN-ID 0x6F1, Byte 0 = Steuergeraete-Adresse, Antwort auf 0x600+Adresse.
+// Bevorzugt per ATCEA (ELM327 ab v1.4), sonst manuell mit ATCAF0 (Adresse
+// und ISO-TP-Laengenbyte selbst vorangestellt, funktioniert auch bei
+// Klonen ohne ATCEA). Liefert die Anzahl Antwortbytes in out (0 = keine).
+// Danach wird wieder auf Standard-OBD2 (0x7DF) zurueckgeschaltet.
+static int8_t s_cea_supported = -1; // -1 = noch unbekannt, 0 = nein, 1 = ja
+static int    s_oil_did_idx = -1;      // Index in BMW_OIL_DIDS, der positiv geantwortet hat
+static int    s_oil_probe_rounds = 0;  // Fehlversuche, nach 3 Runden je Kandidat wird aufgegeben
+
+static bool elm_rejected(const char *resp)
+{
+    return strchr(resp, '?') != NULL || strstr(resp, "ERROR") != NULL;
+}
+
+static int bmw_ecu_request(uint8_t ecu, const uint8_t *data, int len, char *resp, size_t resp_size,
+                           uint8_t *out, int max_out, bool verbose)
+{
+    char cmd[24];
+    snprintf(cmd, sizeof(cmd), "ATSH%03X", BMW_TESTER_ID);
+    send_at_cmd_v(cmd, resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+    snprintf(cmd, sizeof(cmd), "ATCRA%03X", BMW_RESP_BASE + ecu);
+    send_at_cmd_v(cmd, resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+
+    if (s_cea_supported != 0) {
+        snprintf(cmd, sizeof(cmd), "ATCEA%02X", ecu);
+        bool ok = send_at_cmd_v(cmd, resp, resp_size, pdMS_TO_TICKS(1000), verbose) && !elm_rejected(resp);
+        if (s_cea_supported < 0) {
+            s_cea_supported = ok ? 1 : 0;
+            OBD_LOGI("BMW: ATCEA %s -> %s", ok ? "unterstuetzt" : "nicht unterstuetzt",
+                     ok ? "extended addressing per ELM" : "Fallback ATCAF0 (manuelles Adressbyte)");
+        }
+    }
+
+    int p = 0;
+    if (s_cea_supported == 0) {
+        send_at_cmd_v("ATCAF0", resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+        p += snprintf(cmd + p, sizeof(cmd) - p, "%02X%02X", ecu, len);
+    }
+    for (int i = 0; i < len && p < (int)sizeof(cmd) - 2; i++) p += snprintf(cmd + p, sizeof(cmd) - p, "%02X", data[i]);
+
+    int n = 0;
+    if (send_at_cmd_v(cmd, resp, resp_size, pdMS_TO_TICKS(2000), verbose)) n = hex_tokenize(resp, out, max_out);
+    OBD_LOGI("BMW ECU 0x%02X TX '%s' -> '%s'", ecu, cmd, resp);
+    char keep[128];
+    strncpy(keep, resp, sizeof(keep) - 1);
+    keep[sizeof(keep) - 1] = '\0';
+
+    // Zurueck auf Standard-OBD2
+    if (s_cea_supported == 1) send_at_cmd_v("ATCEA", resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+    else send_at_cmd_v("ATCAF1", resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+    send_at_cmd_v("ATCRA", resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+    send_at_cmd_v("ATSH7DF", resp, resp_size, pdMS_TO_TICKS(1000), verbose);
+    strncpy(resp, keep, resp_size - 1);
+    resp[resp_size - 1] = '\0';
+    return n;
+}
+
+// Sucht in einer (ggf. mit Adress-/PCI-Bytes versehenen) Antwort das
+// positive Antwortbyte sid gefolgt von b1/b2. Liefert den Index oder -1.
+static int find_resp(const uint8_t *b, int n, uint8_t sid, uint8_t b1, uint8_t b2)
+{
+    for (int i = 0; i + 2 < n; i++)
+        if (b[i] == sid && b[i + 1] == b1 && b[i + 2] == b2) return i;
+    return -1;
+}
+
 static void ble_obd_task(void *arg)
 {
     (void)arg;
@@ -769,14 +838,11 @@ static void ble_obd_task(void *arg)
             if (req >= BLE_OBD_REQ_SERVICE_FUNC_BASE) {
                 int idx = (int)req - BLE_OBD_REQ_SERVICE_FUNC_BASE;
                 const service_func_t *f = &SERVICE_FUNCS[idx];
-                char cmd[24];
-                snprintf(cmd, sizeof(cmd), "ATSH%03X", f->can_id);
-                send_at_cmd_v(cmd, resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
-                int p = 0;
-                for (int i = 0; i < f->len; i++) p += snprintf(cmd + p, sizeof(cmd) - p, "%02X", f->data[i]);
-                send_at_cmd_v(cmd, resp, sizeof(resp), pdMS_TO_TICKS(2000), true);
-                OBD_LOGI("Service '%s' -> %s", f->label, resp);
-                send_at_cmd_v("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
+                n = bmw_ecu_request(f->ecu, f->data, f->len, resp, sizeof(resp), bytes, sizeof(bytes), true);
+                if (find_resp(bytes, n, f->data[0] + 0x40, f->data[1], f->data[2]) >= 0)
+                    OBD_LOGI("Service '%s': positive Antwort", f->label);
+                else
+                    OBD_LOGW("Service '%s': keine positive Antwort (0x7F = abgelehnt): '%s'", f->label, resp);
                 continue;
             }
             switch (req) {
@@ -805,13 +871,15 @@ static void ble_obd_task(void *arg)
                 s_dtc_count = 0;
                 break;
             case BLE_OBD_REQ_SERVICE_RESET:
-                send_at_cmd_v("ATSH611", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
-                if (!send_at_cmd_v("3101FF01", resp, sizeof(resp), pdMS_TO_TICKS(2000), true))
-                    OBD_LOGW("Service-Reset '3101FF01': keine Antwort vom Adapter");
+            {
+                const service_func_t *f = &SERVICE_FUNCS[0]; // Oil reset
+                n = bmw_ecu_request(f->ecu, f->data, f->len, resp, sizeof(resp), bytes, sizeof(bytes), true);
+                if (find_resp(bytes, n, 0x71, f->data[1], f->data[2]) >= 0)
+                    OBD_LOGI("Service-Reset: positive Antwort vom Kombi");
                 else
-                    OBD_LOGI("Service-Reset -> %s", resp);
-                send_at_cmd_v("ATSH7DF", resp, sizeof(resp), pdMS_TO_TICKS(1000), true);
+                    OBD_LOGW("Service-Reset: keine positive Antwort vom Kombi: '%s'", resp);
                 break;
+            }
             }
             continue;
         }
@@ -909,12 +977,25 @@ static void ble_obd_task(void *arg)
             }
             break;
         case 8:
-            // BMW-Oeltemperatur per Service 0x22 (ReadDataByIdentifier),
-            // PID 0x4402 - Antwort "62 44 02 XX", Rohwert*0.75-48 = Grad C.
-            if (s_sensors_active && send_at_cmd("224402", resp, sizeof(resp), pdMS_TO_TICKS(1000))) {
-                n = hex_tokenize(resp, bytes, sizeof(bytes));
-                if (n >= 4 && bytes[0] == 0x62 && bytes[1] == 0x44 && bytes[2] == 0x02) {
-                    s_oil_temp = (float)bytes[3] * 0.75f - 48.0f;
+            // BMW-Oeltemperatur per Service 0x22 an die DME (Adresse 0x12,
+            // E-Serien-Adressierung, siehe bmw_ecu_request()). Solange kein
+            // Kandidat aus BMW_OIL_DIDS positiv geantwortet hat, wird reihum
+            // probiert und jede Antwort ins SD-Log geschrieben. Nur fuer
+            // 0x4402 ist die Formel bekannt (Rohwert*0.75-48 = Grad C).
+            if (s_sensors_active && (s_oil_did_idx >= 0 || s_oil_probe_rounds < 3 * BMW_OIL_DID_COUNT)) {
+                int di = s_oil_did_idx >= 0 ? s_oil_did_idx : s_oil_probe_rounds % BMW_OIL_DID_COUNT;
+                uint16_t did = BMW_OIL_DIDS[di];
+                uint8_t q[3] = {0x22, (uint8_t)(did >> 8), (uint8_t)did};
+                n = bmw_ecu_request(BMW_ECU_DME, q, 3, resp, sizeof(resp), bytes, sizeof(bytes),
+                                    s_oil_did_idx < 0);
+                int i = find_resp(bytes, n, 0x62, q[1], q[2]);
+                if (i >= 0 && i + 3 < n) {
+                    if (s_oil_did_idx < 0) OBD_LOGI("Oeltemperatur: DID 0x%04X antwortet", did);
+                    s_oil_did_idx = di;
+                    if (did == 0x4402) s_oil_temp = (float)bytes[i + 3] * 0.75f - 48.0f;
+                    else OBD_LOGI("Oeltemp DID 0x%04X Rohdaten: '%s' (Formel unbekannt)", did, resp);
+                } else if (s_oil_did_idx < 0) {
+                    s_oil_probe_rounds++;
                 }
             }
             break;
