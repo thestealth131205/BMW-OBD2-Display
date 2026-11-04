@@ -20,3 +20,9 @@ void example_increase_lvgl_tick(void *arg);
 void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data );
 
 void LVGL_Init(void);
+
+// Freie Display-Drehung in Grad (positiv = Inhalt im Uhrzeigersinn), z. B. zum
+// Ausgleich einer schief montierten Halterung. Muss aus dem LVGL-Kontext
+// aufgerufen werden. false, falls kein PSRAM fuer den Drehpuffer frei ist.
+bool LVGL_SetRotation(int16_t deg);
+int16_t LVGL_GetRotation(void);

@@ -12,11 +12,13 @@
 #include "sd_log.h"
 #include "SD_MMC.h"
 #include "Buzzer.h"
+#include "LVGL_Driver.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <math.h>
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -163,7 +165,33 @@ static float current_water_temp      = 105.0f;
 // korrigiert, derselbe Grund: Bogen sass zu nah am Zentrum/zu eng).
 #define MULTI_WATER_ARC_RANGE        90
 #define MULTI_WATER_ARC_ROTATION     37
-#define MULTI_WATER_NEEDLE_ROTATION -102
+
+// BMW-Style: Farbring + kleine Wasser-Nadel richten sich seit v1.0.85 exakt
+// nach der im Foto-Hintergrund (multi_bg_bmw_img) gedruckten "HIGH TEMP"-
+// Skala, statt wie zuvor nach Augenmass auf multi_meter (Mittelpunkt =
+// Bildmitte) zu sitzen. Per Kreis-Fit an die Farbbalken-Pixel des Bildes
+// vermessen: Die Skala ist ein Kreisbogen um (0, -103) relativ zur
+// Bildmitte, Mittellinie Radius 274 px, Balken ~9 px breit, linear
+// 0..125 Grad - 0 Grad bei Bogenwinkel 112.6 (LVGL: 0 = 3 Uhr, im
+// Uhrzeigersinn), Gelb->Orange (100 Grad) bei 77.5, Orange->Rot (115 Grad)
+// bei 72.3. Weil dieser Mittelpunkt weit ueber der Bildmitte liegt, konnte
+// der alte Bogen auf multi_meter nie deckungsgleich sein (zu eng, zu lang,
+// falsche Gradzuordnung: 70 Grad erschienen bei gedruckt ~60).
+// -103 im Bild, das Bild selbst sitzt 4 px tiefer (lv_obj_align(..., 0, 4)
+// bei multi_bg_bmw_img_obj) -> -99 relativ zur Bildschirmmitte.
+#define BMW_TEMP_ARC_CY          (-103 + 4)
+#define BMW_TEMP_ARC_R           274
+#define BMW_TEMP_ARC_W           10
+#define BMW_TEMP_ARC_DEG_AT_0    112.6f
+#define BMW_TEMP_ARC_DEG_PER_C   0.351f
+#define BMW_TEMP_SCALE_MAX       125.0f
+// Drehpunkt der kleinen Wasser-Nadel (Mitte von multi_bmw_water_meter) relativ
+// zur Bildmitte. Die Nadel zeigt nicht mehr ueber eine lineare Hilfsskala,
+// sondern wird pro Update per atan2() exakt auf den Skalenpunkt der aktuellen
+// Temperatur auf dem gedruckten Bogen gerichtet (Drehpunkt und Bogen haben
+// unterschiedliche Mittelpunkte, eine lineare Skala passte deshalb nie -
+// 70 Grad zeigten auf gedruckt ~100).
+#define BMW_WATER_PIVOT_Y        120
 #define WMIR(v) (int32_t)(MULTI_WATER_SCALE_MIN + MULTI_WATER_SCALE_MAX - (v))
 
 static uint32_t anim_start_tick;
@@ -310,6 +338,28 @@ static lv_obj_t *multi_bmw_water_meter; // kleines eigenstaendiges Meter-Widget 
 static lv_meter_scale_t *multi_bmw_water_needle_scale;
 static lv_meter_indicator_t *multi_bmw_water_needle;
 #define MULTI_BMW_WATER_METER_SIZE 110
+// Eigenes, grosses (558x558, teils ausserhalb des Bildschirms) Meter-Widget
+// nur fuer den Farbring der Wassertemperatur, mittig auf den Mittelpunkt
+// der gedruckten Skala gesetzt (siehe BMW_TEMP_ARC_*). Nur im BMW-Style
+// sichtbar; im normalen Stil bleiben die multi_water_inner_*-Boegen.
+static lv_obj_t *multi_bmw_temp_arc_meter;
+static lv_meter_indicator_t *multi_bmw_temp_blue;
+static lv_meter_indicator_t *multi_bmw_temp_orange;
+static lv_meter_indicator_t *multi_bmw_temp_red;
+
+// Bogenwinkel (LVGL-Grad) der gedruckten BMW-Skala fuer eine Temperatur
+static float bmw_temp_arc_deg(float t)
+{
+    if (t < 0.0f) t = 0.0f;
+    if (t > BMW_TEMP_SCALE_MAX) t = BMW_TEMP_SCALE_MAX;
+    return BMW_TEMP_ARC_DEG_AT_0 - t * BMW_TEMP_ARC_DEG_PER_C;
+}
+
+// Display-Drehung (Ausgleich einer schief montierten Halterung), in Grad,
+// positiv = Inhalt im Uhrzeigersinn. In NVS gespeichert, umgesetzt in
+// LVGL_Driver.c (LVGL_SetRotation()).
+static int16_t g_rotation_deg = 0;
+static lv_obj_t *rotation_label;
 
 // --- Fehlercode-Screen (per Wisch-Geste erreichbar) ---
 static lv_obj_t *dtc_list_label;
@@ -652,6 +702,7 @@ static void bmw_settings_save(void)
     nvs_set_u8(h, "led2_bri",   g_led[1].brightness);
     nvs_set_u8(h, "led2_col_m", g_led[1].color_main_idx);
     nvs_set_u8(h, "led2_col_s", g_led[1].color_second_idx);
+    nvs_set_i16(h, "rot_deg",   g_rotation_deg);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -669,6 +720,10 @@ static void bmw_settings_load(void)
     }
 
     uint8_t v;
+    int16_t rot;
+    if (nvs_get_i16(h, "rot_deg", &rot) == ESP_OK && rot > -180 && rot <= 180) {
+        g_rotation_deg = rot;
+    }
     if (nvs_get_u8(h, "col_pri", &v) == ESP_OK && v < COLOR_PALETTE_SIZE) {
         g_color_primary = COLOR_PALETTE[v].color;
     }
@@ -1160,6 +1215,10 @@ static void apply_bmw_style(bool on)
     // liegen, sonst wuerde sie dahinter verschwinden.
     if (multi_bg_img_obj)     lv_obj_move_background(multi_bg_img_obj);
     if (multi_bg_bmw_img_obj) lv_obj_move_background(multi_bg_bmw_img_obj);
+    // Reihenfolge von unten nach oben: Hintergrund, Wasser-Farbring, grosse
+    // Nadel, kleine Wasser-Nadel - die kleine Nadel liegt damit ueber dem
+    // Farbring und der gedruckten Skala.
+    if (multi_bmw_temp_arc_meter) lv_obj_move_foreground(multi_bmw_temp_arc_meter);
     if (multi_meter)          lv_obj_move_foreground(multi_meter);
     if (multi_bmw_water_meter) lv_obj_move_foreground(multi_bmw_water_meter);
     // Das unsichtbare Center-Overlay (3s-Halten/Doppeltipp) muss trotzdem
@@ -1240,6 +1299,22 @@ static void apply_bmw_style(bool on)
     if (multi_bmw_water_meter) {
         if (on) lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
         else    lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Farbring: im BMW-Style der eigene, auf die gedruckte Skala vermessene
+    // Bogen (multi_bmw_temp_arc_meter), im normalen Stil weiterhin die
+    // inneren Boegen auf multi_meter - die werden im BMW-Style unsichtbar
+    // geschaltet, sonst laegen zwei Farbringe uebereinander.
+    if (multi_bmw_temp_arc_meter) {
+        if (on) lv_obj_clear_flag(multi_bmw_temp_arc_meter, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(multi_bmw_temp_arc_meter, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (multi_water_inner_blue) {
+        lv_opa_t inner_opa = on ? LV_OPA_TRANSP : LV_OPA_COVER;
+        multi_water_inner_blue->opa   = inner_opa;
+        multi_water_inner_orange->opa = inner_opa;
+        multi_water_inner_red->opa    = inner_opa;
+        if (multi_meter) lv_obj_invalidate(multi_meter);
     }
 }
 
@@ -1343,6 +1418,28 @@ static void create_settings_screen(void)
     lv_obj_add_event_cb(scr_settings, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
+// Display-Drehung (Funktionen-Screen): Buttons -45/-1/+1/+45 Grad, sofort
+// angewendet und in NVS gespeichert. Button-user_data = Schrittweite.
+static void update_rotation_label(void)
+{
+    if (rotation_label) {
+        lv_label_set_text_fmt(rotation_label, "Drehung %+d\xC2\xB0", (int)g_rotation_deg);
+    }
+}
+
+static void rotation_btn_cb(lv_event_t *e)
+{
+    int step = (int)(intptr_t)lv_event_get_user_data(e);
+    int deg = g_rotation_deg + step;
+    while (deg > 180)   deg -= 360;
+    while (deg <= -180) deg += 360;
+    if (LVGL_SetRotation((int16_t)deg)) {
+        g_rotation_deg = (int16_t)deg;
+        bmw_settings_save();
+    }
+    update_rotation_label();
+}
+
 // Zweiter Einstellungs-Screen "FUNKTIONEN": Datenlogging, Umschalter
 // Wasser-/Drehzahlanzeige (beide aus dem Farben-Screen hierher verschoben,
 // da sie keine Farbeinstellungen sind) sowie neu der Warnsummer-Schalter.
@@ -1425,6 +1522,25 @@ static void create_settings_func_screen(void)
         lv_obj_add_state(buzzer_switch, LV_STATE_CHECKED); // aus NVS geladen, Standard: an
     }
     lv_obj_add_event_cb(buzzer_switch, buzzer_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Display-Drehung (schief montierte Halterung ausgleichen), zwischen
+    // Warnsummer und Hotspot: -45 / -1 | Anzeige | +1 / +45 Grad
+    static const int rot_steps[4] = {-45, -1, 1, 45};
+    static const char *rot_txt[4] = {"-45", "-1", "+1", "+45"};
+    static const lv_coord_t rot_x[4] = {-170, -112, 112, 170};
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *btn = lv_btn_create(scr_settings_func);
+        lv_obj_set_size(btn, 52, 30);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, rot_x[i], 245);
+        set_dark_blue_btn(btn);
+        lv_obj_add_event_cb(btn, rotation_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)rot_steps[i]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, rot_txt[i]);
+        lv_obj_center(lbl);
+    }
+    rotation_label = lv_label_create(scr_settings_func);
+    lv_obj_align(rotation_label, LV_ALIGN_TOP_MID, 0, 251);
+    update_rotation_label();
 
     // Einmaliger SNTP-Zeitabgleich ueber den in /sdcard/wifi-einstellungen.txt
     // hinterlegten Hotspot - bewusst NICHT in NVS gespeichert (siehe
@@ -2386,29 +2502,55 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // ausgebremst hatten. Standardmaessig ausgeblendet - apply_bmw_style()
     // schaltet sie frei. y-Offset von vormals 155 auf 135 verringert (Zentrum
     // etwas hoeher), naeher am "HIGH TEMP"-Bogen im Foto.
+    // Farbring der BMW-Style-Wasseranzeige (siehe BMW_TEMP_ARC_*): vor dem
+    // Nadel-Meter erzeugt, damit die Nadel darueber liegt. pad=0, damit der
+    // Bogenradius exakt der halben Widget-Breite entspricht; die Hilfsskala
+    // 0..360 mit range=360/rotation=0 nimmt Bogenwinkel direkt als Wert.
+    multi_bmw_temp_arc_meter = lv_meter_create(scr_multi);
+    lv_obj_remove_style_all(multi_bmw_temp_arc_meter);
+    lv_obj_set_size(multi_bmw_temp_arc_meter, 2 * (BMW_TEMP_ARC_R + BMW_TEMP_ARC_W / 2),
+                    2 * (BMW_TEMP_ARC_R + BMW_TEMP_ARC_W / 2));
+    lv_obj_align(multi_bmw_temp_arc_meter, LV_ALIGN_CENTER, 0, BMW_TEMP_ARC_CY);
+    lv_obj_clear_flag(multi_bmw_temp_arc_meter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(multi_bmw_temp_arc_meter, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(multi_bmw_temp_arc_meter, LV_OBJ_FLAG_HIDDEN);
+    lv_meter_scale_t *bmw_temp_scale = lv_meter_add_scale(multi_bmw_temp_arc_meter);
+    lv_meter_set_scale_ticks(multi_bmw_temp_arc_meter, bmw_temp_scale, 0, 0, 0, lv_color_black());
+    lv_meter_set_scale_range(multi_bmw_temp_arc_meter, bmw_temp_scale, 0, 360, 360, 0);
+    multi_bmw_temp_blue   = lv_meter_add_arc(multi_bmw_temp_arc_meter, bmw_temp_scale, BMW_TEMP_ARC_W,
+                                             lv_palette_main(LV_PALETTE_BLUE), 0);
+    multi_bmw_temp_orange = lv_meter_add_arc(multi_bmw_temp_arc_meter, bmw_temp_scale, BMW_TEMP_ARC_W,
+                                             lv_palette_main(LV_PALETTE_ORANGE), 0);
+    multi_bmw_temp_red    = lv_meter_add_arc(multi_bmw_temp_arc_meter, bmw_temp_scale, BMW_TEMP_ARC_W,
+                                             lv_palette_main(LV_PALETTE_RED), 0);
+    // Startzustand: alle drei Boegen mit Laenge 0 (start == end)
+    lv_meter_set_indicator_start_value(multi_bmw_temp_arc_meter, multi_bmw_temp_blue, 0);
+    lv_meter_set_indicator_end_value(multi_bmw_temp_arc_meter, multi_bmw_temp_blue, 0);
+    lv_meter_set_indicator_start_value(multi_bmw_temp_arc_meter, multi_bmw_temp_orange, 0);
+    lv_meter_set_indicator_end_value(multi_bmw_temp_arc_meter, multi_bmw_temp_orange, 0);
+    lv_meter_set_indicator_start_value(multi_bmw_temp_arc_meter, multi_bmw_temp_red, 0);
+    lv_meter_set_indicator_end_value(multi_bmw_temp_arc_meter, multi_bmw_temp_red, 0);
+
     multi_bmw_water_meter = lv_meter_create(scr_multi);
     lv_obj_set_style_bg_opa(multi_bmw_water_meter, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(multi_bmw_water_meter, 0, 0);
     lv_obj_set_size(multi_bmw_water_meter, MULTI_BMW_WATER_METER_SIZE, MULTI_BMW_WATER_METER_SIZE);
-    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, 120);
+    lv_obj_align(multi_bmw_water_meter, LV_ALIGN_CENTER, 0, BMW_WATER_PIVOT_Y);
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(multi_bmw_water_meter, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(multi_bmw_water_meter, LV_OBJ_FLAG_HIDDEN);
 
-    // rotation=MULTI_WATER_NEEDLE_ROTATION + range=MULTI_WATER_ARC_RANGE (110
-    // statt 270): dieselbe "+90"-Bildkorrektur wie bei der grossen Nadel
-    // (sichtbare Richtung = Skalenwinkel+90), aber auf den schmalen 110-Grad-
-    // Bogen unten zugeschnitten, damit die sichtbare Nadelrichtung exakt dem
-    // blauen Bogen (multi_water_inner_*) folgt. BMW_UI_Update() speist dafuer
-    // den gespiegelten Temperaturwert (WMIR()) statt des Rohwerts ein, damit
-    // die Nadel wie der Bogen gegen den Uhrzeigersinn waechst.
+    // Hilfsskala 0..360 (range=360, rotation=0): der Wert ist direkt der
+    // Bild-Rotationswinkel. BMW_UI_Update() berechnet ihn per atan2() aus dem
+    // Skalenpunkt der aktuellen Temperatur auf dem gedruckten Bogen (siehe
+    // BMW_TEMP_ARC_* / BMW_WATER_PIVOT_Y); das Bild ruht nach 6 Uhr, also
+    // Rotationswinkel = Zielrichtung - 90.
     const lv_img_dsc_t *small_needle_img;
     lv_coord_t small_pivot_x, small_pivot_y;
     get_small_needle_img(&small_needle_img, &small_pivot_x, &small_pivot_y);
-    multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MAX,
+    multi_bmw_water_needle = add_image_needle_ex(multi_bmw_water_meter, 0, 360,
                                                small_needle_img, small_pivot_x, small_pivot_y,
-                                               MULTI_WATER_ARC_RANGE, MULTI_WATER_NEEDLE_ROTATION,
-                                               &multi_bmw_water_needle_scale);
+                                               360, 0, &multi_bmw_water_needle_scale);
 
     lv_obj_t *bmw_water_hub = lv_obj_create(multi_bmw_water_meter);
     lv_obj_set_size(bmw_water_hub, 10, 10);
@@ -2513,6 +2655,13 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
 
     BMW_UI_Update();
     lv_scr_load(scr_multi);
+
+    // Gespeicherte Display-Drehung anwenden (Puffer liegt im PSRAM, nicht im
+    // knappen internen RAM). Klappt das nicht, ungedreht weiter.
+    if (g_rotation_deg != 0 && !LVGL_SetRotation(g_rotation_deg)) {
+        g_rotation_deg = 0;
+        update_rotation_label();
+    }
 
     // Zyklische Aktualisierung der Live-Werte (100 ms)
     lv_timer_create(update_timer_cb, 100, NULL);
@@ -2828,8 +2977,41 @@ void BMW_UI_Update(void)
     // Farb-/Blink-Schwellen wie die grosse Nadel im Wasser-Modus, nur mit den
     // kleinen Nadel-Bildern. Wird nur berechnet, solange der Stil aktiv ist.
     if (g_bmw_style_enabled) {
-        // WMIR() spiegelt den Wert, damit die Nadel auf der bestehenden Skala gegen den Uhrzeigersinn wandert
-        lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, WMIR(current_water_temp));
+        // Nadel exakt auf den Punkt der aktuellen Temperatur auf dem
+        // gedruckten Bogen richten (siehe BMW_TEMP_ARC_* / BMW_WATER_PIVOT_Y)
+        float th = bmw_temp_arc_deg(current_water_temp) * (float)M_PI / 180.0f;
+        float dx = BMW_TEMP_ARC_R * cosf(th);
+        float dy = BMW_TEMP_ARC_CY + BMW_TEMP_ARC_R * sinf(th) - BMW_WATER_PIVOT_Y;
+        int32_t needle_angle = (int32_t)lroundf(atan2f(dy, dx) * 180.0f / (float)M_PI) - 90;
+        while (needle_angle < 0) needle_angle += 360;
+        if (multi_bmw_water_needle->end_value != needle_angle) {
+            lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, needle_angle);
+        }
+
+        // Farbring auf der gedruckten Skala: waechst vom linken Ende (0 Grad)
+        // im Uhrzeigersinn-Gegenrichtung bis zur aktuellen Temperatur - Blau
+        // bis 100, Orange 100-115, Rot 115-125 (wie die gedruckten Zonen).
+        // lv_draw_arc() zeichnet von start nach end im Uhrzeigersinn, deshalb
+        // start = Winkel der aktuellen Temperatur (rechts), end = linkes Ende.
+        // Nur bei tatsaechlicher Aenderung setzen - jede Invalidierung loest
+        // bei full_refresh einen kompletten Frame aus.
+        {
+            float t = current_water_temp;
+            float seg_from[3] = {0.0f, (float)MULTI_WATER_RING_ORANGE_AT, (float)MULTI_WATER_RING_RED_AT};
+            float seg_to[3]   = {(float)MULTI_WATER_RING_ORANGE_AT, (float)MULTI_WATER_RING_RED_AT, BMW_TEMP_SCALE_MAX};
+            lv_meter_indicator_t *seg[3] = {multi_bmw_temp_blue, multi_bmw_temp_orange, multi_bmw_temp_red};
+            for (int i = 0; i < 3; i++) {
+                float hi = t < seg_to[i] ? t : seg_to[i];
+                int32_t a_end = (int32_t)lroundf(bmw_temp_arc_deg(seg_from[i]));
+                int32_t a_start = hi > seg_from[i] ? (int32_t)lroundf(bmw_temp_arc_deg(hi)) : a_end;
+                if (seg[i]->start_value != a_start) {
+                    lv_meter_set_indicator_start_value(multi_bmw_temp_arc_meter, seg[i], a_start);
+                }
+                if (seg[i]->end_value != a_end) {
+                    lv_meter_set_indicator_end_value(multi_bmw_temp_arc_meter, seg[i], a_end);
+                }
+            }
+        }
 
         const lv_img_dsc_t *small_base_img;
         lv_coord_t small_base_px, small_base_py;
@@ -2866,7 +3048,9 @@ void BMW_UI_Update(void)
     // mit WMIR() gespiegelt und vertauscht (WMIR() kehrt die Reihenfolge um),
     // damit der Bogen wie die Skala (MULTI_WATER_ARC_ROTATION) gegen den
     // Uhrzeigersinn von unten-links (kalt) nach unten-rechts (heiss) waechst.
-    {
+    // Im BMW-Style unsichtbar (dort uebernimmt multi_bmw_temp_arc_meter) -
+    // dann gar nicht erst aktualisieren, spart Invalidierungen.
+    if (!g_bmw_style_enabled) {
         float t = current_water_temp;
         float blue_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
         if (blue_end < MULTI_WATER_SCALE_MIN) blue_end = MULTI_WATER_SCALE_MIN;
