@@ -25,4 +25,8 @@ void LVGL_Init(void);
 // Ausgleich einer schief montierten Halterung. Muss aus dem LVGL-Kontext
 // aufgerufen werden. false, falls kein PSRAM fuer den Drehpuffer frei ist.
 bool LVGL_SetRotation(int16_t deg);
-int16_t LVGL_GetRotation(void);
+
+// Vom VSYNC-Interrupt des RGB-Panels aufzurufen (ST7701S.c); meldet dem
+// Flush-Callback, dass das Panel auf den neuen Framebuffer umgeschaltet hat.
+bool LVGL_NotifyVsyncFromISR(void);
+int16_t LVGL_GetRotation(void);

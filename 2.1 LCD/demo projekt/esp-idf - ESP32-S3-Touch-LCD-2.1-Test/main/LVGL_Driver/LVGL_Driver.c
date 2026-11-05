@@ -2,6 +2,7 @@
 #include <math.h>
 #include <string.h>
 #include "esp_heap_caps.h"
+#include "freertos/semphr.h"
 
 static const char *LVGL_TAG = "LVGL";   
 lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
@@ -18,6 +19,46 @@ static void *buf2 = NULL;
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
 SemaphoreHandle_t sem_vsync_end;
 SemaphoreHandle_t sem_gui_ready;
+#endif
+
+// --- Teil-Redraw (LVGL direct_mode) mit zwei Panel-Framebuffern ---
+// Bis v1.0.86 lief LVGL mit full_refresh: jede kleinste Aenderung (z. B. eine
+// neue Drehzahl-Ziffer) renderte alle 480x480 Pixel neu - inkl. komplettem
+// BMW-Hintergrundfoto aus dem Flash. Jetzt rendert LVGL nur die geaenderten
+// Bereiche direkt (an ihrer echten Bildschirmposition) in den gerade nicht
+// angezeigten Framebuffer. Beim letzten Bereich eines Frames wird dieser
+// Framebuffer angezeigt, auf den VSYNC (= Panel hat wirklich umgeschaltet)
+// gewartet und danach genau diese Bereiche in den anderen Framebuffer
+// kopiert, damit beide wieder denselben Inhalt haben und beim naechsten
+// Frame nichts Altes aufblitzt (gleiches Verfahren wie esp_lvgl_port).
+// Bei aktiver Display-Drehung (s_rot_deg != 0) wird weiterhin full_refresh
+// benutzt, weil dort ohnehin jedes Bild komplett gedreht werden muss.
+static SemaphoreHandle_t s_sem_vsync = NULL;
+
+bool LVGL_NotifyVsyncFromISR(void)
+{
+    BaseType_t high_task_awoken = pdFALSE;
+    if (s_sem_vsync) xSemaphoreGiveFromISR(s_sem_vsync, &high_task_awoken);
+    return high_task_awoken == pdTRUE;
+}
+
+#if CONFIG_EXAMPLE_DOUBLE_FB
+// Geaenderte Bereiche des gerade angezeigten Frames (src) in den anderen
+// Framebuffer (dst) uebernehmen.
+static void sync_dirty_areas(uint16_t *dst, const uint16_t *src)
+{
+    lv_disp_t *d = _lv_refr_get_disp_refreshing();
+    if (d == NULL) return;
+    const int W = EXAMPLE_LCD_H_RES;
+    for (int i = 0; i < d->inv_p; i++) {
+        if (d->inv_area_joined[i]) continue;
+        const lv_area_t *a = &d->inv_areas[i];
+        const size_t row_bytes = (size_t)(a->x2 - a->x1 + 1) * sizeof(uint16_t);
+        for (int y = a->y1; y <= a->y2; y++) {
+            memcpy(dst + y * W + a->x1, src + y * W + a->x1, row_bytes);
+        }
+    }
+}
 #endif
 
 // --- Display-Drehung um beliebige Winkel (Ausgleich einer schief montierten
@@ -104,14 +145,21 @@ bool LVGL_SetRotation(int16_t deg)
     s_rot_deg = deg;
 
     if (deg != 0 && !was_rotated) {
-        // LVGL ab jetzt in den eigenen Vollbild-Puffer rendern lassen
+        // LVGL ab jetzt in den eigenen Vollbild-Puffer rendern lassen - das
+        // gedrehte Bild braucht immer den kompletten Frame (full_refresh)
         lv_disp_draw_buf_init(&disp_buf, s_rot_src, NULL, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
+        disp_drv.direct_mode = false;
+        disp_drv.full_refresh = true;
     } else if (deg == 0 && was_rotated) {
         // Zurueck auf direktes Rendern in die Panel-Framebuffer - zuerst in
         // den gerade NICHT angezeigten, sonst sieht man den Aufbau kurz.
         void *back = (s_fb_shown == s_fb[0]) ? s_fb[1] : s_fb[0];
         void *front = (back == s_fb[0]) ? s_fb[1] : s_fb[0];
         lv_disp_draw_buf_init(&disp_buf, back, front, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
+        // Wieder Teil-Redraw; das folgende lv_obj_invalidate() zeichnet den
+        // ersten Frame komplett, sync_dirty_areas() kopiert ihn in beide Puffer
+        disp_drv.full_refresh = false;
+        disp_drv.direct_mode = true;
     }
     lv_obj_invalidate(lv_scr_act());
     return true;
@@ -134,7 +182,25 @@ void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
         lv_disp_flush_ready(drv);
         return;
     }
+    // direct_mode: LVGL hat alle geaenderten Bereiche bereits an ihrer echten
+    // Position in color_map (= einer der beiden Panel-Framebuffer) gezeichnet.
+    // Erst nach dem letzten Bereich des Frames umschalten.
+    if (!lv_disp_flush_is_last(drv)) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+    xSemaphoreTake(s_sem_vsync, 0); // evtl. alten VSYNC verwerfen
+    esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, color_map);
+    // Warten, bis das Panel wirklich auf den neuen Framebuffer umgeschaltet
+    // hat - sonst wuerde der naechste Frame in den noch angezeigten Puffer
+    // gezeichnet (Flackern). Timeout als Sicherheitsnetz, ein Frame dauert
+    // nur wenige zehn ms.
+    xSemaphoreTake(s_sem_vsync, pdMS_TO_TICKS(50));
+    void *other = (color_map == s_fb[0]) ? s_fb[1] : s_fb[0];
+    sync_dirty_areas((uint16_t *)other, (const uint16_t *)color_map);
     s_fb_shown = color_map;
+    lv_disp_flush_ready(drv);
+    return;
 #endif
     int offsetx1 = area->x1;
     int offsetx2 = area->x2;
@@ -221,7 +287,11 @@ void LVGL_Init(void)
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
 #if CONFIG_EXAMPLE_DOUBLE_FB
-    disp_drv.full_refresh = true; // the full_refresh mode can maintain the synchronization between the two frame buffers
+    // Teil-Redraw statt Vollbild, Synchronisierung der beiden Framebuffer
+    // uebernimmt example_lvgl_flush_cb()/sync_dirty_areas()
+    s_sem_vsync = xSemaphoreCreateBinary();
+    assert(s_sem_vsync);
+    disp_drv.direct_mode = true;
 #endif
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
 
@@ -244,4 +314,4 @@ void LVGL_Init(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
-}
+}

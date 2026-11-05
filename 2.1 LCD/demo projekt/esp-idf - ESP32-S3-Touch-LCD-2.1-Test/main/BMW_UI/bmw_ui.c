@@ -24,6 +24,78 @@
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include <stdarg.h>
+
+// --- "Nur bei echter Aenderung"-Setter ---
+// LVGL 8.2 invalidiert bei lv_label_set_text()/_fmt(), jedem Style-Setter
+// und lv_obj_add/clear_flag(HIDDEN) das Objekt IMMER - auch wenn derselbe
+// Text/Wert schon drinsteht. Der 100-ms-Update-Timer setzt alle Werte (inkl.
+// je 8 Umrandungs-Kopien) bei jedem Tick neu, dadurch wurde staendig neu
+// gezeichnet, obwohl sich auf dem Schirm nichts geaendert hatte. Diese
+// Helfer vergleichen zuerst und fassen das Objekt nur bei einer Aenderung an.
+static void ui_set_text(lv_obj_t *label, const char *text)
+{
+    if (label == NULL || text == NULL) return;
+    const char *cur = lv_label_get_text(label);
+    if (cur != NULL && strcmp(cur, text) == 0) return;
+    lv_label_set_text(label, text);
+}
+
+// Gleiche Formatierung wie lv_label_set_text_fmt() (LVGLs lv_vsnprintf, also
+// ohne Float-Unterstuetzung - fuer "%f" weiterhin snprintf + ui_set_text()).
+static void ui_set_text_fmt(lv_obj_t *label, const char *fmt, ...)
+{
+    char buf[128];
+    va_list args;
+    va_start(args, fmt);
+    lv_vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    ui_set_text(label, buf);
+}
+
+static void ui_set_text_color(lv_obj_t *obj, lv_color_t col)
+{
+    if (lv_obj_get_style_text_color(obj, 0).full != col.full)
+        lv_obj_set_style_text_color(obj, col, 0);
+}
+
+static void ui_set_bg_color(lv_obj_t *obj, lv_color_t col)
+{
+    if (lv_obj_get_style_bg_color(obj, 0).full != col.full)
+        lv_obj_set_style_bg_color(obj, col, 0);
+}
+
+static void ui_set_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN) == hidden) return;
+    if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Meter-Indikatoren: lv_meter_set_indicator_*_value() invalidiert auch bei
+// unveraendertem Wert den Bereich des Bogens bzw. der Nadel.
+static void ui_meter_set_range(lv_obj_t *meter, lv_meter_indicator_t *ind, int32_t start, int32_t end)
+{
+    if (ind->start_value != start) lv_meter_set_indicator_start_value(meter, ind, start);
+    if (ind->end_value != end) lv_meter_set_indicator_end_value(meter, ind, end);
+}
+
+static void ui_meter_set_value(lv_obj_t *meter, lv_meter_indicator_t *ind, int32_t value)
+{
+    if (ind->start_value != value || ind->end_value != value)
+        lv_meter_set_indicator_value(meter, ind, value);
+}
+
+// Deckkraft eines Meter-Indikators: das direkte Setzen von ind->opa loest
+// selbst keinen Redraw aus. Unter full_refresh fiel das nicht auf (irgendein
+// anderes Objekt invalidierte ohnehin den ganzen Schirm), mit Teil-Redraw
+// muss das Meter explizit neu gezeichnet werden.
+static void ui_meter_set_opa(lv_obj_t *meter, lv_meter_indicator_t *ind, lv_opa_t opa)
+{
+    if (ind->opa == opa) return;
+    ind->opa = opa;
+    lv_obj_invalidate(meter);
+}
 
 // --- Farbpalette fuer die Einstellungen (Primaer-/Sekundaerfarbe, wie im
 // C6-Projekt inkl. Neongelb) ---
@@ -948,7 +1020,7 @@ static void create_color_picker_column(lv_obj_t *parent, const char *title, int 
                                         bool is_primary, ColorBtnCtx *ctx_array)
 {
     lv_obj_t *header = lv_label_create(parent);
-    lv_label_set_text(header, title);
+    ui_set_text(header, title);
     lv_obj_align(header, LV_ALIGN_TOP_MID, x_offset, 45);
 
     lv_obj_t *list = lv_obj_create(parent);
@@ -994,7 +1066,7 @@ static void start_datalogging(void)
     // Hier erneut versuchen, statt direkt "SD-Fehler!" zu melden, obwohl die
     // Karte jetzt sichtbar im Schacht steckt.
     if (!SD_EnsureMounted()) {
-        lv_label_set_text(log_status_label, "SD-Fehler!");
+        ui_set_text(log_status_label, "SD-Fehler!");
         SD_Log("Datenlogging: SD_EnsureMounted() fehlgeschlagen (Karte fehlt/nicht lesbar)");
         return;
     }
@@ -1021,7 +1093,7 @@ static void start_datalogging(void)
 
     log_file = fopen(path, "w");
     if (!log_file) {
-        lv_label_set_text(log_status_label, "SD-Fehler!");
+        ui_set_text(log_status_label, "SD-Fehler!");
         SD_Log("Datenlogging: fopen(%s) fehlgeschlagen, errno=%d (%s)",
                path, errno, strerror(errno));
         return;
@@ -1039,7 +1111,7 @@ static void start_datalogging(void)
     // vergessen, obwohl es dieselbe FatFs-Instanz ist.
     fsync(fileno(log_file));
     log_last_tick = lv_tick_get();
-    lv_label_set_text(log_status_label, "Aktiv");
+    ui_set_text(log_status_label, "Aktiv");
 
     // fopen() hat den abschuzgefaehrdeten Punkt diesmal ueberlebt - Bootloop-
     // Schutz-Zaehler fuer den naechsten Boot wieder auf 0 setzen.
@@ -1060,7 +1132,7 @@ static void stop_datalogging(void)
         fclose(log_file);
         log_file = NULL;
     }
-    lv_label_set_text(log_status_label, "");
+    ui_set_text(log_status_label, "");
 }
 
 // Einmaliger, verzoegerter Start fuer das beim Boot aus NVS wiederhergestellte
@@ -1155,7 +1227,7 @@ static void sd_format_btn_cb(lv_event_t *e)
 
     s_sd_format_busy = true;
     s_sd_format_ok = false;
-    lv_label_set_text(sd_format_status_label, "Formatiere...");
+    ui_set_text(sd_format_status_label, "Formatiere...");
     xTaskCreatePinnedToCore(sd_format_task, "sd_format", 4096, NULL, 2, NULL, 0);
 }
 
@@ -1175,7 +1247,7 @@ static void gauge_mode_switch_cb(lv_event_t *e)
     lv_obj_t *sw = lv_event_get_target(e);
     bool rpm_mode = lv_obj_has_state(sw, LV_STATE_CHECKED);
     g_multi_gauge_mode = rpm_mode ? MULTI_GAUGE_RPM : MULTI_GAUGE_WATER;
-    lv_label_set_text(gauge_mode_label, rpm_mode ? "Anzeige: Drehzahl" : "Anzeige: Wasser");
+    ui_set_text(gauge_mode_label, rpm_mode ? "Anzeige: Drehzahl" : "Anzeige: Wasser");
     if (rpm_mode) {
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
@@ -1376,7 +1448,7 @@ static void hotspot_switch_cb(lv_event_t *e)
         // Situation laufen, die sd_format_task() umgekehrt schon vermeidet.
         if (s_sd_format_busy) {
             lv_obj_clear_state(sw, LV_STATE_CHECKED);
-            lv_label_set_text(hotspot_status_label, "SD wird formatiert");
+            ui_set_text(hotspot_status_label, "SD wird formatiert");
             return;
         }
         SNTP_Sync_Start();
@@ -1396,14 +1468,14 @@ static void create_settings_screen(void)
     lv_obj_clear_flag(scr_settings, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(scr_settings);
-    lv_label_set_text(title, "FARBEN");
+    ui_set_text(title, "FARBEN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
     create_color_picker_column(scr_settings, "Primaer", -115, true, primary_color_ctx);
     create_color_picker_column(scr_settings, "Sekundaer", 115, false, secondary_color_ctx);
 
     lv_obj_t *hint = lv_label_create(scr_settings);
-    lv_label_set_text(hint, "Wisch -> Funktionen");
+    ui_set_text(hint, "Wisch -> Funktionen");
     lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -58);
 
@@ -1412,7 +1484,7 @@ static void create_settings_screen(void)
     lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_add_event_cb(btn_back, back_from_settings_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *back_lbl = lv_label_create(btn_back);
-    lv_label_set_text(back_lbl, "Zurueck");
+    ui_set_text(back_lbl, "Zurueck");
     lv_obj_center(back_lbl);
 
     lv_obj_add_event_cb(scr_settings, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -1423,7 +1495,7 @@ static void create_settings_screen(void)
 static void update_rotation_label(void)
 {
     if (rotation_label) {
-        lv_label_set_text_fmt(rotation_label, "Drehung %+d\xC2\xB0", (int)g_rotation_deg);
+        ui_set_text_fmt(rotation_label, "Drehung %+d\xC2\xB0", (int)g_rotation_deg);
     }
 }
 
@@ -1452,14 +1524,14 @@ static void create_settings_func_screen(void)
     lv_obj_clear_flag(scr_settings_func, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(scr_settings_func);
-    lv_label_set_text(title, "FUNKTIONEN");
+    ui_set_text(title, "FUNKTIONEN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
     // TOP_MID mit Offset statt TOP_LEFT/TOP_RIGHT an der Kante: Bei diesem
     // y-Abstand von oben liegt die Kante auf dem runden Panel innerhalb der
     // sichtbaren Kreisflaeche zu weit aussen und wird abgeschnitten.
     lv_obj_t *log_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(log_label, "Datenlogging");
+    ui_set_text(log_label, "Datenlogging");
     lv_obj_align(log_label, LV_ALIGN_TOP_MID, -85, 75);
 
     log_switch = lv_switch_create(scr_settings_func);
@@ -1467,7 +1539,7 @@ static void create_settings_func_screen(void)
     lv_obj_add_event_cb(log_switch, log_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     log_status_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(log_status_label, "");
+    ui_set_text(log_status_label, "");
     lv_obj_align_to(log_status_label, log_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
 
     // Aus NVS geladener Zustand (bmw_settings_load(), vor dem UI-Aufbau
@@ -1481,7 +1553,7 @@ static void create_settings_func_screen(void)
     }
 
     gauge_mode_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(gauge_mode_label, "Anzeige: Wasser");
+    ui_set_text(gauge_mode_label, "Anzeige: Wasser");
     lv_obj_align(gauge_mode_label, LV_ALIGN_TOP_MID, 85, 75);
 
     lv_obj_t *gauge_mode_switch = lv_switch_create(scr_settings_func);
@@ -1490,7 +1562,7 @@ static void create_settings_func_screen(void)
 
     if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
         lv_obj_add_state(gauge_mode_switch, LV_STATE_CHECKED);
-        lv_label_set_text(gauge_mode_label, "Anzeige: Drehzahl");
+        ui_set_text(gauge_mode_label, "Anzeige: Drehzahl");
         lv_meter_set_scale_range(multi_meter, multi_needle_scale, 0, 8000, 270, 45);
         lv_meter_set_scale_range(multi_meter, multi_ring_scale, 0, 8000, 270, 135);
     }
@@ -1500,7 +1572,7 @@ static void create_settings_func_screen(void)
     // Umschalter darueber, in die Luecke zwischen diesem und dem Warnsummer
     // platziert.
     lv_obj_t *bmw_style_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(bmw_style_label, "BMW Style");
+    ui_set_text(bmw_style_label, "BMW Style");
     lv_obj_align(bmw_style_label, LV_ALIGN_TOP_MID, 0, 145);
 
     lv_obj_t *bmw_style_switch = lv_switch_create(scr_settings_func);
@@ -1513,7 +1585,7 @@ static void create_settings_func_screen(void)
     apply_bmw_style(g_bmw_style_enabled); // aus NVS geladener Zustand, direkt beim Aufbau anwenden
 
     lv_obj_t *buzzer_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(buzzer_label, "Warnsummer ab 120\xC2\xB0""C");
+    ui_set_text(buzzer_label, "Warnsummer ab 120\xC2\xB0""C");
     lv_obj_align(buzzer_label, LV_ALIGN_TOP_MID, 0, 190);
 
     lv_obj_t *buzzer_switch = lv_switch_create(scr_settings_func);
@@ -1535,7 +1607,7 @@ static void create_settings_func_screen(void)
         set_dark_blue_btn(btn);
         lv_obj_add_event_cb(btn, rotation_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)rot_steps[i]);
         lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, rot_txt[i]);
+        ui_set_text(lbl, rot_txt[i]);
         lv_obj_center(lbl);
     }
     rotation_label = lv_label_create(scr_settings_func);
@@ -1546,7 +1618,7 @@ static void create_settings_func_screen(void)
     // hinterlegten Hotspot - bewusst NICHT in NVS gespeichert (siehe
     // hotspot_switch_cb), startet bei jedem Boot wieder aus.
     lv_obj_t *hotspot_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(hotspot_label, "Hotspot verbinden");
+    ui_set_text(hotspot_label, "Hotspot verbinden");
     lv_obj_align(hotspot_label, LV_ALIGN_TOP_MID, 0, 280);
 
     hotspot_switch = lv_switch_create(scr_settings_func);
@@ -1554,7 +1626,7 @@ static void create_settings_func_screen(void)
     lv_obj_add_event_cb(hotspot_switch, hotspot_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     hotspot_status_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(hotspot_status_label, "Inaktiv");
+    ui_set_text(hotspot_status_label, "Inaktiv");
     lv_obj_set_style_text_color(hotspot_status_label, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hotspot_status_label, LV_ALIGN_TOP_MID, 0, 330);
 
@@ -1568,16 +1640,16 @@ static void create_settings_func_screen(void)
     set_dark_blue_btn(format_btn);
     lv_obj_add_event_cb(format_btn, sd_format_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *format_btn_label = lv_label_create(format_btn);
-    lv_label_set_text(format_btn_label, "SD formatieren");
+    ui_set_text(format_btn_label, "SD formatieren");
     lv_obj_center(format_btn_label);
 
     sd_format_status_label = lv_label_create(scr_settings_func);
-    lv_label_set_text(sd_format_status_label, "");
+    ui_set_text(sd_format_status_label, "");
     lv_obj_set_style_text_color(sd_format_status_label, lv_color_make(150, 150, 150), 0);
     lv_obj_align(sd_format_status_label, LV_ALIGN_TOP_MID, 0, 396);
 
     lv_obj_t *hint = lv_label_create(scr_settings_func);
-    lv_label_set_text(hint, "<- Wisch: Farben");
+    ui_set_text(hint, "<- Wisch: Farben");
     lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 
@@ -1644,7 +1716,7 @@ static void dtc_read_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     SD_Log("UI: Button 'Auslesen' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
-    lv_label_set_text(dtc_status_label, "Frage Fehlercodes an...");
+    ui_set_text(dtc_status_label, "Frage Fehlercodes an...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_read_dtc();
     else CAN_OBD2_read_dtc();
 }
@@ -1653,7 +1725,7 @@ static void dtc_clear_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     SD_Log("UI: Button 'Loeschen' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
-    lv_label_set_text(dtc_status_label, "Loesche Fehlercodes...");
+    ui_set_text(dtc_status_label, "Loesche Fehlercodes...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_clear_dtc();
     else CAN_OBD2_clear_dtc();
 }
@@ -1662,7 +1734,7 @@ static void dtc_service_btn_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     SD_Log("UI: Button 'Service Reset' gedrueckt (Quelle=%s)", g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
-    lv_label_set_text(dtc_status_label, "Sende Service-Reset...");
+    ui_set_text(dtc_status_label, "Sende Service-Reset...");
     if (g_data_source == DATA_SRC_BLE_OBD) BLE_OBD_reset_service_oil();
     else CAN_OBD2_reset_service_oil();
 }
@@ -1677,7 +1749,7 @@ static void create_dtc_screen(void)
     // bei y=15 faellt ein Teil des Textes in die abgeschnittene Kante des
     // runden Displays und verschwindet dort.
     lv_obj_t *title = lv_label_create(scr_dtc);
-    lv_label_set_text(title, "FEHLERCODES");
+    ui_set_text(title, "FEHLERCODES");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
     // Liste der ausgelesenen Fehlercodes: deutlich mehr Platz (Hoehe 190 -> 225)
@@ -1692,11 +1764,11 @@ static void create_dtc_screen(void)
     lv_obj_set_style_text_font(dtc_list_label, &lv_font_montserrat_28, 0);
     lv_obj_set_width(dtc_list_label, 390);
     lv_obj_align(dtc_list_label, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
+    ui_set_text(dtc_list_label, "Noch nicht ausgelesen");
 
     dtc_status_label = lv_label_create(scr_dtc);
     lv_obj_set_style_text_font(dtc_status_label, &lv_font_montserrat_28, 0);
-    lv_label_set_text(dtc_status_label, "");
+    ui_set_text(dtc_status_label, "");
     lv_obj_align(dtc_status_label, LV_ALIGN_TOP_MID, 0, 300);
 
     // Auslesen / Loeschen nebeneinander, schmaler als vorher (200 -> 170),
@@ -1709,7 +1781,7 @@ static void create_dtc_screen(void)
     lv_obj_add_event_cb(btn_read, dtc_read_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *read_lbl = lv_label_create(btn_read);
     lv_obj_set_style_text_font(read_lbl, &lv_font_montserrat_28, 0);
-    lv_label_set_text(read_lbl, "Auslesen");
+    ui_set_text(read_lbl, "Auslesen");
     lv_obj_center(read_lbl);
 
     lv_obj_t *btn_clear = lv_btn_create(scr_dtc);
@@ -1719,7 +1791,7 @@ static void create_dtc_screen(void)
     lv_obj_add_event_cb(btn_clear, dtc_clear_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *clear_lbl = lv_label_create(btn_clear);
     lv_obj_set_style_text_font(clear_lbl, &lv_font_montserrat_28, 0);
-    lv_label_set_text(clear_lbl, "Loeschen");
+    ui_set_text(clear_lbl, "Loeschen");
     lv_obj_center(clear_lbl);
 
     // Service-Reset darunter
@@ -1730,7 +1802,7 @@ static void create_dtc_screen(void)
     lv_obj_add_event_cb(btn_service, dtc_service_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *service_lbl = lv_label_create(btn_service);
     lv_obj_set_style_text_font(service_lbl, &lv_font_montserrat_28, 0);
-    lv_label_set_text(service_lbl, "Service Reset");
+    ui_set_text(service_lbl, "Service Reset");
     lv_obj_center(service_lbl);
 
     lv_obj_add_event_cb(scr_dtc, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -1745,7 +1817,7 @@ static void service_btn_cb(lv_event_t *e)
            g_data_source == DATA_SRC_BLE_OBD ? "BLE" : "MCP");
     bool ok = (g_data_source == DATA_SRC_BLE_OBD) ? BLE_OBD_service_func(idx)
                                                   : CAN_OBD2_service_func(idx);
-    lv_label_set_text_fmt(service_status_label, ok ? "Gesendet: %s" : "Nicht hinterlegt: %s",
+    ui_set_text_fmt(service_status_label, ok ? "Gesendet: %s" : "Nicht hinterlegt: %s",
                           SERVICE_FUNCS[idx].label);
 }
 
@@ -1756,11 +1828,11 @@ static void create_service_screen(void)
     lv_obj_clear_flag(scr_service, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(scr_service);
-    lv_label_set_text(title, "SERVICE");
+    ui_set_text(title, "SERVICE");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 25);
 
     lv_obj_t *ver = lv_label_create(scr_service);
-    lv_label_set_text_fmt(ver, "v%s", esp_app_get_description()->version);
+    ui_set_text_fmt(ver, "v%s", esp_app_get_description()->version);
     lv_obj_set_style_text_color(ver, lv_color_make(150, 150, 150), 0);
     lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 48);
 
@@ -1772,12 +1844,12 @@ static void create_service_screen(void)
         lv_obj_add_event_cb(btn, service_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_48, 0);
-        lv_label_set_text(lbl, SERVICE_FUNCS[i].label);
+        ui_set_text(lbl, SERVICE_FUNCS[i].label);
         lv_obj_center(lbl);
     }
 
     service_status_label = lv_label_create(scr_service);
-    lv_label_set_text(service_status_label, "");
+    ui_set_text(service_status_label, "");
     lv_obj_align(service_status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
 
     lv_obj_add_event_cb(scr_service, swipe_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -1800,13 +1872,13 @@ static void create_service_screen(void)
 static lv_obj_t *create_sensor_cell(lv_obj_t *parent, const char *caption, int x, int y)
 {
     lv_obj_t *cap = lv_label_create(parent);
-    lv_label_set_text(cap, caption);
+    ui_set_text(cap, caption);
     lv_obj_set_style_text_color(cap, lv_color_make(150, 150, 150), 0);
     lv_obj_align(cap, LV_ALIGN_TOP_MID, x, y);
 
     lv_obj_t *val = lv_label_create(parent);
     lv_obj_set_style_text_font(val, &lv_font_montserrat_28, 0);
-    lv_label_set_text(val, "---");
+    ui_set_text(val, "---");
     lv_obj_align(val, LV_ALIGN_TOP_MID, x, y + 22);
     return val;
 }
@@ -1818,7 +1890,7 @@ static void create_sensors_screen(void)
     lv_obj_clear_flag(scr_sensors, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(scr_sensors);
-    lv_label_set_text(title, "SENSOREN");
+    ui_set_text(title, "SENSOREN");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 25);
 
     sens_lambda1_val      = create_sensor_cell(scr_sensors, "Lambda B1",     -110, 70);
@@ -1834,11 +1906,11 @@ static void create_sensors_screen(void)
 
     // Werden nie per OBD2 beantwortet (siehe Kommentar oben) - einmalig fest
     // auf "n/v" setzen statt bei jedem BMW_UI_Update()-Tick neu zu schreiben.
-    lv_label_set_text(sens_cam_in_val, "n/v");
-    lv_label_set_text(sens_cam_ex_val, "n/v");
+    ui_set_text(sens_cam_in_val, "n/v");
+    ui_set_text(sens_cam_ex_val, "n/v");
 
     lv_obj_t *hint = lv_label_create(scr_sensors);
-    lv_label_set_text(hint, "<- Wisch: Service");
+    ui_set_text(hint, "<- Wisch: Service");
     lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 
@@ -1881,10 +1953,10 @@ static void update_led_conflict_warning(void)
     if (!led_conflict_label) return;
     bool conflict = (g_led_active_strip == 1 && g_data_source == DATA_SRC_MCP2515);
     if (conflict) {
-        lv_label_set_text(led_conflict_label, "Achtung: MCP2515 aktiv - blockiert GPIO19!");
-        lv_obj_clear_flag(led_conflict_label, LV_OBJ_FLAG_HIDDEN);
+        ui_set_text(led_conflict_label, "Achtung: MCP2515 aktiv - blockiert GPIO19!");
+        ui_set_hidden(led_conflict_label, false);
     } else {
-        lv_obj_add_flag(led_conflict_label, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(led_conflict_label, true);
     }
 }
 
@@ -1895,7 +1967,7 @@ static void update_led_conflict_warning(void)
 static void refresh_led_screen_controls(void)
 {
     int idx = g_led_active_strip;
-    lv_label_set_text_fmt(led_title_label, "LED CONTROL – Streifen %d", idx + 1);
+    ui_set_text_fmt(led_title_label, "LED CONTROL – Streifen %d", idx + 1);
     lv_obj_set_style_bg_color(led_strip1_tab_btn,
         idx == 0 ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_bg_color(led_strip2_tab_btn,
@@ -1908,13 +1980,13 @@ static void refresh_led_screen_controls(void)
     }
 
     lv_slider_set_value(led_count_slider, g_led[idx].count, LV_ANIM_OFF);
-    lv_label_set_text_fmt(led_count_label, "Anzahl: %d", g_led[idx].count);
+    ui_set_text_fmt(led_count_label, "Anzahl: %d", g_led[idx].count);
 
     lv_slider_set_value(led_brightness_slider, g_led[idx].brightness, LV_ANIM_OFF);
-    lv_label_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
+    ui_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
 
     lv_slider_set_value(led_speed_slider, g_led[idx].speed, LV_ANIM_OFF);
-    lv_label_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led[idx].speed);
+    ui_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led[idx].speed);
 
     lv_obj_set_style_bg_color(led_main_color_swatch, COLOR_PALETTE[g_led[idx].color_main_idx].color, 0);
     lv_obj_set_style_bg_color(led_second_color_swatch, COLOR_PALETTE[g_led[idx].color_second_idx].color, 0);
@@ -1965,7 +2037,7 @@ static void led_count_slider_changed_cb(lv_event_t *e)
     int idx = g_led_active_strip;
     g_led[idx].count = lv_slider_get_value(slider);
     led_apply_count(idx, g_led[idx].count);
-    lv_label_set_text_fmt(led_count_label, "Anzahl: %d", g_led[idx].count);
+    ui_set_text_fmt(led_count_label, "Anzahl: %d", g_led[idx].count);
 }
 
 // Erst beim Loslassen in NVS schreiben, nicht bei jedem Zwischenschritt
@@ -1982,7 +2054,7 @@ static void led_brightness_slider_changed_cb(lv_event_t *e)
     int idx = g_led_active_strip;
     g_led[idx].brightness = (uint8_t)lv_slider_get_value(slider);
     led_apply_brightness(idx, g_led[idx].brightness);
-    lv_label_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
+    ui_set_text_fmt(led_brightness_label, "Helligkeit: %d%%", g_led[idx].brightness);
 }
 
 static void led_brightness_slider_released_cb(lv_event_t *e)
@@ -1997,7 +2069,7 @@ static void led_speed_slider_changed_cb(lv_event_t *e)
     int idx = g_led_active_strip;
     g_led[idx].speed = (uint8_t)lv_slider_get_value(slider);
     led_apply_speed(idx, g_led[idx].speed);
-    lv_label_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led[idx].speed);
+    ui_set_text_fmt(led_speed_label, "Tempo: %d%%", g_led[idx].speed);
 }
 
 static void led_speed_slider_released_cb(lv_event_t *e)
@@ -2080,7 +2152,7 @@ static void led_open_color_popup(lv_obj_t *parent_screen, bool is_second)
     lv_obj_set_style_pad_column(panel, 10, 0);
 
     lv_obj_t *title = lv_label_create(panel);
-    lv_label_set_text(title, is_second ? "Zweitfarbe waehlen" : "Hauptfarbe waehlen");
+    ui_set_text(title, is_second ? "Zweitfarbe waehlen" : "Hauptfarbe waehlen");
     lv_obj_set_width(title, LV_PCT(100));
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -2111,7 +2183,7 @@ static void create_led_screen(void)
     lv_obj_clear_flag(scr_led, LV_OBJ_FLAG_SCROLLABLE);
 
     led_title_label = lv_label_create(scr_led);
-    lv_label_set_text(led_title_label, "LED CONTROL – Streifen 1");
+    ui_set_text(led_title_label, "LED CONTROL – Streifen 1");
     lv_obj_align(led_title_label, LV_ALIGN_TOP_MID, 0, 15);
 
     // Tab-Umschalter: waehlt, welcher der zwei unabhaengigen Streifen in den
@@ -2121,7 +2193,7 @@ static void create_led_screen(void)
     lv_obj_align(led_strip1_tab_btn, LV_ALIGN_TOP_MID, -75, 40);
     lv_obj_add_event_cb(led_strip1_tab_btn, led_strip_tab_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
     lv_obj_t *tab1_lbl = lv_label_create(led_strip1_tab_btn);
-    lv_label_set_text(tab1_lbl, "Streifen 1");
+    ui_set_text(tab1_lbl, "Streifen 1");
     lv_obj_center(tab1_lbl);
 
     led_strip2_tab_btn = lv_btn_create(scr_led);
@@ -2129,11 +2201,11 @@ static void create_led_screen(void)
     lv_obj_align(led_strip2_tab_btn, LV_ALIGN_TOP_MID, 75, 40);
     lv_obj_add_event_cb(led_strip2_tab_btn, led_strip_tab_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
     lv_obj_t *tab2_lbl = lv_label_create(led_strip2_tab_btn);
-    lv_label_set_text(tab2_lbl, "Streifen 2");
+    ui_set_text(tab2_lbl, "Streifen 2");
     lv_obj_center(tab2_lbl);
 
     lv_obj_t *enable_label = lv_label_create(scr_led);
-    lv_label_set_text(enable_label, "Streifen aktiv");
+    ui_set_text(enable_label, "Streifen aktiv");
     lv_obj_align(enable_label, LV_ALIGN_TOP_MID, 0, 72);
 
     led_enable_switch = lv_switch_create(scr_led);
@@ -2145,7 +2217,7 @@ static void create_led_screen(void)
     lv_obj_align(led_pattern_solid_btn, LV_ALIGN_TOP_MID, -75, 137);
     lv_obj_add_event_cb(led_pattern_solid_btn, led_pattern_solid_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *solid_lbl = lv_label_create(led_pattern_solid_btn);
-    lv_label_set_text(solid_lbl, "Solid");
+    ui_set_text(solid_lbl, "Solid");
     lv_obj_center(solid_lbl);
 
     led_pattern_chase_btn = lv_btn_create(scr_led);
@@ -2153,11 +2225,11 @@ static void create_led_screen(void)
     lv_obj_align(led_pattern_chase_btn, LV_ALIGN_TOP_MID, 75, 137);
     lv_obj_add_event_cb(led_pattern_chase_btn, led_pattern_chase_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *chase_lbl = lv_label_create(led_pattern_chase_btn);
-    lv_label_set_text(chase_lbl, "Chase");
+    ui_set_text(chase_lbl, "Chase");
     lv_obj_center(chase_lbl);
 
     led_count_label = lv_label_create(scr_led);
-    lv_label_set_text(led_count_label, "Anzahl: 30");
+    ui_set_text(led_count_label, "Anzahl: 30");
     lv_obj_align(led_count_label, LV_ALIGN_TOP_MID, 0, 182);
 
     led_count_slider = lv_slider_create(scr_led);
@@ -2169,7 +2241,7 @@ static void create_led_screen(void)
 
     // Zwischen Anzahl- und Tempo-Regler platziert (vom Nutzer so gewuenscht).
     led_brightness_label = lv_label_create(scr_led);
-    lv_label_set_text(led_brightness_label, "Helligkeit: 100%");
+    ui_set_text(led_brightness_label, "Helligkeit: 100%");
     lv_obj_align(led_brightness_label, LV_ALIGN_TOP_MID, 0, 237);
 
     led_brightness_slider = lv_slider_create(scr_led);
@@ -2189,7 +2261,7 @@ static void create_led_screen(void)
     lv_obj_clear_flag(led_speed_row, LV_OBJ_FLAG_SCROLLABLE);
 
     led_speed_label = lv_label_create(led_speed_row);
-    lv_label_set_text(led_speed_label, "Tempo: 50%");
+    ui_set_text(led_speed_label, "Tempo: 50%");
     lv_obj_align(led_speed_label, LV_ALIGN_TOP_MID, 0, 0);
 
     led_speed_slider = lv_slider_create(led_speed_row);
@@ -2203,7 +2275,7 @@ static void create_led_screen(void)
     // Spalten - Tippen oeffnet das vollflaechige Auswahl-Popup (siehe
     // led_open_color_popup()).
     lv_obj_t *main_hdr = lv_label_create(scr_led);
-    lv_label_set_text(main_hdr, "Hauptfarbe");
+    ui_set_text(main_hdr, "Hauptfarbe");
     lv_obj_align(main_hdr, LV_ALIGN_TOP_MID, -90, 356);
 
     led_main_color_swatch = lv_btn_create(scr_led);
@@ -2215,7 +2287,7 @@ static void create_led_screen(void)
     lv_obj_add_event_cb(led_main_color_swatch, led_main_swatch_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *second_hdr = lv_label_create(scr_led);
-    lv_label_set_text(second_hdr, "Zweitfarbe");
+    ui_set_text(second_hdr, "Zweitfarbe");
     lv_obj_align(second_hdr, LV_ALIGN_TOP_MID, 90, 356);
 
     led_second_color_swatch = lv_btn_create(scr_led);
@@ -2227,13 +2299,13 @@ static void create_led_screen(void)
     lv_obj_add_event_cb(led_second_color_swatch, led_second_swatch_cb, LV_EVENT_CLICKED, NULL);
 
     led_conflict_label = lv_label_create(scr_led);
-    lv_label_set_text(led_conflict_label, "");
+    ui_set_text(led_conflict_label, "");
     lv_obj_set_style_text_color(led_conflict_label, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_align(led_conflict_label, LV_ALIGN_BOTTOM_MID, 0, -38);
     lv_obj_add_flag(led_conflict_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *hint = lv_label_create(scr_led);
-    lv_label_set_text(hint, "Wisch runter: Zurueck");
+    ui_set_text(hint, "Wisch runter: Zurueck");
     lv_obj_set_style_text_color(hint, lv_color_make(150, 150, 150), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -15);
 
@@ -2405,10 +2477,10 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_text_font(multi_speed_label, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(multi_speed_label, g_color_primary, 0);
     lv_obj_align(multi_speed_label, LV_ALIGN_CENTER, 0, -50);
-    lv_label_set_text(multi_speed_label, "0");
+    ui_set_text(multi_speed_label, "0");
 
     multi_unit_label = lv_label_create(scr_multi);
-    lv_label_set_text(multi_unit_label, "KM/H");
+    ui_set_text(multi_unit_label, "KM/H");
     lv_obj_set_style_text_color(multi_unit_label, lv_color_white(), 0);
     lv_obj_align(multi_unit_label, LV_ALIGN_CENTER, 0, -15);
 
@@ -2445,7 +2517,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
             lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
             lv_obj_align(lbl, LV_ALIGN_CENTER,
                          field_x[f] + outline_off[i][0], 60 + outline_off[i][1]);
-            lv_label_set_text(lbl, "-");
+            ui_set_text(lbl, "-");
             outline_fields[f][i] = lbl;
         }
     }
@@ -2458,7 +2530,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     for (int i = 0; i < 4; i++) {
         lv_obj_set_style_text_color(fields[i], lv_color_white(), 0);
         lv_obj_align(fields[i], LV_ALIGN_CENTER, field_x[i], 60);
-        lv_label_set_text(fields[i], "-");
+        ui_set_text(fields[i], "-");
     }
 
     // Symbol-Icons mittig ueber jedem der 4 Zusatzfelder (Batterie/Gaspedal/
@@ -2599,7 +2671,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_bg_opa(back_btn, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(back_btn, back_to_multi_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, "Zurueck");
+    ui_set_text(back_lbl, "Zurueck");
     lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
     lv_obj_center(back_lbl);
 
@@ -2609,7 +2681,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_bg_opa(btn_src_mcp, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(btn_src_mcp, src_mcp_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *src_mcp_lbl = lv_label_create(btn_src_mcp);
-    lv_label_set_text(src_mcp_lbl, "MCP");
+    ui_set_text(src_mcp_lbl, "MCP");
     lv_obj_set_style_text_color(src_mcp_lbl, lv_color_white(), 0);
     lv_obj_center(src_mcp_lbl);
 
@@ -2619,7 +2691,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     lv_obj_set_style_bg_opa(btn_src_ble, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(btn_src_ble, src_ble_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *src_ble_lbl = lv_label_create(btn_src_ble);
-    lv_label_set_text(src_ble_lbl, "BLE OBD");
+    ui_set_text(src_ble_lbl, "BLE OBD");
     lv_obj_set_style_text_color(src_ble_lbl, lv_color_white(), 0);
     lv_obj_center(src_ble_lbl);
 
@@ -2631,7 +2703,7 @@ void BMW_UI_Init(lv_obj_t *demo_screen)
     // wieder abschalten, ohne erst per Doppeltipp in die Einstellungen zu muessen.
     // Mittig unter der Button-Reihe, innerhalb der runden Displayaussparung.
     lv_obj_t *demo_style_label = lv_label_create(scr_demo);
-    lv_label_set_text(demo_style_label, "BMW Style");
+    ui_set_text(demo_style_label, "BMW Style");
     lv_obj_set_style_text_color(demo_style_label, lv_color_white(), 0);
     lv_obj_align(demo_style_label, LV_ALIGN_TOP_MID, -34, 95);
 
@@ -2707,8 +2779,8 @@ void BMW_UI_Update(void)
     // Grosse Ring+Nadel-Anzeige: je nach Einstellungs-Umschalter Wasser-
     // temperatur (Standard) oder Drehzahl
     float big_gauge_val = (g_multi_gauge_mode == MULTI_GAUGE_RPM) ? current_rpm : current_water_temp;
-    lv_meter_set_indicator_value(multi_meter, multi_needle, (int32_t)big_gauge_val);
-    lv_label_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
+    ui_meter_set_value(multi_meter, multi_needle, (int32_t)big_gauge_val);
+    ui_set_text_fmt(multi_speed_label, "%d", (int)current_speed_kmh);
     {
         // lv_label_set_text_fmt nutzt LVGLs eigenen (v)snprintf, der ohne
         // CONFIG_LV_SPRINTF_USE_FLOAT kein "%f" versteht und dann nur die
@@ -2720,23 +2792,23 @@ void BMW_UI_Update(void)
         char buf[16];
         if (!anim_done || obd2_bat > 0.0f) {
             snprintf(buf, sizeof(buf), "%.1fV", current_bat_voltage);
-            lv_label_set_text(multi_bat_label, buf);
-            for (int i = 0; i < 8; i++) lv_label_set_text(multi_bat_outline[i], buf);
+            ui_set_text(multi_bat_label, buf);
+            for (int i = 0; i < 8; i++) ui_set_text(multi_bat_outline[i], buf);
         } else if (use_ble_src) {
-            lv_label_set_text_fmt(multi_bat_label, "BLE: %s", BLE_OBD_status());
+            ui_set_text_fmt(multi_bat_label, "BLE: %s", BLE_OBD_status());
             for (int i = 0; i < 8; i++) {
-                lv_label_set_text_fmt(multi_bat_outline[i], "BLE: %s", BLE_OBD_status());
+                ui_set_text_fmt(multi_bat_outline[i], "BLE: %s", BLE_OBD_status());
             }
         } else {
-            lv_label_set_text(multi_bat_label, "-");
-            for (int i = 0; i < 8; i++) lv_label_set_text(multi_bat_outline[i], "-");
+            ui_set_text(multi_bat_label, "-");
+            for (int i = 0; i < 8; i++) ui_set_text(multi_bat_outline[i], "-");
         }
     }
-    lv_label_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
-    lv_label_set_text_fmt(multi_rpm_label, "%d", (int)current_rpm);
-    lv_label_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
-    lv_obj_set_style_text_color(multi_water_label,
-        current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white(), 0);
+    ui_set_text_fmt(multi_throttle_label, "%d%%", (int)current_throttle_pct);
+    ui_set_text_fmt(multi_rpm_label, "%d", (int)current_rpm);
+    ui_set_text_fmt(multi_water_label, "%d\xC2\xB0""C", (int)current_water_temp);
+    ui_set_text_color(multi_water_label,
+        current_water_temp >= 110.0f ? lv_palette_main(LV_PALETTE_ORANGE) : lv_color_white());
 
     // Warnsummer ab 120 Grad Kuehlmitteltemperatur, im Einstellungs-Screen
     // "Funktionen" ein-/ausschaltbar. g_buzzer_active verhindert wiederholte
@@ -2757,7 +2829,7 @@ void BMW_UI_Update(void)
     {
         static bool last_sntp_busy = false;
         bool sntp_busy = SNTP_Sync_IsBusy();
-        lv_label_set_text(hotspot_status_label, SNTP_Sync_Status());
+        ui_set_text(hotspot_status_label, SNTP_Sync_Status());
         if (last_sntp_busy && !sntp_busy) {
             lv_obj_clear_state(hotspot_switch, LV_STATE_CHECKED);
         }
@@ -2771,15 +2843,15 @@ void BMW_UI_Update(void)
         static bool last_format_busy = false;
         bool format_busy = s_sd_format_busy;
         if (last_format_busy && !format_busy) {
-            lv_label_set_text(sd_format_status_label, s_sd_format_ok ? "Fertig" : "Fehler!");
+            ui_set_text(sd_format_status_label, s_sd_format_ok ? "Fertig" : "Fehler!");
         }
         last_format_busy = format_busy;
     }
 
     for (int i = 0; i < 8; i++) {
-        lv_label_set_text_fmt(multi_throttle_outline[i], "%d%%", (int)current_throttle_pct);
-        lv_label_set_text_fmt(multi_rpm_outline[i], "%d", (int)current_rpm);
-        lv_label_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
+        ui_set_text_fmt(multi_throttle_outline[i], "%d%%", (int)current_throttle_pct);
+        ui_set_text_fmt(multi_rpm_outline[i], "%d", (int)current_rpm);
+        ui_set_text_fmt(multi_water_outline[i], "%d\xC2\xB0""C", (int)current_water_temp);
     }
 
     // RX/TX-Punkte: erscheinen nach dem ersten empfangenen Datum, leuchten
@@ -2790,13 +2862,13 @@ void BMW_UI_Update(void)
     bool show_dots = use_ble_src && rx_ms != 0;
     for (int i = 0; i < 2; i++) {
         lv_obj_t *dot = i == 0 ? multi_rx_dot : multi_tx_dot;
-        if (!show_dots) { lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN); continue; }
+        if (!show_dots) { ui_set_hidden(dot, true); continue; }
         uint32_t t = i == 0 ? rx_ms : tx_ms;
         bool lit = t != 0 && (now_ms - t) < ACT_DOT_FLASH_MS;
-        lv_obj_clear_flag(dot, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_bg_color(dot, lit
+        ui_set_hidden(dot, false);
+        ui_set_bg_color(dot, lit
             ? lv_palette_main(i == 0 ? LV_PALETTE_GREEN : LV_PALETTE_RED)
-            : lv_palette_darken(i == 0 ? LV_PALETTE_GREEN : LV_PALETTE_RED, 4), 0);
+            : lv_palette_darken(i == 0 ? LV_PALETTE_GREEN : LV_PALETTE_RED, 4));
     }
 
     // Datenlogging auf SD-Karte (CSV-Zeile alle LOG_INTERVAL_MS)
@@ -2822,7 +2894,7 @@ void BMW_UI_Update(void)
             fclose(log_file);
             log_file = NULL;
             SD_HandleIoError();
-            lv_label_set_text(log_status_label, "SD-Fehler!");
+            ui_set_text(log_status_label, "SD-Fehler!");
             if (log_switch) lv_obj_clear_state(log_switch, LV_STATE_CHECKED);
             g_datalog_enabled = false;
             bmw_settings_save();
@@ -2832,9 +2904,9 @@ void BMW_UI_Update(void)
     // Fehlercode-Liste auf dem DTC-Screen aktualisieren
     int dtc_count = use_ble_src ? BLE_OBD_dtc_count() : CAN_OBD2_dtc_count();
     if (dtc_count < 0) {
-        lv_label_set_text(dtc_list_label, "Noch nicht ausgelesen");
+        ui_set_text(dtc_list_label, "Noch nicht ausgelesen");
     } else if (dtc_count == 0) {
-        lv_label_set_text(dtc_list_label, "Keine Fehler gespeichert");
+        ui_set_text(dtc_list_label, "Keine Fehler gespeichert");
     } else {
         char buf[8 * 7 + 1] = {0};
         int pos = 0;
@@ -2843,7 +2915,7 @@ void BMW_UI_Update(void)
             if (!code) break;
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%s", i > 0 ? "\n" : "", code);
         }
-        lv_label_set_text(dtc_list_label, buf);
+        ui_set_text(dtc_list_label, buf);
     }
 
     // Sensoren-Screen: Lambda/Ansaugdruck/Ladedruck/Oel-Temp/MIL leben,
@@ -2865,43 +2937,43 @@ void BMW_UI_Update(void)
             bool mil_on = use_ble_src ? BLE_OBD_mil_on() : CAN_OBD2_mil_on();
 
             snprintf(sbuf, sizeof(sbuf), "%.2f", l1r);
-            lv_label_set_text(sens_lambda1_val, sbuf);
+            ui_set_text(sens_lambda1_val, sbuf);
             snprintf(sbuf, sizeof(sbuf), "%.2f", l2r);
-            lv_label_set_text(sens_lambda2_val, sbuf);
+            ui_set_text(sens_lambda2_val, sbuf);
             snprintf(sbuf, sizeof(sbuf), "%.2fV", l1v);
-            lv_label_set_text(sens_lambda1_volt_val, sbuf);
+            ui_set_text(sens_lambda1_volt_val, sbuf);
             snprintf(sbuf, sizeof(sbuf), "%.2fV", l2v);
-            lv_label_set_text(sens_lambda2_volt_val, sbuf);
+            ui_set_text(sens_lambda2_volt_val, sbuf);
             snprintf(sbuf, sizeof(sbuf), "%.0f kPa", map_kpa);
-            lv_label_set_text(sens_map_val, sbuf);
+            ui_set_text(sens_map_val, sbuf);
 
             if (boost_kpa <= -1.0f) {
-                lv_label_set_text(sens_boost_val, "n/v");
+                ui_set_text(sens_boost_val, "n/v");
             } else {
                 snprintf(sbuf, sizeof(sbuf), "%+.0f kPa", boost_kpa);
-                lv_label_set_text(sens_boost_val, sbuf);
+                ui_set_text(sens_boost_val, sbuf);
             }
 
             if (oil_c <= -900.0f) {
-                lv_label_set_text(sens_oil_val, "n/v");
+                ui_set_text(sens_oil_val, "n/v");
             } else {
                 snprintf(sbuf, sizeof(sbuf), "%d\xC2\xB0""C", (int)oil_c);
-                lv_label_set_text(sens_oil_val, sbuf);
+                ui_set_text(sens_oil_val, sbuf);
             }
 
-            lv_label_set_text(sens_mil_val, mil_on ? "AN" : "AUS");
-            lv_obj_set_style_text_color(sens_mil_val,
-                mil_on ? lv_color_make(230, 50, 50) : lv_color_make(80, 200, 100), 0);
+            ui_set_text(sens_mil_val, mil_on ? "AN" : "AUS");
+            ui_set_text_color(sens_mil_val,
+                mil_on ? lv_color_make(230, 50, 50) : lv_color_make(80, 200, 100));
         } else {
-            lv_label_set_text(sens_lambda1_val, "---");
-            lv_label_set_text(sens_lambda2_val, "---");
-            lv_label_set_text(sens_lambda1_volt_val, "---");
-            lv_label_set_text(sens_lambda2_volt_val, "---");
-            lv_label_set_text(sens_map_val, "---");
-            lv_label_set_text(sens_boost_val, "---");
-            lv_label_set_text(sens_oil_val, "---");
-            lv_label_set_text(sens_mil_val, "---");
-            lv_obj_set_style_text_color(sens_mil_val, lv_color_white(), 0);
+            ui_set_text(sens_lambda1_val, "---");
+            ui_set_text(sens_lambda2_val, "---");
+            ui_set_text(sens_lambda1_volt_val, "---");
+            ui_set_text(sens_lambda2_volt_val, "---");
+            ui_set_text(sens_map_val, "---");
+            ui_set_text(sens_boost_val, "---");
+            ui_set_text(sens_oil_val, "---");
+            ui_set_text(sens_mil_val, "---");
+            ui_set_text_color(sens_mil_val, lv_color_white());
         }
     }
 
@@ -2936,8 +3008,7 @@ void BMW_UI_Update(void)
         // Nur bei tatsaechlicher Aenderung setzen - jeder Style-Setter
         // invalidiert das Objekt und loest einen Redraw aus.
         lv_color_t col = rpm_blink ? lv_palette_main(LV_PALETTE_RED) : rpm_box_col[i];
-        if (lv_obj_get_style_bg_color(rpm_boxes[i], 0).full != col.full)
-            lv_obj_set_style_bg_color(rpm_boxes[i], col, 0);
+        ui_set_bg_color(rpm_boxes[i], col);
         if (lv_obj_get_style_bg_opa(rpm_boxes[i], 0) != opa)
             lv_obj_set_style_bg_opa(rpm_boxes[i], opa, 0);
     }
@@ -2984,9 +3055,7 @@ void BMW_UI_Update(void)
         float dy = BMW_TEMP_ARC_CY + BMW_TEMP_ARC_R * sinf(th) - BMW_WATER_PIVOT_Y;
         int32_t needle_angle = (int32_t)lroundf(atan2f(dy, dx) * 180.0f / (float)M_PI) - 90;
         while (needle_angle < 0) needle_angle += 360;
-        if (multi_bmw_water_needle->end_value != needle_angle) {
-            lv_meter_set_indicator_value(multi_bmw_water_meter, multi_bmw_water_needle, needle_angle);
-        }
+        ui_meter_set_value(multi_bmw_water_meter, multi_bmw_water_needle, needle_angle);
 
         // Farbring auf der gedruckten Skala: waechst vom linken Ende (0 Grad)
         // im Uhrzeigersinn-Gegenrichtung bis zur aktuellen Temperatur - Blau
@@ -2994,7 +3063,7 @@ void BMW_UI_Update(void)
         // lv_draw_arc() zeichnet von start nach end im Uhrzeigersinn, deshalb
         // start = Winkel der aktuellen Temperatur (rechts), end = linkes Ende.
         // Nur bei tatsaechlicher Aenderung setzen - jede Invalidierung loest
-        // bei full_refresh einen kompletten Frame aus.
+        // einen Redraw des betroffenen Bogenstuecks aus.
         {
             float t = current_water_temp;
             float seg_from[3] = {0.0f, (float)MULTI_WATER_RING_ORANGE_AT, (float)MULTI_WATER_RING_RED_AT};
@@ -3054,18 +3123,15 @@ void BMW_UI_Update(void)
         float t = current_water_temp;
         float blue_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
         if (blue_end < MULTI_WATER_SCALE_MIN) blue_end = MULTI_WATER_SCALE_MIN;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_blue, WMIR(blue_end));
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_blue, WMIR(MULTI_WATER_SCALE_MIN));
+        ui_meter_set_range(multi_meter, multi_water_inner_blue, WMIR(blue_end), WMIR(MULTI_WATER_SCALE_MIN));
 
         float orange_end = t < (float)MULTI_WATER_RING_RED_AT ? t : (float)MULTI_WATER_RING_RED_AT;
         if (orange_end < (float)MULTI_WATER_RING_ORANGE_AT) orange_end = (float)MULTI_WATER_RING_ORANGE_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_orange, WMIR(orange_end));
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_orange, WMIR(MULTI_WATER_RING_ORANGE_AT));
+        ui_meter_set_range(multi_meter, multi_water_inner_orange, WMIR(orange_end), WMIR(MULTI_WATER_RING_ORANGE_AT));
 
         float red_end = t > MULTI_WATER_SCALE_MAX ? MULTI_WATER_SCALE_MAX : t;
         if (red_end < (float)MULTI_WATER_RING_RED_AT) red_end = (float)MULTI_WATER_RING_RED_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_water_inner_red, WMIR(red_end));
-        lv_meter_set_indicator_end_value(multi_meter, multi_water_inner_red, WMIR(MULTI_WATER_RING_RED_AT));
+        ui_meter_set_range(multi_meter, multi_water_inner_red, WMIR(red_end), WMIR(MULTI_WATER_RING_RED_AT));
     }
 
     // Farbring: waechst von aussen entlang der Skalenteilstriche mit.
@@ -3074,23 +3140,20 @@ void BMW_UI_Update(void)
     // davor), ab 115 Grad Rot. Drehzahl-Modus: dieselbe Logik auf die
     // 0-8000 U/min-Skala uebertragen, Orange ab 6500, Rot ab 6900 U/min.
     if (g_multi_gauge_mode == MULTI_GAUGE_WATER) {
-        multi_ring_red->opa = LV_OPA_COVER;  // evtl. vom RPM-Ringblinken uebrig
+        ui_meter_set_opa(multi_meter, multi_ring_red, LV_OPA_COVER);  // evtl. vom RPM-Ringblinken uebrig
 
         float t = current_water_temp;
         float yellow_end = t < (float)MULTI_WATER_RING_ORANGE_AT ? t : (float)MULTI_WATER_RING_ORANGE_AT;
         if (yellow_end < MULTI_WATER_SCALE_MIN) yellow_end = MULTI_WATER_SCALE_MIN;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+        ui_meter_set_range(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN, (int32_t)yellow_end);
 
         float orange_end = t < (float)MULTI_WATER_RING_RED_AT ? t : (float)MULTI_WATER_RING_RED_AT;
         if (orange_end < (float)MULTI_WATER_RING_ORANGE_AT) orange_end = (float)MULTI_WATER_RING_ORANGE_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, (int32_t)orange_end);
+        ui_meter_set_range(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT, (int32_t)orange_end);
 
         float red_end = t > MULTI_WATER_SCALE_MAX ? MULTI_WATER_SCALE_MAX : t;
         if (red_end < (float)MULTI_WATER_RING_RED_AT) red_end = (float)MULTI_WATER_RING_RED_AT;
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, (int32_t)red_end);
+        ui_meter_set_range(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT, (int32_t)red_end);
     } else if (g_multi_gauge_mode == MULTI_GAUGE_RPM) {
         float t = current_rpm;
         if (rpm_blink) {
@@ -3099,36 +3162,27 @@ void BMW_UI_Update(void)
             // werden dafuer auf Null-Laenge gesetzt, Rot deckt den ganzen
             // Skalenbereich ab und wird im gemeinsamen Takt (rpm_blink_state,
             // siehe Schaltanzeige oben) ein-/ausgeblendet.
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, 0);
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, 0);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, 0);
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, 0);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, 8000);
+            ui_meter_set_range(multi_meter, multi_ring_yellow, 0, 0);
+            ui_meter_set_range(multi_meter, multi_ring_orange, 0, 0);
+            ui_meter_set_range(multi_meter, multi_ring_red, 0, 8000);
 
-            multi_ring_red->opa = rpm_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP;
+            ui_meter_set_opa(multi_meter, multi_ring_red, rpm_blink_state ? LV_OPA_COVER : LV_OPA_TRANSP);
         } else {
-            multi_ring_red->opa = LV_OPA_COVER;
+            ui_meter_set_opa(multi_meter, multi_ring_red, LV_OPA_COVER);
 
             float yellow_end = t < 0.0f ? 0.0f : t;
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, 0);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, (int32_t)yellow_end);
+            ui_meter_set_range(multi_meter, multi_ring_yellow, 0, (int32_t)yellow_end);
 
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT);
+            ui_meter_set_range(multi_meter, multi_ring_orange, MULTI_RPM_RING_ORANGE_AT, MULTI_RPM_RING_ORANGE_AT);
 
-            lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
-            lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT);
+            ui_meter_set_range(multi_meter, multi_ring_red, MULTI_RPM_RING_RED_AT, MULTI_RPM_RING_RED_AT);
         }
     } else {
-        multi_ring_red->opa = LV_OPA_COVER;  // evtl. vom RPM-Ringblinken uebrig
+        ui_meter_set_opa(multi_meter, multi_ring_red, LV_OPA_COVER);  // evtl. vom RPM-Ringblinken uebrig
 
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN);
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT);
-        lv_meter_set_indicator_start_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
-        lv_meter_set_indicator_end_value(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT);
+        ui_meter_set_range(multi_meter, multi_ring_yellow, MULTI_WATER_SCALE_MIN, MULTI_WATER_SCALE_MIN);
+        ui_meter_set_range(multi_meter, multi_ring_orange, MULTI_WATER_RING_ORANGE_AT, MULTI_WATER_RING_ORANGE_AT);
+        ui_meter_set_range(multi_meter, multi_ring_red, MULTI_WATER_RING_RED_AT, MULTI_WATER_RING_RED_AT);
     }
 
     // Streifen-2/MCP2515-Konflikt kann sich aendern, waehrend der LED-Screen

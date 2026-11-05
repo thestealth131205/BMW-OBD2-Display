@@ -404,9 +404,11 @@ esp_err_t ST7701S_CS_Dis(void)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+bool LVGL_NotifyVsyncFromISR(void); // LVGL_Driver.c
+
 static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
 {
-    BaseType_t high_task_awoken = pdFALSE;
+    BaseType_t high_task_awoken = LVGL_NotifyVsyncFromISR() ? pdTRUE : pdFALSE;
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
     if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
         xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
