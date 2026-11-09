@@ -31,8 +31,9 @@ SemaphoreHandle_t sem_gui_ready;
 // gewartet und danach genau diese Bereiche in den anderen Framebuffer
 // kopiert, damit beide wieder denselben Inhalt haben und beim naechsten
 // Frame nichts Altes aufblitzt (gleiches Verfahren wie esp_lvgl_port).
-// Bei aktiver Display-Drehung (s_rot_deg != 0) wird weiterhin full_refresh
-// benutzt, weil dort ohnehin jedes Bild komplett gedreht werden muss.
+// Bei aktiver Display-Drehung (s_rot_deg != 0) rendert LVGL ebenfalls nur
+// die geaenderten Bereiche (in den Drehpuffer), gedreht werden nur deren
+// Zielbereiche (siehe example_lvgl_flush_cb()).
 static SemaphoreHandle_t s_sem_vsync = NULL;
 
 bool LVGL_NotifyVsyncFromISR(void)
@@ -64,18 +65,27 @@ static void sync_dirty_areas(uint16_t *dst, const uint16_t *src)
 // --- Display-Drehung um beliebige Winkel (Ausgleich einer schief montierten
 // Halterung, siehe LVGL_SetRotation()) ---
 // LVGL 8 kann nur 0/90/180/270 Grad drehen. Fuer freie Winkel rendert LVGL
-// bei aktiver Drehung in einen eigenen Vollbild-Puffer (s_rot_src, PSRAM),
-// den example_lvgl_flush_cb() per Rueckwaerts-Abbildung (naechster Nachbar,
-// 16.16-Festkomma) gedreht in den gerade nicht angezeigten Panel-Framebuffer
-// kopiert und diesen dann anzeigt. Nur Pixel innerhalb des runden Panels
-// (Radius 240) werden berechnet. Bei 0 Grad rendert LVGL wie bisher direkt
-// in die Panel-Framebuffer - dann kostet die Funktion nichts.
+// bei aktiver Drehung (direct_mode, ein Puffer) nur die geaenderten Bereiche
+// in einen eigenen Vollbild-Puffer (s_rot_src, PSRAM), der so immer das
+// komplette ungedrehte Bild enthaelt. example_lvgl_flush_cb() dreht davon per
+// Rueckwaerts-Abbildung (naechster Nachbar, 16.16-Festkomma) nur die
+// Zielbereiche der geaenderten Flaechen in den gerade nicht angezeigten
+// Panel-Framebuffer, zeigt diesen an und gleicht danach dieselben Bereiche
+// in den anderen Framebuffer ab. Bis v1.0.87 wurde bei aktiver Drehung bei
+// jeder Kleinigkeit das komplette Bild neu gerendert UND komplett gedreht -
+// das hat den LVGL-Task (und damit Touch/Doppeltipp) blockiert. Nur Pixel
+// innerhalb des runden Panels (Radius 240) werden berechnet. Bei 0 Grad
+// rendert LVGL wie bisher direkt in die Panel-Framebuffer.
 static int16_t s_rot_deg = 0;
 static float s_rot_cos = 1.0f, s_rot_sin = 0.0f;
 static lv_color_t *s_rot_src = NULL;
 static void *s_fb[2] = {NULL, NULL};
 static void *s_fb_shown = NULL;
 static uint16_t s_row_half[EXAMPLE_LCD_V_RES]; // halbe sichtbare Zeilenbreite des runden Panels
+
+// Gedrehte Zielbereiche eines Frames (Bounding-Box je geaenderter Flaeche)
+#define ROT_MAX_RECTS LV_INV_BUF_SIZE
+static lv_area_t s_rot_rects[ROT_MAX_RECTS];
 
 // Bildschirmpunkt (physisch) -> LVGL-Koordinate: Drehung um -s_rot_deg um
 // die Bildschirmmitte (positive Winkel = Inhalt im Uhrzeigersinn gedreht).
@@ -85,17 +95,18 @@ static inline void rot_inverse(float dx, float dy, float *sx, float *sy)
     *sy = -s_rot_sin * dx + s_rot_cos * dy;
 }
 
-static void rotate_frame(uint16_t *dst, const uint16_t *src)
+// Nur den Zielbereich r (physische Koordinaten, inklusive) drehen
+static void rotate_rect(uint16_t *dst, const uint16_t *src, const lv_area_t *r)
 {
     const int W = EXAMPLE_LCD_H_RES, H = EXAMPLE_LCD_V_RES;
     const float c = (W - 1) * 0.5f;
     const int32_t step_x = (int32_t)lroundf(s_rot_cos * 65536.0f);
     const int32_t step_y = (int32_t)lroundf(-s_rot_sin * 65536.0f);
-    for (int y = 0; y < H; y++) {
+    for (int y = r->y1; y <= r->y2; y++) {
         int half = s_row_half[y];
         int x0 = (W / 2) - half, x1 = (W / 2) + half;
-        if (x0 < 0) x0 = 0;
-        if (x1 > W) x1 = W;
+        if (x0 < r->x1) x0 = r->x1;
+        if (x1 > r->x2 + 1) x1 = r->x2 + 1;
         if (x0 >= x1) continue;
         float sxf, syf;
         rot_inverse((float)x0 - c, (float)y - c, &sxf, &syf);
@@ -110,6 +121,48 @@ static void rotate_frame(uint16_t *dst, const uint16_t *src)
             sy += step_y;
         }
     }
+}
+
+// Geaenderte LVGL-Bereiche (ungedreht) -> Bounding-Boxen ihrer gedrehten
+// Position auf dem Panel. Rueckgabe: Anzahl Rechtecke, 0 = komplettes Bild
+// drehen (zu viele/zu grosse Bereiche, dann ist ein Durchlauf guenstiger).
+static int collect_rot_rects(void)
+{
+    lv_disp_t *d = _lv_refr_get_disp_refreshing();
+    if (d == NULL) return 0;
+    const int W = EXAMPLE_LCD_H_RES, H = EXAMPLE_LCD_V_RES;
+    const float c = (W - 1) * 0.5f;
+    int n = 0;
+    int32_t px_sum = 0;
+    for (int i = 0; i < d->inv_p; i++) {
+        if (d->inv_area_joined[i]) continue;
+        const lv_area_t *a = &d->inv_areas[i];
+        float min_x = 1e9f, min_y = 1e9f, max_x = -1e9f, max_y = -1e9f;
+        const float cx[4] = {a->x1, a->x2, a->x1, a->x2};
+        const float cy[4] = {a->y1, a->y1, a->y2, a->y2};
+        for (int k = 0; k < 4; k++) {
+            // Vorwaerts-Drehung (Umkehrung von rot_inverse())
+            float sx = cx[k] - c, sy = cy[k] - c;
+            float dx = s_rot_cos * sx - s_rot_sin * sy + c;
+            float dy = s_rot_sin * sx + s_rot_cos * sy + c;
+            if (dx < min_x) min_x = dx;
+            if (dx > max_x) max_x = dx;
+            if (dy < min_y) min_y = dy;
+            if (dy > max_y) max_y = dy;
+        }
+        // 2 px Rand fuer die Rundung auf den naechsten Quellpixel
+        lv_area_t r;
+        r.x1 = (lv_coord_t)LV_MAX(0, (int)floorf(min_x) - 2);
+        r.y1 = (lv_coord_t)LV_MAX(0, (int)floorf(min_y) - 2);
+        r.x2 = (lv_coord_t)LV_MIN(W - 1, (int)ceilf(max_x) + 2);
+        r.y2 = (lv_coord_t)LV_MIN(H - 1, (int)ceilf(max_y) + 2);
+        if (r.x1 > r.x2 || r.y1 > r.y2) continue;
+        if (n >= ROT_MAX_RECTS) return 0;
+        px_sum += lv_area_get_size(&r);
+        if (px_sum > (W * H) / 2) return 0;
+        s_rot_rects[n++] = r;
+    }
+    return n;
 }
 
 int16_t LVGL_GetRotation(void)
@@ -145,11 +198,12 @@ bool LVGL_SetRotation(int16_t deg)
     s_rot_deg = deg;
 
     if (deg != 0 && !was_rotated) {
-        // LVGL ab jetzt in den eigenen Vollbild-Puffer rendern lassen - das
-        // gedrehte Bild braucht immer den kompletten Frame (full_refresh)
+        // LVGL ab jetzt in den eigenen Vollbild-Puffer rendern lassen, weiter
+        // im Teil-Redraw (direct_mode). Das folgende lv_obj_invalidate()
+        // zeichnet den ersten Frame komplett in den Drehpuffer.
         lv_disp_draw_buf_init(&disp_buf, s_rot_src, NULL, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-        disp_drv.direct_mode = false;
-        disp_drv.full_refresh = true;
+        disp_drv.full_refresh = false;
+        disp_drv.direct_mode = true;
     } else if (deg == 0 && was_rotated) {
         // Zurueck auf direktes Rendern in die Panel-Framebuffer - zuerst in
         // den gerade NICHT angezeigten, sonst sieht man den Aufbau kurz.
@@ -161,6 +215,8 @@ bool LVGL_SetRotation(int16_t deg)
         disp_drv.full_refresh = false;
         disp_drv.direct_mode = true;
     }
+    // Auch bei reinem Winkelwechsel (z. B. +1 Grad) muss das ganze Bild neu
+    // gedreht werden - Vollbild-Invalidierung erzwingt das
     lv_obj_invalidate(lv_scr_act());
     return true;
 #else
@@ -174,10 +230,36 @@ void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
 #if CONFIG_EXAMPLE_DOUBLE_FB
     if (s_rot_src != NULL && color_map == s_rot_src) {
-        // full_refresh: color_map ist immer das komplette Bild
+        // Gedrehter Teil-Redraw: color_map (Drehpuffer) enthaelt immer das
+        // komplette ungedrehte Bild, erst nach dem letzten Bereich drehen
+        if (!lv_disp_flush_is_last(drv)) {
+            lv_disp_flush_ready(drv);
+            return;
+        }
         uint16_t *dst = (uint16_t *)((s_fb_shown == s_fb[0]) ? s_fb[1] : s_fb[0]);
-        rotate_frame(dst, (const uint16_t *)color_map);
+        uint16_t *other = (uint16_t *)((dst == s_fb[0]) ? s_fb[1] : s_fb[0]);
+        int n = collect_rot_rects();
+        if (n == 0) {
+            s_rot_rects[0].x1 = 0;
+            s_rot_rects[0].y1 = 0;
+            s_rot_rects[0].x2 = EXAMPLE_LCD_H_RES - 1;
+            s_rot_rects[0].y2 = EXAMPLE_LCD_V_RES - 1;
+            n = 1;
+        }
+        for (int i = 0; i < n; i++) {
+            rotate_rect(dst, (const uint16_t *)color_map, &s_rot_rects[i]);
+        }
+        xSemaphoreTake(s_sem_vsync, 0);
         esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, dst);
+        xSemaphoreTake(s_sem_vsync, pdMS_TO_TICKS(50));
+        // Dieselben Zielbereiche in den anderen Framebuffer uebernehmen
+        for (int i = 0; i < n; i++) {
+            const lv_area_t *r = &s_rot_rects[i];
+            const size_t row_bytes = (size_t)(r->x2 - r->x1 + 1) * sizeof(uint16_t);
+            for (int y = r->y1; y <= r->y2; y++) {
+                memcpy(other + y * EXAMPLE_LCD_H_RES + r->x1, dst + y * EXAMPLE_LCD_H_RES + r->x1, row_bytes);
+            }
+        }
         s_fb_shown = dst;
         lv_disp_flush_ready(drv);
         return;
